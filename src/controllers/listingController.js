@@ -1,4 +1,4 @@
-const { createListingRecord, ListingLimitError } = require('../services/listingService');
+const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
 
 /**
  * Inserts a new real estate listing asset safely scoped inside the active
@@ -165,13 +165,7 @@ async function updateListing(req, res) {
       .returning(['id', 'title', 'status', 'raw_address', 'public_slug']);
 
     if (addressChanged) {
-      await geoEnrichmentQueue.add('enrich-property-coords', {
-        listingId: updated.id,
-        rawAddress: updated.raw_address,
-      }, {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 2000 },
-      });
+      await enqueueGeoEnrichment({ listingId: updated.id, rawAddress: updated.raw_address });
     }
 
     return res.status(200).json({

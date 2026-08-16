@@ -87,16 +87,34 @@ async function createListingRecord(knex, {
     })
     .returning(['id', 'title', 'public_slug', 'status']);
 
-  await geoEnrichmentQueue.add('enrich-property-coords', {
-    listingId: newListing.id,
-    rawAddress: rawAddress.trim(),
-    draftId, // undefined for dashboard-created listings — geoEnrichmentWorker treats that as a no-op
-  }, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 2000 }
-  });
+  await enqueueGeoEnrichment({ listingId: newListing.id, rawAddress: rawAddress.trim(), draftId });
 
   return newListing;
 }
 
-module.exports = { createListingRecord, ListingLimitError };
+/**
+ * Queues (or re-queues, e.g. after an address edit) the geo-enrichment job.
+ * Exported so every call site that needs to (re)trigger enrichment —
+ * createListingRecord above, listingController.js's updateListing (PATCH),
+ * and agentIntakeWorker.js's correction-with-address-change path — shares
+ * one Queue instance and one payload shape, instead of copies that can
+ * silently drift apart. (This is exactly what happened here: PR #4's
+ * updateListing was written against a geoEnrichmentQueue constant that
+ * used to live directly in listingController.js — that constant stopped
+ * existing once createListing was extracted into this file, leaving
+ * updateListing calling an undefined variable. Caught by hand, not by
+ * `node --check`, since referencing an undeclared identifier is only a
+ * runtime ReferenceError, not a syntax error.)
+ */
+async function enqueueGeoEnrichment({ listingId, rawAddress, draftId }) {
+  await geoEnrichmentQueue.add('enrich-property-coords', {
+    listingId,
+    rawAddress,
+    draftId, // undefined outside the WhatsApp agent-intake flow — geoEnrichmentWorker treats that as a no-op
+  }, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 }
+  });
+}
+
+module.exports = { createListingRecord, enqueueGeoEnrichment, ListingLimitError };

@@ -3,7 +3,7 @@ const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
 const { handleAgentIntakeMessage } = require('./agentIntakeController');
 
-// Same fail-fast rationale as listingController.js's geoEnrichmentQueue —
+// Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
 // worker, so it shouldn't hang indefinitely on a Redis blip.
 const redisConnection = {

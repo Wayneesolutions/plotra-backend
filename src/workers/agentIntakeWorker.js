@@ -5,19 +5,18 @@
 // inverted: extracting structured fields FROM an agent's freeform WhatsApp
 // text instead of generating a reply FROM database facts. Same "never
 // invent, only use what's actually there" constraint either way.
-const { Worker, Queue } = require('bullmq');
+const { Worker } = require('bullmq');
 const IORedis = require('ioredis');
 const axios = require('axios');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
-const { createListingRecord, ListingLimitError } = require('../services/listingService');
+const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
 const redisConnection = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRetriesPerRequest: null }); // required by BullMQ Worker (blocking commands) — omitting this throws on boot
-const geoEnrichmentQueue = new Queue('geo-enrichment', { connection: redisConnection });
 
 console.log(`[Worker Engine] Initializing Agent WhatsApp Listing Intake Processor...`);
 
@@ -240,14 +239,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     extracted_fields: JSON.stringify(merged),
     updated_at: knex.fn.now(),
   });
-  await geoEnrichmentQueue.add('enrich-property-coords', {
-    listingId: draft.listing_id,
-    rawAddress: merged.raw_address,
-    draftId,
-  }, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 2000 },
-  });
+  await enqueueGeoEnrichment({ listingId: draft.listing_id, rawAddress: merged.raw_address, draftId });
 
   return { success: true, corrected: true, reGeocoded: true };
 }, { connection: redisConnection });
