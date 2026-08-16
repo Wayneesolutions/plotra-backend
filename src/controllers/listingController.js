@@ -1,95 +1,30 @@
-const crypto = require('crypto');
-const { Queue } = require('bullmq');
-
-// Initialize access queue pointing at our background Redis worker instance.
-// maxRetriesPerRequest/retryStrategy/connectTimeout: this is a job
-// *producer* (adding jobs from an HTTP request), not the worker that
-// consumes them — if Redis has a brief outage, a request creating a
-// listing should fail fast with a clear error, not hang indefinitely
-// waiting for ioredis's default unlimited reconnect retries. The actual
-// worker process (geoEnrichmentWorker.js) should and does keep its own
-// persistent, long-retry connection — this fix is scoped to producers only.
-const geoEnrichmentQueue = new Queue('geo-enrichment', {
-  connection: {
-    host: process.env.REDIS_HOST || '127.0.0.1',
-    port: 6379,
-    maxRetriesPerRequest: 1,
-    retryStrategy: () => null,
-    connectTimeout: 3000,
-  }
-});
+const { createListingRecord, ListingLimitError } = require('../services/listingService');
 
 /**
- * Inserts a new real estate listing asset safely scoped inside the active tenant space.
- * Dispatches an asynchronous geocoding and visual aggregation job via BullMQ.
+ * Inserts a new real estate listing asset safely scoped inside the active
+ * tenant space, via the shared listingService (also used by
+ * agentIntakeWorker.js for WhatsApp-originated listings — see that file for
+ * the source: 'whatsapp' path). Dispatches an asynchronous geocoding and
+ * visual aggregation job via BullMQ.
  */
 async function createListing(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-
-  // Extract contextual identity injected previously by our authGuard middleware
   const { tenant_id, id: userId } = req.user;
-  
   const { title, raw_address, price, plot_area, property_type, description } = req.body;
 
-  // 1. Structural Parameter Validation Checks
-  if (!title || !raw_address || !price || !property_type) {
-    return res.status(400).json({
-      error: { code: 'VALIDATION_ERROR', message: 'Title, raw address, price, and property type are required fields.' }
-    });
-  }
-
   try {
-    // FIX (gap #5 — listing limits not enforced): plan limits existed only
-    // as a number shown on the pricing page — nothing ever checked a
-    // tenant's actual listing count against it, so a starter-plan tenant
-    // could create unlimited listings same as an unlimited-plan one.
-    const tenant = await knex('tenants').where({ id: tenant_id }).first();
-    const plan = await knex('plans').where({ key: tenant.plan }).first();
-
-    if (plan && plan.listing_limit !== null) {
-      const [{ count }] = await knex('listings').where({ tenant_id }).count('id as count');
-      if (parseInt(count, 10) >= plan.listing_limit) {
-        return res.status(403).json({
-          error: {
-            code: 'LISTING_LIMIT_REACHED',
-            message: `Your ${plan.label} plan allows up to ${plan.listing_limit} listings. Upgrade your plan to add more.`,
-          },
-        });
-      }
-    }
-
-    // 2. Generate a highly secure, unguessable URL slug (16 random bytes to prevent guessing attacks)
-    const publicSlug = crypto.randomBytes(16).toString('hex');
-
-    // 3. Persist the database record wrapped inside our Knex client tracking system
-    const [newListing] = await knex('listings')
-      .insert({
-        tenant_id,
-        created_by: userId,
-        title: title.trim(),
-        raw_address: raw_address.trim(),
-        price: parseFloat(price),
-        plot_area: plot_area ? plot_area.trim() : null,
-        property_type: property_type.trim(),
-        description: description ? description.trim() : null,
-        public_slug: publicSlug,
-        status: 'pending' // Remains 'pending' until the background geocoder confirms coordinates
-      })
-      .returning(['id', 'title', 'public_slug', 'status']);
-
-    // 4. Offload third-party Google Maps platform API latency to BullMQ task engine
-    await geoEnrichmentQueue.add('enrich-property-coords', {
-      listingId: newListing.id,
-      rawAddress: raw_address.trim()
-    }, {
-      attempts: 3, // Automatically retry 3 times if Google API spikes or rate limits kick in
-      backoff: {
-        type: 'exponential',
-        delay: 2000 // Start with 2 second backoff floor intervals
-      }
+    const newListing = await createListingRecord(knex, {
+      tenantId: tenant_id,
+      createdBy: userId,
+      source: 'dashboard',
+      title,
+      rawAddress: raw_address,
+      price,
+      plotArea: plot_area,
+      propertyType: property_type,
+      description,
     });
 
-    // 5. Send transaction metadata back to the Dashboard UI right away
     return res.status(201).json({
       success: true,
       message: 'Base listing asset registered. Geo-enrichment pipeline triggered in the background.',
@@ -102,6 +37,12 @@ async function createListing(req, res) {
     });
 
   } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: error.message } });
+    }
+    if (error instanceof ListingLimitError) {
+      return res.status(403).json({ error: { code: 'LISTING_LIMIT_REACHED', message: error.message } });
+    }
     console.error('Failed to instantiate new transactional property row:', error);
     return res.status(500).json({
       error: { code: 'INTERNAL_ERROR', message: 'System failed to write property configuration.' }

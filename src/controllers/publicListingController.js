@@ -38,7 +38,16 @@ async function getPublicListing(req, res) {
         'tenants.business_name as dealer_business_name',
         'tenants.whatsapp_number as dealer_whatsapp_number'
       )
-      .where({ 'listings.public_slug': slug, 'listings.status': 'active' })
+      // 'awaiting_approval' included alongside 'active' so the agent who
+      // just texted this listing in via WhatsApp can view the exact same
+      // page (before approving it) that buyers will later see — see
+      // agentIntakeWorker.js's sendPreviewAndAwaitApproval. Only reachable
+      // via the exact slug (nothing lists/discovers non-active listings),
+      // and logVisit/capturePublicLead below deliberately stay
+      // 'active'-only so a pre-approval preview tap never counts as a
+      // buyer visit or creates a lead.
+      .where({ 'listings.public_slug': slug })
+      .whereIn('listings.status', ['active', 'awaiting_approval'])
       .first();
 
     if (!listing) {
