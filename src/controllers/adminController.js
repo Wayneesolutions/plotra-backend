@@ -310,6 +310,172 @@ async function listTenants(req, res) {
   }
 }
 
+/**
+ * GET /api/v1/admin/tenants/:id
+ * Fixes gap: clicking a tenant row in All Tenants rendered as plain text
+ * with no detail view at all. Returns the tenant, its owner, its listings,
+ * and a usage summary (views / leads / calculator uses) for this month.
+ */
+async function getTenantDetail(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+
+  try {
+    const tenant = await knex('tenants')
+      .leftJoin('plans', 'tenants.plan', 'plans.key')
+      .select(
+        'tenants.id', 'tenants.business_name', 'tenants.plan', 'tenants.status',
+        'tenants.whatsapp_mode', 'tenants.subscription_status', 'tenants.current_period_end',
+        'tenants.created_at',
+        'plans.label as plan_label', 'plans.price_inr as plan_price_inr'
+      )
+      .where('tenants.id', id)
+      .first();
+
+    if (!tenant) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Tenant not found.' } });
+    }
+
+    const owner = await knex('users')
+      .where({ tenant_id: id, role: 'owner' })
+      .select('id', 'name', 'email')
+      .first();
+
+    const listings = await knex('listings')
+      .leftJoin('listing_visits', 'listings.id', 'listing_visits.listing_id')
+      .select(
+        'listings.id', 'listings.title', 'listings.raw_address', 'listings.price', 'listings.status',
+        knex.raw('COUNT(listing_visits.id)::int as visit_count')
+      )
+      .where('listings.tenant_id', id)
+      .groupBy('listings.id')
+      .orderBy('listings.created_at', 'desc');
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const [{ count: viewCount }] = await knex('listing_visits')
+      .join('listings', 'listing_visits.listing_id', 'listings.id')
+      .where('listings.tenant_id', id)
+      .andWhere('listing_visits.visited_at', '>=', startOfMonth)
+      .count('listing_visits.id as count');
+
+    const [{ count: leadCount }] = await knex('leads')
+      .where({ tenant_id: id })
+      .andWhere('created_at', '>=', startOfMonth)
+      .count('id as count');
+
+    const [{ count: calcCount }] = await knex('rent_vs_buy_calculations')
+      .where({ tenant_id: id })
+      .andWhere('created_at', '>=', startOfMonth)
+      .count('id as count');
+
+    return res.status(200).json({
+      success: true,
+      tenant: {
+        id: tenant.id,
+        businessName: tenant.business_name,
+        plan: tenant.plan,
+        planLabel: tenant.plan_label,
+        planPriceINR: tenant.plan_price_inr,
+        status: tenant.status,
+        whatsappMode: tenant.whatsapp_mode,
+        subscriptionStatus: tenant.subscription_status,
+        currentPeriodEnd: tenant.current_period_end,
+        createdAt: tenant.created_at,
+      },
+      owner: owner || null,
+      listings,
+      usageThisMonth: {
+        views: parseInt(viewCount || 0),
+        leadsCapture: parseInt(leadCount || 0),
+        calculatorUses: parseInt(calcCount || 0),
+      },
+    });
+  } catch (error) {
+    console.error('Failed to fetch tenant detail:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to fetch tenant detail.' }
+    });
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/tenants/:id/status
+ * Suspend/reactivate a tenant. Suspending blocks every login for that
+ * tenant (principal/agent) until reactivated — enforced in authController's
+ * login check against tenants.status.
+ */
+async function updateTenantStatus(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  const { status } = req.body || {};
+  const ALLOWED = ['active', 'suspended', 'churned'];
+
+  if (!ALLOWED.includes(status)) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: `status must be one of: ${ALLOWED.join(', ')}.` }
+    });
+  }
+
+  try {
+    const [updated] = await knex('tenants')
+      .where({ id })
+      .update({ status, updated_at: knex.fn.now() })
+      .returning(['id', 'business_name', 'status']);
+
+    if (!updated) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Tenant not found.' } });
+    }
+
+    return res.status(200).json({ success: true, tenant: updated });
+  } catch (error) {
+    console.error('Failed to update tenant status:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to update tenant status.' }
+    });
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/tenants/:id/plan
+ * Admin-side manual plan override (e.g. a dealer paid offline, or support
+ * is comping a plan change) — separate from the tenant's own self-serve
+ * Stripe checkout in BillingModal.jsx.
+ */
+async function updateTenantPlan(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  const { plan } = req.body || {};
+
+  try {
+    const planRow = await knex('plans').where({ key: plan, is_active: true }).first();
+    if (!planRow) {
+      const available = (await knex('plans').where({ is_active: true })).map((p) => p.key).join(', ');
+      return res.status(400).json({
+        error: { code: 'VALIDATION_ERROR', message: `plan must be one of: ${available}.` }
+      });
+    }
+
+    const [updated] = await knex('tenants')
+      .where({ id })
+      .update({ plan, updated_at: knex.fn.now() })
+      .returning(['id', 'business_name', 'plan']);
+
+    if (!updated) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Tenant not found.' } });
+    }
+
+    return res.status(200).json({ success: true, tenant: updated });
+  } catch (error) {
+    console.error('Failed to update tenant plan:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to update tenant plan.' }
+    });
+  }
+}
+
 module.exports = {
   submitAccessRequest,
   listRequests,
@@ -317,4 +483,7 @@ module.exports = {
   rejectRequest,
   createTenant,
   listTenants,
+  getTenantDetail,
+  updateTenantStatus,
+  updateTenantPlan,
 };

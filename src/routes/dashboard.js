@@ -2,8 +2,9 @@ const express = require('express');
 const router = express.Router();
 const authGuard = require('../middleware/auth');
 const tenantTransaction = require('../middleware/tenantTransaction');
-const { createListing, getListings } = require('../controllers/listingController');
+const { createListing, getListings, updateListing, deleteListing } = require('../controllers/listingController');
 const { getDashboardAnalytics } = require('../controllers/analyticsController');
+const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
 const { inviteTenantUser } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
@@ -28,6 +29,20 @@ router.post('/listings', authGuard, tenantTransaction, createListing);
 router.get('/listings', authGuard, tenantTransaction, getListings);
 
 /**
+ * @route   PATCH /api/v1/dashboard/listings/:id
+ * @desc    Edit a listing's fields and/or status (active/inactive/sold)
+ * @access  Protected
+ */
+router.patch('/listings/:id', authGuard, tenantTransaction, updateListing);
+
+/**
+ * @route   DELETE /api/v1/dashboard/listings/:id
+ * @desc    Permanently delete a listing
+ * @access  Protected
+ */
+router.delete('/listings/:id', authGuard, tenantTransaction, deleteListing);
+
+/**
  * @route   PATCH /api/v1/dashboard/listings/:id/boundary
  * @desc    Save a traced plot boundary (GeoJSON) for a listing
  * @access  Protected
@@ -40,6 +55,24 @@ router.patch('/listings/:id/boundary', authGuard, tenantTransaction, updateListi
  * @access  Protected (Requires Active Agent/Owner Bearer Token)
  */
 router.get('/analytics', authGuard, tenantTransaction, getDashboardAnalytics);
+
+/**
+ * @route   GET /api/v1/dashboard/leads
+ * @desc    List every captured lead for the tenant (optionally filtered by
+ *          ?status=), each enriched with a 0-100 score and its most recent
+ *          listing. Fixes the gap where WhatsApp callback leads were saved
+ *          (see publicListingController.capturePublicLead) but never
+ *          surfaced anywhere in the dashboard.
+ * @access  Protected
+ */
+router.get('/leads', authGuard, tenantTransaction, getLeads);
+
+/**
+ * @route   PATCH /api/v1/dashboard/leads/:id/status
+ * @desc    Update a lead's status (new/contacted/qualified/closed/lost)
+ * @access  Protected
+ */
+router.patch('/leads/:id/status', authGuard, tenantTransaction, updateLeadStatus);
 
 /**
  * @route   POST /api/v1/dashboard/users/invite

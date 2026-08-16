@@ -9,6 +9,9 @@ const {
   rejectRequest,
   createTenant,
   listTenants,
+  getTenantDetail,
+  updateTenantStatus,
+  updateTenantPlan,
 } = require('../controllers/adminController');
 const {
   listAdPlacements,
@@ -55,6 +58,25 @@ router.get('/tenants', listTenants);
  * @desc    Directly create a new tenant without a request
  */
 router.post('/tenants', createTenant);
+
+/**
+ * @route   GET /api/v1/admin/tenants/:id
+ * @desc    Tenant detail drill-down — owner, listings, and this-month usage.
+ *          Fixes gap: clicking a tenant row previously did nothing.
+ */
+router.get('/tenants/:id', getTenantDetail);
+
+/**
+ * @route   PATCH /api/v1/admin/tenants/:id/status
+ * @desc    Suspend / reactivate / mark churned
+ */
+router.patch('/tenants/:id/status', updateTenantStatus);
+
+/**
+ * @route   PATCH /api/v1/admin/tenants/:id/plan
+ * @desc    Admin-side manual plan override
+ */
+router.patch('/tenants/:id/plan', updateTenantPlan);
 
 /**
  * @route   GET /api/v1/admin/ads
