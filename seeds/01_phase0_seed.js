@@ -4,7 +4,15 @@ const bcrypt = require('bcryptjs');
  * Phase 0 Seed: Populates initial core tenancy and master administrative agent records
  */
 exports.seed = async function(knex) {
-  // 1. Clear out existing historical records to prevent identity collisions on reset
+  // 1. Clear out existing records in reverse FK dependency order
+  await knex('whatsapp_messages').del();
+  await knex('whatsapp_threads').del();
+  await knex('listing_visits').del();
+  await knex('listing_landmarks').del();
+  await knex('listing_media').del();
+  await knex('leads').del();
+  await knex('listings').del();
+  await knex('tenant_requests').del();
   await knex('tenant_configs').del();
   await knex('users').del();
   await knex('tenants').del();
@@ -36,7 +44,7 @@ exports.seed = async function(knex) {
     name: 'Pankaj Administrator',
     email: 'admin@wayneesolutions.com',
     password_hash: hashedPassword,
-    role: 'owner',
+    role: 'super_admin',
     created_at: knex.fn.now(),
     updated_at: knex.fn.now()
   });

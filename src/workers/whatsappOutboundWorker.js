@@ -53,16 +53,26 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
 
     console.log(`[Job ${job.id}] BSP Gateway acknowledged acceptance:`, bspResponse.data);
 
-    // 2. Persist the outbound interaction history directly within the database tracking layer
-    await knex('whatsapp_messages').insert({
-      id: knex.raw('uuid_generate_v4()'),
-      thread_id: threadId,
-      direction: 'outbound',
-      sender_type: 'vocallm',
-      message_category: 'utility',
-      body: messageBody.trim(),
-      sent_at: knex.fn.now()
-    });
+    // 2. Persist the outbound interaction history — only when this send is
+    // tied to a buyer whatsapp_threads row. Agent-intake sends (see
+    // agentIntakeController.js/agentIntakeWorker.js) reuse this same queue
+    // but have no thread — thread_id is NOT NULL with an FK, so inserting
+    // with threadId: null would throw *after* the message was already sent,
+    // and since this job has attempts: 3, BullMQ would retry the whole job
+    // — including the axios.post above — resending the same WhatsApp
+    // message 2-3 times. Those sends are instead logged to
+    // agent_draft_messages by the caller.
+    if (threadId) {
+      await knex('whatsapp_messages').insert({
+        id: knex.raw('uuid_generate_v4()'),
+        thread_id: threadId,
+        direction: 'outbound',
+        sender_type: 'vocallm',
+        message_category: 'utility',
+        body: messageBody.trim(),
+        sent_at: knex.fn.now()
+      });
+    }
 
     console.log(`[Job ${job.id}] Outbound transaction securely committed to data records.`);
     return { success: true };

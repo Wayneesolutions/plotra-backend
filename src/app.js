@@ -5,6 +5,8 @@ const authRouter = require('./routes/auth');
 const dashboardRouter = require('./routes/dashboard');
 const publicRouter = require('./routes/public');
 const webhooksRouter = require('./routes/webhooks');
+const adminRouter = require('./routes/admin');
+const { servePropertyPreview } = require('./controllers/ogPreviewController');
 
 const app = express();
 
@@ -30,6 +32,11 @@ app.use(express.json({
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// OG meta preview for social/messaging crawlers hitting /p/:slug share links.
+// Must be registered BEFORE static file serving (production) or SPA proxy (dev).
+// Non-crawler user-agents fall through via next() to the SPA.
+app.get('/p/:slug', servePropertyPreview);
+
 // Auth routes (login)
 app.use('/api/v1/auth', authRouter);
 
@@ -41,5 +48,8 @@ app.use('/api/v1/webhooks', webhooksRouter);
 
 // Protected dealer dashboard routes
 app.use('/api/v1/dashboard', dashboardRouter);
+
+// Super-admin routes (authGuard + adminGuard applied inside the router)
+app.use('/api/v1/admin', adminRouter);
 
 module.exports = app;

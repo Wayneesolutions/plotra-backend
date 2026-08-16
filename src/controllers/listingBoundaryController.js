@@ -4,7 +4,7 @@
  * requesting user's tenant before writing anything.
  */
 async function updateListingBoundary(req, res) {
-  const knex = req.app.get('db');
+  const knex = req.dbTrx || req.app.get('db');
   const { id } = req.params;
   const { tenant_id } = req.user;
   const { boundaryGeoJSON } = req.body;

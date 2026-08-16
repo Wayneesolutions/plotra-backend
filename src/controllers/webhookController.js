@@ -1,7 +1,18 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
+const { normalizePhone } = require('../utils/phone');
+const { handleAgentIntakeMessage } = require('./agentIntakeController');
 
-const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
+// Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
+// this is a producer (called from an inbound webhook request), not the
+// worker, so it shouldn't hang indefinitely on a Redis blip.
+const redisConnection = {
+  host: process.env.REDIS_HOST || '127.0.0.1',
+  port: process.env.REDIS_PORT || 6379,
+  maxRetriesPerRequest: 1,
+  retryStrategy: () => null,
+  connectTimeout: 3000,
+};
 const vocallmChatQueue = new Queue('vocallm-chat-processor', { connection: redisConnection });
 
 /**
@@ -15,7 +26,18 @@ function parseInboundPayload(body) {
     leadName: body.contacts?.[0]?.profile?.name || body.from_name || body.sender?.name || 'Visitor',
     incomingText: body.messages?.[0]?.text?.body || body.message_text || body.text,
     bspThreadRef: body.messages?.[0]?.id || body.conversation_id || body.msg_id,
-    inferredSlug: body.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null
+    inferredSlug: body.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
+    // BUG FIX: this previously always resolved to null whenever
+    // phone_number_id was present, with a comment promising it would be
+    // "resolved below" — that resolution code never existed. Meta Cloud API
+    // identifies the receiving number by phone_number_id (an opaque ID, not
+    // the raw phone number), so every Meta inbound message fell through to
+    // the "oldest active tenant" fallback regardless of which tenant's
+    // number it actually arrived on. Now surfaces both fields; the caller
+    // resolves whichever one is present against tenants.whatsapp_number or
+    // tenants.phone_number_id.
+    receivingNumber: body.to || body.to_phone || body.receiver?.phone || null,
+    receivingPhoneNumberId: body.metadata?.phone_number_id || null,
   };
 }
 
@@ -47,18 +69,37 @@ function isValidSignature(req, secret) {
  * BullMQ. Does not wait on the AI reply.
  */
 async function handleInboundWhatsApp(req, res) {
-  const knex = req.app.get('db');
+  const knex = req.dbTrx || req.app.get('db');
   const secret = process.env.WHATSAPP_WEBHOOK_SECRET;
 
   if (!isValidSignature(req, secret)) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId } = parseInboundPayload(req.body);
 
   if (!phone || !incomingText) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
+  }
+
+  // Agent-intake routing: if this inbound sender's phone matches a
+  // registered agent (users.phone), this is a WhatsApp listing-intake
+  // conversation, not a buyer/lead one — hand off entirely and skip the
+  // lead/thread logic below. users.phone is globally unique, so a match
+  // also resolves the tenant directly (agentUser.tenant_id) without the
+  // phone_number_id/whatsapp_number fallback dance the buyer path needs.
+  // Anything that doesn't match a known agent falls through to that
+  // existing buyer path, completely unchanged.
+  const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
+  if (agentUser) {
+    return handleAgentIntakeMessage({
+      knex,
+      agentUser,
+      incomingText: incomingText.trim(),
+      bspMessageId: bspThreadRef, // this field is the individual WhatsApp message id (see parseInboundPayload)
+      res,
+    });
   }
 
   try {
@@ -79,17 +120,36 @@ async function handleInboundWhatsApp(req, res) {
         lead = await trx('leads').where({ phone }).first();
 
         if (!lead) {
-          // KNOWN LIMITATION: with only one tenant (you) today, defaulting to
-          // "the active tenant" is safe. The moment a second paying tenant
-          // exists, this becomes ambiguous — there's no way to know which
-          // tenant's WhatsApp number this message arrived on without the BSP
-          // payload telling us (most BSPs include a "to" field with the
-          // receiving number — wire that in here before Phase 7 external
-          // tenants, matching it against tenant_configs / tenants.whatsapp_number).
-          const defaultTenant = await trx('tenants')
-            .where({ status: 'active' })
-            .orderBy('created_at', 'asc')
-            .first();
+          // Resolve tenant by whichever identifier this BSP sent — Meta
+          // Cloud API sends phone_number_id (opaque, stable per WhatsApp
+          // Business number); other BSPs (Gupshup/Interakt) send a raw "to"
+          // number. Falls back to the shared-number path (oldest active
+          // tenant) only when NEITHER is present, which means it arrived on
+          // the platform's shared number where the inferredSlug-based
+          // lookup below further narrows it down.
+          let defaultTenant = null;
+
+          if (receivingPhoneNumberId) {
+            defaultTenant = await trx('tenants')
+              .where({ phone_number_id: receivingPhoneNumberId, status: 'active' })
+              .first();
+          }
+
+          if (!defaultTenant && receivingNumber) {
+            defaultTenant = await trx('tenants')
+              .where({ whatsapp_number: receivingNumber, status: 'active' })
+              .first();
+          }
+
+          if (!defaultTenant) {
+            // Shared-number fallback: safe only when one tenant uses the
+            // shared number. The inferredSlug path below further narrows it.
+            defaultTenant = await trx('tenants')
+              .where({ status: 'active' })
+              .orderBy('created_at', 'asc')
+              .first();
+          }
+
           if (!defaultTenant) throw new Error('No active tenant found to attribute this message to.');
 
           if (inferredSlug) {

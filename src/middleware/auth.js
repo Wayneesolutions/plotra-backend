@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
+const { JWT_SECRET } = require('../config/jwtSecret');
 
 /**
  * Protects backoffice dashboard routes, authenticates claims, and binds tenant IDs securely.

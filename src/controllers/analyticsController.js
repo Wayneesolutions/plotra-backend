@@ -5,7 +5,7 @@ const { computeLeadScore } = require('../utils/leadScoring');
  * Delivers top-level KPIs and individual real estate asset conversion matrices.
  */
 async function getDashboardAnalytics(req, res) {
-  const knex = req.app.get('db');
+  const knex = req.dbTrx || req.app.get('db');
   const { tenant_id } = req.user; // Enforced via authGuard middleware
 
   try {

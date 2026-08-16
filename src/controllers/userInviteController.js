@@ -1,15 +1,12 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { sendOnboardingEmail } = require('../services/emailService');
+const { normalizePhone } = require('../utils/phone');
 
-/**
- * Invites a second user under the same tenant. Owner-only. Returns the
- * temp password in the response for now — no email service wired up yet,
- * so you'll copy-paste it to them over WhatsApp for the first few users.
- */
 async function inviteTenantUser(req, res) {
-  const knex = req.app.get('db');
+  const knex = req.dbTrx || req.app.get('db');
   const { tenant_id, role } = req.user;
-  const { email, name } = req.body;
+  const { email, name, phone } = req.body;
 
   if (role !== 'owner') {
     return res.status(403).json({
@@ -39,17 +36,35 @@ async function inviteTenantUser(req, res) {
       email: email.trim().toLowerCase(),
       name: name.trim(),
       role: 'agent',
-      password_hash: hashedPassword
-    }).returning(['id', 'email', 'role']);
+      password_hash: hashedPassword,
+      // Optional — lets this teammate text listing details into WhatsApp
+      // right away (see webhookController.js's agent-intake routing)
+      // instead of having to set it themselves after logging in.
+      phone: phone ? normalizePhone(phone) : null
+    }).returning(['id', 'email', 'role', 'phone']);
+
+    const tenant = await knex('tenants').where({ id: tenant_id }).select('business_name').first();
+    sendOnboardingEmail({
+      to: email.trim().toLowerCase(),
+      businessName: tenant?.business_name || '',
+      contactName: name.trim(),
+      email: email.trim().toLowerCase(),
+      tempPassword,
+    }).catch(() => {});
 
     return res.status(201).json({
       success: true,
-      message: 'User created. Share the temporary password with them directly — it will not be shown again.',
+      message: 'User created. An email with login credentials has been sent to them.',
       user: newUser,
       temporaryPassword: tempPassword
     });
 
   } catch (error) {
+    if (error.code === '23505') { // unique_violation — phone already registered to someone else
+      return res.status(409).json({
+        error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered to another account.' }
+      });
+    }
     console.error('Failed to invite tenant user:', error);
     return res.status(500).json({
       error: { code: 'INTERNAL_ERROR', message: 'Failed to create the user.' }
