@@ -71,6 +71,19 @@ async function getPublicListing(req, res) {
       .where({ listing_id: listing.id })
       .orderBy('distance_meters', 'asc');
 
+    // 3b. Local Intelligence — real, cited neighborhood context (news/safety/
+    //    seasonal conditions). Only surfaced once generation has actually
+    //    completed with real citations; null while pending/failed/no_data so
+    //    the frontend can render a loading state or omit the section
+    //    entirely, rather than showing an error or empty-looking block.
+    const localIntel = await knex('listing_local_intelligence')
+      .select('status', 'summary_json', 'citation_count', 'generated_at')
+      .where({ listing_id: listing.id })
+      .first();
+    const localIntelligence = localIntel && localIntel.status === 'completed'
+      ? { ...localIntel.summary_json, citationCount: localIntel.citation_count, generatedAt: localIntel.generated_at }
+      : null;
+
     // 4. Dealer's WhatsApp number for the free V4 "chat with us" CTA link —
     //    dedicated number if the tenant has one (Ch.12.3), else the shared
     //    platform number from env.
@@ -97,6 +110,7 @@ async function getPublicListing(req, res) {
       },
       media: media || null,
       landmarks: landmarks || [],
+      localIntelligence,
       dealer: {
         businessName: listing.dealer_business_name,
         whatsappDigits: dealerWhatsappDigits || null

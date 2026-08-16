@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getPublicListing, logVisit, capturePublicLead } = require('../controllers/publicListingController');
+const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
 const { submitAccessRequest } = require('../controllers/adminController');
 // Phase 6 — monetization
 const { executeRentVsBuyCalculation } = require('../controllers/calculatorController');
@@ -32,6 +33,15 @@ router.post('/listings/:slug/visit', publicWriteLimiter, logVisit);
  * @access  Public
  */
 router.post('/listings/:slug/lead', publicWriteLimiter, capturePublicLead);
+
+/**
+ * @route   GET /api/v1/public/listings/:slug/builder-profile
+ * @desc    Buyer-facing builder due-diligence sheet (delivery history,
+ *          leadership, financial condition, legal issues) — only returned
+ *          once a human has published it, never on research completion alone
+ * @access  Public
+ */
+router.get('/listings/:slug/builder-profile', publicReadLimiter, getPublicBuilderProfile);
 
 /**
  * @route   POST /api/v1/public/request-access
