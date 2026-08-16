@@ -7,7 +7,7 @@
 // analyticsController.js / listingController.js: req.dbTrx falls back
 // to the raw pool, tenant_id comes from authGuard's req.user.
 
-const { uploadLeadAndStartCampaign } = require('../services/wayneRingService');
+const { callLeadNow } = require('../services/wayneRingService');
 
 // Safety cap, not a billing construct — the per-plan "included AI calling
 // minutes" described in the pitch materials is a pricing/revenue concept
@@ -337,10 +337,13 @@ async function updateVisit(req, res) {
 /**
  * POST /api/v1/dashboard/ops/leads/:id/call
  * Triggers an AI follow-up call to a lead who's gone quiet on WhatsApp, via
- * WayneRing (see wayneRingService.js). Not synchronous — WayneRing has no
- * one-off call endpoint or outcome webhook, so this returns 202 (accepted,
- * not completed) and the actual outcome arrives later via
- * wayneRingCallSyncWorker.js's poll, visible in the calls log once synced.
+ * WayneRing's POST /api/leads/call (see wayneRingService.js's callLeadNow —
+ * added alongside aivoicebackend PR #5, replacing the old CSV/campaign
+ * detour this used to require for a single lead). The call itself is
+ * placed immediately, but its OUTCOME (answered/booked/no-answer/etc.)
+ * isn't known until the call ends, so this still returns 202 (accepted,
+ * not completed) — wayneRingCallSyncWorker.js's poll picks up the result,
+ * now via a direct call-id match instead of phone+time-window guessing.
  */
 async function triggerOutboundCall(req, res) {
   const knex = req.dbTrx || req.app.get('db');
@@ -371,7 +374,7 @@ async function triggerOutboundCall(req, res) {
       });
     }
 
-    const { campaignId } = await uploadLeadAndStartCampaign({
+    const { callId, vapiCallId } = await callLeadNow({
       knex,
       tenantId: tenant_id,
       leadId: lead.id,
@@ -382,8 +385,9 @@ async function triggerOutboundCall(req, res) {
 
     return res.status(202).json({
       success: true,
-      message: 'Call triggered — outcome will appear in the call log once WayneRing completes it.',
-      campaignId,
+      message: 'Call placed — outcome will appear in the call log once it completes.',
+      callId,
+      vapiCallId,
     });
   } catch (error) {
     console.error('Failed to trigger outbound AI call:', error);
