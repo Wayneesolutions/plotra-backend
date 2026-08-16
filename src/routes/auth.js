@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authGuard = require('../middleware/auth');
-const { login, changePassword, forgotPassword, resetPassword } = require('../controllers/authController');
+const { login, changePassword, updatePhone, forgotPassword, resetPassword } = require('../controllers/authController');
 // NEW — Phase 7
 const { loginLimiter, publicWriteLimiter } = require('../middleware/rateLimiter');
 
@@ -18,6 +18,14 @@ router.post('/login', loginLimiter, login);
  * @access  Protected
  */
 router.post('/change-password', authGuard, changePassword);
+
+/**
+ * @route   POST /api/v1/auth/update-phone
+ * @desc    Set/change the WhatsApp number your agent-intake messages are
+ *          recognized from (see webhookController.js)
+ * @access  Protected
+ */
+router.post('/update-phone', authGuard, updatePhone);
 
 /**
  * @route   POST /api/v1/auth/forgot-password

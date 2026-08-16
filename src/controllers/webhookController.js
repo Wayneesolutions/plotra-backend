@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
+const { normalizePhone } = require('../utils/phone');
+const { handleAgentIntakeMessage } = require('./agentIntakeController');
 
 // Same fail-fast rationale as listingController.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
@@ -79,6 +81,25 @@ async function handleInboundWhatsApp(req, res) {
   if (!phone || !incomingText) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
+  }
+
+  // Agent-intake routing: if this inbound sender's phone matches a
+  // registered agent (users.phone), this is a WhatsApp listing-intake
+  // conversation, not a buyer/lead one — hand off entirely and skip the
+  // lead/thread logic below. users.phone is globally unique, so a match
+  // also resolves the tenant directly (agentUser.tenant_id) without the
+  // phone_number_id/whatsapp_number fallback dance the buyer path needs.
+  // Anything that doesn't match a known agent falls through to that
+  // existing buyer path, completely unchanged.
+  const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
+  if (agentUser) {
+    return handleAgentIntakeMessage({
+      knex,
+      agentUser,
+      incomingText: incomingText.trim(),
+      bspMessageId: bspThreadRef, // this field is the individual WhatsApp message id (see parseInboundPayload)
+      res,
+    });
   }
 
   try {

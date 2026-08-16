@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { JWT_SECRET } = require('../config/jwtSecret');
 const { sendPasswordResetEmail } = require('../services/emailService');
+const { normalizePhone } = require('../utils/phone');
 
 const JWT_EXPIRES_IN = '12h'; // Optimal window for backoffice operational shift length
 const RESET_TOKEN_TTL_MINUTES = 30;
@@ -142,6 +143,43 @@ async function changePassword(req, res) {
 }
 
 /**
+ * POST /api/v1/auth/update-phone
+ * Lets an authenticated user set/change the WhatsApp number their agent
+ * intake messages will be recognized from (see webhookController.js —
+ * an inbound WhatsApp sender is treated as this agent only if their phone
+ * matches this column). Globally unique across all tenants: a real phone
+ * number only belongs to one person, and uniqueness is what lets the
+ * webhook resolve both agent identity and tenant from the phone alone.
+ */
+async function updatePhone(req, res) {
+  const knex = req.app.get('db');
+  const userId = req.user.id;
+  const { phone } = req.body;
+
+  if (!phone) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'phone is required.' } });
+  }
+
+  const normalized = normalizePhone(phone);
+
+  try {
+    await knex('users')
+      .where({ id: userId })
+      .update({ phone: normalized, updated_at: knex.fn.now() });
+
+    return res.status(200).json({ success: true, phone: normalized });
+  } catch (error) {
+    if (error.code === '23505') { // unique_violation
+      return res.status(409).json({
+        error: { code: 'PHONE_ALREADY_REGISTERED', message: 'This phone number is already registered to another account.' }
+      });
+    }
+    console.error('Failed to update phone:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to update phone.' } });
+  }
+}
+
+/**
  * POST /api/v1/auth/forgot-password
  * Public. Always returns a generic success message regardless of whether
  * the email matches an account — otherwise this endpoint becomes a way to
@@ -263,4 +301,4 @@ async function resetPassword(req, res) {
   }
 }
 
-module.exports = { login, changePassword, forgotPassword, resetPassword };
+module.exports = { login, changePassword, updatePhone, forgotPassword, resetPassword };

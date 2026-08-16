@@ -68,7 +68,12 @@ async function servePropertyPreview(req, res, next) {
         'listings.description',
         'listing_media.satellite_image_url'
       )
-      .where({ 'listings.public_slug': slug, 'listings.status': 'active' })
+      // 'awaiting_approval' included so the preview link sent to the agent
+      // (see agentIntakeWorker.js) actually renders a rich WhatsApp card —
+      // otherwise WhatsApp's own crawler would 404 on a listing that's
+      // pending the agent's own approval.
+      .where({ 'listings.public_slug': slug })
+      .whereIn('listings.status', ['active', 'awaiting_approval'])
       .first();
 
     if (!listing) {

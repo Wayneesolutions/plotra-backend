@@ -4,6 +4,7 @@ const axios = require('axios');
 const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
+const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -13,11 +14,14 @@ const redisConnection = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRet
 
 // Queue used to hand off to landmarkWorker.js once coordinates are known
 const landmarkQueue = new Queue('landmark-extraction', { connection: redisConnection });
+// Only used for WhatsApp agent-intake listings (job.data.draftId present) —
+// see agentIntakeWorker.js's 'send-preview' handler.
+const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
 
 console.log(`[Worker Engine] Initializing Geo-Enrichment Task Consumer...`);
 
 const geoWorker = new Worker('geo-enrichment', async (job) => {
-  const { listingId, rawAddress } = job.data;
+  const { listingId, rawAddress, draftId } = job.data;
 
   console.log(`[Job ${job.id}] Processing Geocoding Blueprint optimization for Listing Ref: ${listingId}`);
 
@@ -56,7 +60,12 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
           formatted_address: formattedAddress,
           lat: lat,
           lng: lng,
-          status: 'active', // Safely move status from pending to active to automatically open public links
+          // WhatsApp agent-intake listings (source: 'whatsapp') wait for the
+          // agent's approval reply before going publicly active — see
+          // agentIntakeController.js/agentIntakeWorker.js. Dashboard-created
+          // listings keep the original immediate pending->active behavior,
+          // unchanged.
+          status: listingData.source === 'whatsapp' ? 'awaiting_approval' : 'active',
           updated_at: knex.fn.now()
         });
 
@@ -88,6 +97,19 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
+
+    // 5. WhatsApp agent-intake listings: don't block on landmarks finishing
+    // (they're not shown in the OG preview card — title/image/price only,
+    // and by the time a human reacts to WhatsApp, landmark extraction has
+    // almost always already finished anyway) — send the approval-preview
+    // message now.
+    if (draftId) {
+      await agentIntakeQueue.add('send-preview', { draftId, listingId }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
+    }
+
     console.log(`[Job ${job.id}] Successfully completed Geocoding & media initialization mapping for ${listingId}.`);
     return { success: true, coordinates: { lat, lng } };
 
@@ -98,8 +120,30 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 }, { connection: redisConnection });
 
 // Event monitoring listeners
-geoWorker.on('failed', (job, err) => {
+geoWorker.on('failed', async (job, err) => {
   console.error(`❌ [Job ${job?.id}] Geo-enrichment task failed permanently:`, err.message);
+
+  // WhatsApp agent-intake listings: this failure is otherwise silent (the
+  // dashboard-created path has no viewer waiting on it, so that behavior is
+  // intentionally left unchanged) — but an agent who just texted in an
+  // address deserves to know it couldn't be located, and their draft
+  // shouldn't stay stuck.
+  const draftId = job?.data?.draftId;
+  if (draftId && job.attemptsMade >= job.opts.attempts) {
+    try {
+      const draft = await knex('agent_listing_drafts').where({ id: draftId }).first();
+      if (!draft) return;
+      const agentUser = await knex('users').where({ id: draft.user_id }).first();
+
+      await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'collecting', updated_at: knex.fn.now() });
+
+      const body = "Yeh address locate nahi ho paya. Please ek clearer address bhejein (jaise: sector/colony, city).";
+      await knex.transaction(async (trx) => { await logAgentOutboundMessage(trx, { draftId, body }); });
+      await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: body });
+    } catch (notifyErr) {
+      console.error(`[Job ${job?.id}] Failed to notify agent of geocode failure:`, notifyErr.message);
+    }
+  }
 });
 
 module.exports = geoWorker;
