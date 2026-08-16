@@ -10,8 +10,14 @@ const { inviteTenantUser } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
+// getLeads aliased to getOpsLeadInbox: leadsController.js's getLeads (tenant-wide
+// lead list, mounted at /leads below) and dealerOpsController.js's getLeads
+// (ops-panel WhatsApp lead inbox, mounted at /ops/leads) are two different
+// functions that happen to share a name — a real name collision introduced
+// by merging PR #4 and PR #5 together (each was fine on its own; neither
+// had been tested against the other before this merge).
 const {
-  getOverview, getLeads, getLeadMessages,
+  getOverview, getLeads: getOpsLeadInbox, getLeadMessages,
   getDocuments, updateDocumentStatus,
   getCalls, getVisits, updateVisit,
 } = require('../controllers/dealerOpsController');
@@ -120,7 +126,7 @@ router.get('/billing/status', authGuard, tenantTransaction, getBillingStatus);
  * Same authGuard + tenantTransaction pattern as every other dashboard route.
  */
 router.get('/ops/overview', authGuard, tenantTransaction, getOverview);
-router.get('/ops/leads', authGuard, tenantTransaction, getLeads);
+router.get('/ops/leads', authGuard, tenantTransaction, getOpsLeadInbox);
 router.get('/ops/leads/:id/messages', authGuard, tenantTransaction, getLeadMessages);
 router.get('/ops/documents', authGuard, tenantTransaction, getDocuments);
 router.patch('/ops/documents/:id', authGuard, tenantTransaction, updateDocumentStatus);
