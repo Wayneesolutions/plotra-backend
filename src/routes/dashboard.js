@@ -9,6 +9,12 @@ const { updateListingBoundary } = require('../controllers/listingBoundaryControl
 const { inviteTenantUser } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
+// NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
+const {
+  getOverview, getLeads, getLeadMessages,
+  getDocuments, updateDocumentStatus,
+  getCalls, getVisits, updateVisit,
+} = require('../controllers/dealerOpsController');
 
 // tenantTransaction must come after authGuard (needs req.user.tenant_id) and
 // wraps the controller in a single DB transaction with SET LOCAL tenant context
@@ -107,5 +113,19 @@ router.delete('/listings/:id/media', authGuard, tenantTransaction, deleteListing
 router.post('/billing/create-checkout-session', authGuard, tenantTransaction, createCheckoutSessionHandler);
 router.post('/billing/cancel-subscription', authGuard, tenantTransaction, cancelSubscriptionHandler);
 router.get('/billing/status', authGuard, tenantTransaction, getBillingStatus);
+
+/**
+ * NEW — Ops panel routes. Backs the internal admin panel: overview stats,
+ * WhatsApp lead inbox, document verification queue, AI call log, site visits.
+ * Same authGuard + tenantTransaction pattern as every other dashboard route.
+ */
+router.get('/ops/overview', authGuard, tenantTransaction, getOverview);
+router.get('/ops/leads', authGuard, tenantTransaction, getLeads);
+router.get('/ops/leads/:id/messages', authGuard, tenantTransaction, getLeadMessages);
+router.get('/ops/documents', authGuard, tenantTransaction, getDocuments);
+router.patch('/ops/documents/:id', authGuard, tenantTransaction, updateDocumentStatus);
+router.get('/ops/calls', authGuard, tenantTransaction, getCalls);
+router.get('/ops/visits', authGuard, tenantTransaction, getVisits);
+router.patch('/ops/visits/:id', authGuard, tenantTransaction, updateVisit);
 
 module.exports = router;
