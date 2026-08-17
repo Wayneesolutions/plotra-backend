@@ -7,6 +7,16 @@
 // analyticsController.js / listingController.js: req.dbTrx falls back
 // to the raw pool, tenant_id comes from authGuard's req.user.
 
+const { callLeadNow } = require('../services/wayneRingService');
+
+// Safety cap, not a billing construct — the per-plan "included AI calling
+// minutes" described in the pitch materials is a pricing/revenue concept
+// for a future billing pass; this is purely a runaway-cost guard so one
+// tenant's usage can't run up an unbounded WayneRing bill attributed to
+// Plotra's single shared WayneRing account (see wayneRingService.js — auth
+// constraint #1: WayneRing has no per-Plotra-tenant billing isolation).
+const MONTHLY_CALL_CAP = Number(process.env.WAYNERING_MONTHLY_CALL_CAP_PER_TENANT) || 500;
+
 /**
  * GET /api/v1/dashboard/ops/overview
  * Snapshot cards + a merged 24h activity feed across unlocks, calls,
@@ -324,6 +334,67 @@ async function updateVisit(req, res) {
   }
 }
 
+/**
+ * POST /api/v1/dashboard/ops/leads/:id/call
+ * Triggers an AI follow-up call to a lead who's gone quiet on WhatsApp, via
+ * WayneRing's POST /api/leads/call (see wayneRingService.js's callLeadNow —
+ * added alongside aivoicebackend PR #5, replacing the old CSV/campaign
+ * detour this used to require for a single lead). The call itself is
+ * placed immediately, but its OUTCOME (answered/booked/no-answer/etc.)
+ * isn't known until the call ends, so this still returns 202 (accepted,
+ * not completed) — wayneRingCallSyncWorker.js's poll picks up the result,
+ * now via a direct call-id match instead of phone+time-window guessing.
+ */
+async function triggerOutboundCall(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { tenant_id } = req.user;
+  const { id: leadId } = req.params;
+
+  try {
+    const lead = await knex('leads').where({ id: leadId, tenant_id }).first();
+    if (!lead) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Lead not found.' } });
+    }
+    if (!lead.phone) {
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'This lead has no phone number to call.' } });
+    }
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [{ count }] = await knex('ai_voice_calls')
+      .where({ tenant_id, direction: 'outbound' })
+      .andWhere('called_at', '>=', monthStart)
+      .count('id as count');
+
+    if (parseInt(count, 10) >= MONTHLY_CALL_CAP) {
+      return res.status(403).json({
+        error: { code: 'CALL_LIMIT_REACHED', message: `Monthly AI calling limit (${MONTHLY_CALL_CAP}) reached for this account.` }
+      });
+    }
+
+    const { callId, vapiCallId } = await callLeadNow({
+      knex,
+      tenantId: tenant_id,
+      leadId: lead.id,
+      listingId: null,
+      phone: lead.phone,
+      name: lead.name,
+    });
+
+    return res.status(202).json({
+      success: true,
+      message: 'Call placed — outcome will appear in the call log once it completes.',
+      callId,
+      vapiCallId,
+    });
+  } catch (error) {
+    console.error('Failed to trigger outbound AI call:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to trigger call.' } });
+  }
+}
+
 module.exports = {
   getOverview,
   getLeads,
@@ -333,4 +404,5 @@ module.exports = {
   getCalls,
   getVisits,
   updateVisit,
+  triggerOutboundCall,
 };

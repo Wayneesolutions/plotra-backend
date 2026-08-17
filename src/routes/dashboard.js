@@ -6,6 +6,7 @@ const { createListing, getListings, updateListing, deleteListing } = require('..
 const { getDashboardAnalytics } = require('../controllers/analyticsController');
 const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
+const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../controllers/builderProfileController');
 const { inviteTenantUser } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
@@ -20,6 +21,7 @@ const {
   getOverview, getLeads: getOpsLeadInbox, getLeadMessages,
   getDocuments, updateDocumentStatus,
   getCalls, getVisits, updateVisit,
+  triggerOutboundCall,
 } = require('../controllers/dealerOpsController');
 
 // tenantTransaction must come after authGuard (needs req.user.tenant_id) and
@@ -60,6 +62,21 @@ router.delete('/listings/:id', authGuard, tenantTransaction, deleteListing);
  * @access  Protected
  */
 router.patch('/listings/:id/boundary', authGuard, tenantTransaction, updateListingBoundary);
+
+/**
+ * @route   POST /api/v1/dashboard/listings/:id/builder-profile
+ * @desc    Link a listing to a builder company (creating + researching it if new)
+ * @access  Protected
+ */
+router.post('/listings/:id/builder-profile', authGuard, tenantTransaction, linkOrCreateBuilderProfile);
+
+/**
+ * @route   PATCH /api/v1/dashboard/builder-profiles/:id/moderation
+ * @desc    Publish/reject a builder profile's AI-researched claims — owner only.
+ *          Required before any claim about this builder is shown to buyers.
+ * @access  Protected (owner role)
+ */
+router.patch('/builder-profiles/:id/moderation', authGuard, tenantTransaction, moderateBuilderProfile);
 
 /**
  * @route   GET /api/v1/dashboard/analytics
@@ -131,6 +148,7 @@ router.get('/ops/leads/:id/messages', authGuard, tenantTransaction, getLeadMessa
 router.get('/ops/documents', authGuard, tenantTransaction, getDocuments);
 router.patch('/ops/documents/:id', authGuard, tenantTransaction, updateDocumentStatus);
 router.get('/ops/calls', authGuard, tenantTransaction, getCalls);
+router.post('/ops/leads/:id/call', authGuard, tenantTransaction, triggerOutboundCall);
 router.get('/ops/visits', authGuard, tenantTransaction, getVisits);
 router.patch('/ops/visits/:id', authGuard, tenantTransaction, updateVisit);
 

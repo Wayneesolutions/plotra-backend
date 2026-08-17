@@ -14,6 +14,10 @@ const redisConnection = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRet
 
 // Queue used to hand off to landmarkWorker.js once coordinates are known
 const landmarkQueue = new Queue('landmark-extraction', { connection: redisConnection });
+// Local Intelligence (real, cited neighborhood news/safety/seasonal context)
+// — same reasoning as landmarks for not blocking anything on it: not shown
+// in the OG preview card, safe to generate in the background.
+const localIntelligenceQueue = new Queue('local-intelligence', { connection: redisConnection });
 // Only used for WhatsApp agent-intake listings (job.data.draftId present) —
 // see agentIntakeWorker.js's 'send-preview' handler.
 const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
@@ -97,6 +101,18 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
+
+    // 4b. Also kick off Local Intelligence research in parallel — independent
+    // of the landmark chain, so a slow/failed web-search-grounded lookup
+    // never blocks or fails listing creation itself.
+    await localIntelligenceQueue.add('generate', {
+      listingId: listingId,
+      formattedAddress: formattedAddress,
+      propertyType: listingData.property_type,
+    }, {
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 3000 },
+    });
 
     // 5. WhatsApp agent-intake listings: don't block on landmarks finishing
     // (they're not shown in the OG preview card — title/image/price only,
