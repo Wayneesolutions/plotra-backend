@@ -71,6 +71,12 @@ async function getListings(req, res) {
   try {
     const listings = await knex('listings')
       .leftJoin('listing_visits', 'listings.id', 'listing_visits.listing_id')
+      // Surfaces whether/how a listing's builder profile is doing — added so
+      // the dashboard can show current link/moderation state instead of
+      // firing the link-builder-profile form blind every time (there was
+      // previously no way for the frontend to know this without a second,
+      // per-listing endpoint that doesn't exist).
+      .leftJoin('builder_profiles', 'listings.builder_profile_id', 'builder_profiles.id')
       .select(
         'listings.id',
         'listings.title',
@@ -84,7 +90,10 @@ async function getListings(req, res) {
         'listings.description',
         'listings.status',
         'listings.public_slug',
-        'listings.created_at'
+        'listings.created_at',
+        'builder_profiles.id as builder_profile_id',
+        'builder_profiles.company_name as builder_company_name',
+        'builder_profiles.moderation_status as builder_moderation_status'
       )
       .count('listing_visits.id as visit_count')
       .where('listings.tenant_id', tenant_id)
@@ -92,7 +101,8 @@ async function getListings(req, res) {
         'listings.id', 'listings.title', 'listings.raw_address', 'listings.formatted_address',
         'listings.lat', 'listings.lng', 'listings.price', 'listings.plot_area',
         'listings.property_type', 'listings.description', 'listings.status',
-        'listings.public_slug', 'listings.created_at'
+        'listings.public_slug', 'listings.created_at',
+        'builder_profiles.id', 'builder_profiles.company_name', 'builder_profiles.moderation_status'
       )
       .orderBy('listings.created_at', 'desc');
 
