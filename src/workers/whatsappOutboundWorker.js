@@ -26,29 +26,21 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
   }
 
   try {
-    // 1. Dispatch payload framework to the configured WhatsApp gateway broker interface
-    // TODO: Customize this exact payload payload mapping structure once your final BSP platform vendor 
-    // (e.g., Meta Cloud API directly, Chat Mitra, Getgabs, or Twilio) has been selected.
+    // Meta Cloud API format: https://graph.facebook.com/v25.0/{phone_number_id}/messages
     const bspPayload = {
-      apiKey: BSP_API_KEY,
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
       to: phone,
       type: 'text',
-      text: {
-        body: messageBody
-      },
-      metadata: {
-        tenant_id: tenantId,
-        client_name: leadName,
-        context: propertyTitle
-      }
+      text: { body: messageBody },
     };
 
     const bspResponse = await axios.post(BSP_GATEWAY_URL, bspPayload, {
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${BSP_API_KEY}` // standard header format authorization safeguard
+        'Authorization': `Bearer ${BSP_API_KEY}`,
       },
-      timeout: 10000 // 10-second request dropout boundary rule to catch gateway hangs
+      timeout: 10000,
     });
 
     console.log(`[Job ${job.id}] BSP Gateway acknowledged acceptance:`, bspResponse.data);
