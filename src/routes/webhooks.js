@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { handleInboundWhatsApp } = require('../controllers/webhookController');
 const { handleStripeWebhook } = require('../controllers/billingController');
+const { handleWayneRingWebhook } = require('../controllers/wayneRingWebhookController');
 const serviceContext = require('../middleware/serviceContext');
 
 /**
@@ -27,5 +28,18 @@ router.post('/whatsapp/inbound', serviceContext, handleInboundWhatsApp);
  * payment, and the signature check is the real gate.
  */
 router.post('/stripe', serviceContext, handleStripeWebhook);
+
+/**
+ * @route   POST /api/v1/webhooks/wayne-ring
+ * @desc    Receive call.completed events from WayneRing (aivoicebackend
+ *          PR #5) so an outbound/inbound AI call's outcome lands in
+ *          ai_voice_calls near-instantly instead of waiting for the next
+ *          wayneRingCallSyncWorker.js poll tick.
+ * @access  Public (HMAC signature validated internally via
+ *          WAYNERING_WEBHOOK_SECRET — see wayneRingWebhookController.js).
+ *          No serviceContext middleware here: the sync functions this
+ *          delegates to already open their own service-context transaction.
+ */
+router.post('/wayne-ring', handleWayneRingWebhook);
 
 module.exports = router;

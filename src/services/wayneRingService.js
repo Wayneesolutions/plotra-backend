@@ -20,9 +20,13 @@ const IORedis = require('ioredis');
  *      deployed — this integration will 404 against an older WayneRing
  *      deployment that predates it.
  *
- * WayneRing added an outbound webhook in that same PR, but Plotra hasn't
- * wired a receiver for it yet — wayneRingCallSyncWorker.js still polls.
- * See PLOTRA_HANDOVER_FOR_SANT.md §10.8 for that follow-up.
+ * WayneRing added an outbound webhook in that same PR — Plotra now has a
+ * receiver for it (src/controllers/wayneRingWebhookController.js, POST
+ * /api/v1/webhooks/wayne-ring). wayneRingCallSyncWorker.js still polls too,
+ * deliberately kept as a fallback (PLOTRA_HANDOVER_FOR_SANT.md §10.8).
+ * Still needs, on WayneRing's side: PATCH /api/tenant/webhook with this
+ * route's URL + a shared secret (WAYNERING_WEBHOOK_SECRET here), then
+ * POST /api/tenant/webhook/test to confirm delivery.
  */
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
