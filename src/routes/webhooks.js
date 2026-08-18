@@ -17,6 +17,17 @@ const serviceContext = require('../middleware/serviceContext');
  * else. The HMAC signature check inside the controller is this route's
  * real access control, not tenant matching.
  */
+// Meta webhook verification — GET to same URL as POST
+router.get('/whatsapp/inbound', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_WEBHOOK_SECRET) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
 router.post('/whatsapp/inbound', serviceContext, handleInboundWhatsApp);
 
 /**
