@@ -10,6 +10,10 @@ const { servePropertyPreview } = require('./controllers/ogPreviewController');
 
 const app = express();
 
+// Required when running behind nginx reverse proxy — ensures rate limiter
+// and IP detection use the real client IP from X-Forwarded-For, not the proxy IP.
+app.set('trust proxy', 1);
+
 // CORS_ORIGIN: comma-separated list of allowed frontend origins in production
 // (e.g. "https://app.yourdomain.com"). Left unset in local dev, this allows
 // any origin — fine for a laptop, not for production once the frontend is
