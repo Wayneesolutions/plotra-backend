@@ -14,8 +14,8 @@ async function listPlans(knex) {
   return rows.map((r) => ({
     key: r.key,
     label: r.label,
-    priceINR: r.price_inr,
-    listingLimit: r.listing_limit, // null = unlimited
+    price_inr: r.price_inr,
+    listing_limit: r.listing_limit,
     features: r.features,
   }));
 }
