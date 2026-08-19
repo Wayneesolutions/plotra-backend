@@ -78,16 +78,5 @@ router.post('/ads/:id/event', publicWriteLimiter, recordAdMetricEvent);
  */
 router.get('/billing/plans', getPlans);
 
-// Plivo Answer URL — forwards inbound calls to the owner's personal number
-// Used for receiving Meta WhatsApp OTP voice calls on the Plivo business number
-router.get('/plivo/forward', (req, res) => {
-  res.set('Content-Type', 'text/xml');
-  res.send(`<?xml version="1.0" encoding="utf-8"?>
-<Response>
-  <Dial>
-    <Number>+919988584930</Number>
-  </Dial>
-</Response>`);
-});
 
 module.exports = router;
