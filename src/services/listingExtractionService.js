@@ -50,7 +50,8 @@ Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"pl
     ],
     temperature: 0.15,
   }, {
-    headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` }
+    headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+    timeout: 15000, // fail fast rather than hang the request/worker indefinitely on an OpenAI stall
   });
 
   return JSON.parse(response.data.choices[0].message.content);
