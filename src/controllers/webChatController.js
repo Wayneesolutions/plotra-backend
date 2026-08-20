@@ -57,8 +57,33 @@ function getSession(sessionId) {
   return fresh;
 }
 
+function formatPrice(price) {
+  const num = parseFloat(price);
+  if (price === null || price === undefined || Number.isNaN(num)) return null;
+  return '₹' + num.toLocaleString('en-IN');
+}
+
+// Accepts either a `listings` DB row (raw_address/plot_area/property_type)
+// or an already-camelCase extracted-fields object — this is the one place
+// that shape gets normalized before going out over the API.
 function listingSummary(listing) {
-  return { title: listing.title, address: listing.raw_address || listing.address };
+  return {
+    title: listing.title || null,
+    address: listing.raw_address || listing.address || null,
+    price: formatPrice(listing.price),
+    plotArea: listing.plot_area || listing.plotArea || null,
+    propertyType: listing.property_type || listing.propertyType || null,
+  };
+}
+
+// A message is an edit to the currently-tracked listing only if it doesn't
+// name a different address. No address mentioned at all -> assume it's a
+// correction/addition to the existing property (e.g. "actually make it 60
+// lakh"). A *different* address mentioned -> a new, unrelated property, even
+// though a listing already exists in this session.
+function isSameProperty(existingListing, extracted) {
+  if (!extracted.raw_address) return true;
+  return extracted.raw_address.trim().toLowerCase() === (existingListing.raw_address || '').trim().toLowerCase();
 }
 
 async function handleWebChatMessage(req, res) {
@@ -79,36 +104,44 @@ async function handleWebChatMessage(req, res) {
     }
 
     const session = getSession(sessionId);
-    session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim();
 
-    // Listing already created earlier in this session — treat further
-    // messages as a light correction pass rather than re-running the
-    // whole missing-field question loop. Kept intentionally simple (no
-    // re-geocode-on-address-change branch like the WhatsApp correction
-    // path) since a demo doesn't need that depth.
+    // Listing already created earlier in this session — check whether this
+    // message is actually about that same property before treating it as an
+    // edit. A different address means a brand-new listing, so the session
+    // resets and falls through to the create path below exactly as if this
+    // were the first message.
     if (session.listingId) {
       const extracted = await extractListingFields(message.trim());
-      const patch = {};
-      if (extracted.title) patch.title = extracted.title.trim();
-      if (extracted.raw_address) patch.raw_address = extracted.raw_address.trim();
-      if (extracted.price) patch.price = parseFloat(extracted.price);
-      if (extracted.plot_area) patch.plot_area = extracted.plot_area.trim();
-      if (extracted.property_type) patch.property_type = extracted.property_type.trim();
-      if (extracted.description) patch.description = extracted.description.trim();
+      const existingListing = await knex('listings').where({ id: session.listingId }).first();
 
-      let listing = await knex('listings').where({ id: session.listingId }).first();
-      if (Object.keys(patch).length > 0) {
-        patch.updated_at = knex.fn.now();
-        await knex('listings').where({ id: session.listingId }).update(patch);
-        listing = await knex('listings').where({ id: session.listingId }).first();
+      if (isSameProperty(existingListing, extracted)) {
+        const patch = {};
+        if (extracted.title) patch.title = extracted.title.trim();
+        if (extracted.price) patch.price = parseFloat(extracted.price);
+        if (extracted.plot_area) patch.plot_area = extracted.plot_area.trim();
+        if (extracted.property_type) patch.property_type = extracted.property_type.trim();
+        if (extracted.description) patch.description = extracted.description.trim();
+
+        let listing = existingListing;
+        if (Object.keys(patch).length > 0) {
+          patch.updated_at = knex.fn.now();
+          await knex('listings').where({ id: session.listingId }).update(patch);
+          listing = await knex('listings').where({ id: session.listingId }).first();
+        }
+
+        return res.status(200).json({
+          reply: "Updated! Anything else you'd like to add or change?",
+          listing: listingSummary(listing),
+        });
       }
 
-      return res.status(200).json({
-        reply: "Updated! Anything else you'd like to add or change?",
-        listing: listingSummary(listing),
-      });
+      // Different property — start over rather than folding this message's
+      // details into the previous listing's accumulated text.
+      session.listingId = null;
+      session.accumulatedText = '';
     }
 
+    session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim();
     const extracted = await extractListingFields(session.accumulatedText);
     const missing = REQUIRED_FIELDS.filter((f) => !extracted[f]);
 
@@ -135,7 +168,7 @@ async function handleWebChatMessage(req, res) {
 
     return res.status(200).json({
       reply: `Got it! I've mapped the address and created your listing — "${newListing.title}".`,
-      listing: listingSummary({ title: newListing.title, raw_address: extracted.raw_address }),
+      listing: listingSummary({ ...extracted, title: newListing.title }),
     });
 
   } catch (error) {
