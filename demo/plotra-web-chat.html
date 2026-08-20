@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Plotra — AI Property Assistant</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  // ------------------------------------------------------------
+  // CONFIG: point this at the real backend endpoint once it exists.
+  // See BACKEND_API_SPEC.md for exactly what this endpoint must do.
+  // ------------------------------------------------------------
+  window.PLOTRA_CONFIG = {
+    API_ENDPOINT: "https://plotra.wayneesolutions.com/api/v1/chat/web", // <-- backend must implement this
+    WHATSAPP_FALLBACK_NUMBER: "919465339629" // used for the "Continue on WhatsApp" fallback button
+  };
+</script>
+<style>
+  /* ============================================================
+     Plotra brand palette — deliberately NOT WhatsApp's green/teal.
+     Warm terracotta + charcoal, evoking land/plots/surveying rather
+     than a messaging app. The WhatsApp fallback button below is the
+     one place WhatsApp's own green appears, on purpose — it's a real
+     link to WhatsApp, not part of Plotra's own UI chrome.
+     ============================================================ */
+  :root{
+    --bg: #f3ede2;
+    --bg-grid: #e7dcc7;
+    --panel: #fffdf9;
+    --header: #22241f;
+    --header-text: #f6f1e6;
+    --header-sub: #b9b2a0;
+    --brand: #c1652b;
+    --brand-dark: #a24e1e;
+    --brand-tint: #fbe9d9;
+    --bubble-out: #2c2a24;
+    --bubble-out-text: #fdf8ef;
+    --bubble-in: #ffffff;
+    --bubble-in-border: #ece4d4;
+    --text: #241d15;
+    --meta: #9a9182;
+    --error: #b3402a;
+    --error-bg: #fbe8e2;
+    --whatsapp: #25d366;
+    --whatsapp-dark: #128c7e;
+    --shadow: rgba(40,30,15,0.16);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    min-height:100vh;
+    background:
+      radial-gradient(circle at 20% 15%, #faf6ec, transparent 60%),
+      var(--bg);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 24px 16px;
+  }
+  .stage{ display:flex; flex-direction:column; align-items:center; gap:14px; width:100%; }
+
+  .panel{
+    width:400px;
+    max-width:94vw;
+    height:680px;
+    max-height:88vh;
+    background:var(--panel);
+    border-radius:20px;
+    overflow:hidden;
+    display:flex;
+    flex-direction:column;
+    box-shadow: 0 30px 60px var(--shadow), 0 2px 6px var(--shadow);
+    border: 1px solid rgba(0,0,0,0.04);
+  }
+
+  .header{
+    background:var(--header);
+    color:var(--header-text);
+    padding:16px 18px;
+    display:flex;
+    align-items:center;
+    gap:12px;
+  }
+  .brandmark{
+    width:42px; height:42px; border-radius:12px; flex-shrink:0;
+    background: linear-gradient(150deg, var(--brand), var(--brand-dark));
+    display:flex; align-items:center; justify-content:center;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15);
+  }
+  .brandmark svg{ width:24px; height:24px; }
+  .who .name{ font-size:16.5px; font-weight:700; letter-spacing:.01em; }
+  .who .status{ font-size:12px; color:var(--header-sub); margin-top:1px; }
+  .status.live{ color:#e7b98a; }
+  .status.offline{ color:#e8a06b; }
+
+  .messages{
+    flex:1;
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(var(--bg-grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+    background-size: 22px 22px;
+    padding:18px 12px;
+    overflow-y:auto;
+    display:flex; flex-direction:column; gap:2px;
+  }
+  .row{ display:flex; margin-bottom:4px; }
+  .row.out{ justify-content:flex-end; }
+  .row.in{ justify-content:flex-start; }
+  .row.sys{ justify-content:center; }
+  .bubble{
+    max-width:80%; padding:9px 12px; border-radius:14px;
+    font-size:14.3px; line-height:1.45;
+    box-shadow: 0 1px 1px rgba(40,30,15,.06);
+    white-space:pre-wrap;
+  }
+  .row.out .bubble{ background:var(--bubble-out); color:var(--bubble-out-text); border-bottom-right-radius:3px; }
+  .row.in .bubble{ background:var(--bubble-in); color:var(--text); border:1px solid var(--bubble-in-border); border-bottom-left-radius:3px; }
+  .row.sys .bubble{
+    background:var(--brand-tint); color:var(--brand-dark); font-size:12.5px;
+    border-radius:10px; text-align:center;
+  }
+  .row.err .bubble{ background:var(--error-bg); color:var(--error); border:1px solid #f2cfc2; border-bottom-left-radius:3px; }
+
+  .listing-card{
+    margin-top:8px; border-radius:10px; overflow:hidden;
+    border:1px solid var(--bubble-in-border); background:var(--panel);
+  }
+  .listing-card .thumb{
+    height:78px;
+    background:
+      repeating-linear-gradient(135deg, var(--brand-tint), var(--brand-tint) 8px, #f5dcc2 8px, #f5dcc2 16px);
+    display:flex; align-items:center; justify-content:center;
+    color:var(--brand-dark); font-size:11px; letter-spacing:.08em; font-weight:700;
+  }
+  .listing-card .body{ padding:9px 10px 10px; }
+  .listing-card .title{ font-weight:700; font-size:13.5px; margin-bottom:2px; color:var(--text); }
+  .listing-card .addr{ font-size:12px; color:#6b6153; }
+  .listing-card .tag{
+    display:inline-block; margin-top:6px; background:var(--brand-tint); color:var(--brand-dark);
+    font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px;
+  }
+
+  .suggestions{ display:flex; flex-wrap:wrap; gap:6px; padding:0 12px 10px; }
+  .chip{
+    border:1px solid var(--bubble-in-border); background:var(--panel);
+    color:var(--brand-dark); font-size:12px; font-weight:600;
+    padding:6px 10px; border-radius:14px; cursor:pointer;
+  }
+  .chip:hover{ background:var(--brand-tint); }
+
+  .typing{
+    align-self:flex-start; background:var(--bubble-in); border:1px solid var(--bubble-in-border);
+    border-radius:14px; border-bottom-left-radius:3px; padding:10px 13px; display:none; gap:4px;
+    margin-bottom:4px;
+  }
+  .typing.show{ display:flex; }
+  .dot{ width:6px; height:6px; border-radius:50%; background:var(--brand); opacity:.55; animation: bounce 1.1s infinite ease-in-out; }
+  .dot:nth-child(2){ animation-delay:.15s; }
+  .dot:nth-child(3){ animation-delay:.3s; }
+  @keyframes bounce{ 0%,60%,100%{ transform:translateY(0); } 30%{ transform:translateY(-4px); } }
+
+  .inputbar{ display:flex; align-items:center; gap:8px; padding:12px; background:var(--panel); border-top:1px solid var(--bubble-in-border); }
+  .inputbar input{
+    flex:1; border:1px solid var(--bubble-in-border); outline:none; background:#fff;
+    border-radius:22px; padding:11px 16px; font-size:14px; color:var(--text);
+  }
+  .inputbar input:focus{ border-color: var(--brand); }
+  .inputbar button{
+    width:40px; height:40px; border-radius:12px; border:none;
+    background:var(--brand); color:#fff; font-size:15px; cursor:pointer;
+    flex-shrink:0;
+  }
+  .inputbar button:hover{ background:var(--brand-dark); }
+  .inputbar button:disabled{ background:#d8cdbb; cursor:not-allowed; }
+
+  .fallback{
+    display:none;
+    background:#fff; border:1px solid #ddd; border-radius:22px;
+    padding:10px 18px; font-size:13.5px; color:var(--whatsapp-dark);
+    text-decoration:none; font-weight:600; align-items:center; gap:8px;
+  }
+  .fallback.show{ display:inline-flex; }
+  .fallback svg{ width:16px; height:16px; flex-shrink:0; }
+  .footnote{ font-size:11.5px; color:#a9a08e; text-align:center; max-width:380px; }
+  .footnote b{ color:#8a8172; }
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="panel">
+    <div class="header">
+      <div class="brandmark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M4 20V6l8-3 8 3v14" stroke="#fdf3e9" stroke-width="1.6" stroke-linejoin="round"/>
+          <path d="M4 20h16" stroke="#fdf3e9" stroke-width="1.6" stroke-linecap="round"/>
+          <rect x="9.5" y="11" width="5" height="9" stroke="#fdf3e9" stroke-width="1.6" stroke-linejoin="round"/>
+          <path d="M8 8.2h.01M13 8.2h.01" stroke="#fdf3e9" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="who">
+        <div class="name">Plotra Assistant</div>
+        <div class="status" id="statusline">connecting…</div>
+      </div>
+    </div>
+
+    <div class="messages" id="messages"></div>
+    <div class="typing" id="typing"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+    <div class="suggestions" id="suggestions">
+      <div class="chip" data-text="3BHK plot 250 gaj sector 45 mohali 55 lakh">🏡 3BHK plot, Sector 45 Mohali, 55 lakh</div>
+      <div class="chip" data-text="Hno 102 Lahri Nagar, Mundia Khurd, Chandigarh Road, Ludhiana">📍 Hno 102 Lahri Nagar, Ludhiana</div>
+    </div>
+
+    <div class="inputbar">
+      <input id="input" type="text" placeholder="Type an address, e.g. Hno 102 Lahri Nagar, Ludhiana…" />
+      <button id="sendBtn" aria-label="Send">&#10148;</button>
+    </div>
+  </div>
+
+  <a class="fallback" id="fallbackLink" target="_blank" rel="noopener">
+    <svg viewBox="0 0 24 24" fill="#25d366"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2Zm0 18.2a8.2 8.2 0 0 1-4.2-1.2l-.3-.2-3.1.8.8-3-.2-.3A8.2 8.2 0 1 1 12 20.2Zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1-.2.2-.7.8-.8 1-.2.2-.3.2-.5.1-.2-.1-1-.4-1.9-1.2-.7-.6-1.2-1.4-1.3-1.6-.1-.2 0-.4.1-.5l.4-.5c.1-.1.2-.3.2-.4.1-.2 0-.3 0-.4-.1-.1-.6-1.4-.8-1.9-.2-.5-.4-.4-.6-.4h-.5c-.2 0-.4.1-.6.3-.2.2-.8.8-.8 1.9s.8 2.2.9 2.4c.1.2 1.6 2.4 3.8 3.4.5.2.9.4 1.3.5.5.2 1 .1 1.4.1.4-.1 1.3-.5 1.5-1.1.2-.5.2-1 .1-1.1-.1-.1-.3-.2-.5-.3Z"/></svg>
+    Continue on WhatsApp instead
+  </a>
+  <div class="footnote">This is Plotra's live AI assistant — <b>try an address above</b> to see a listing created in real time.</div>
+</div>
+
+<script>
+(function(){
+  const CFG = window.PLOTRA_CONFIG;
+  const messagesEl = document.getElementById('messages');
+  const typingEl = document.getElementById('typing');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('sendBtn');
+  const statusline = document.getElementById('statusline');
+  const fallbackLink = document.getElementById('fallbackLink');
+  const suggestionsEl = document.getElementById('suggestions');
+
+  // Session id kept in memory only (no localStorage) — resets on page reload.
+  const sessionId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+
+  function timeStamp(){
+    return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12:false});
+  }
+
+  function addBubble(dir, text, extraHtml){
+    const row = document.createElement('div');
+    row.className = 'row ' + dir;
+    row.innerHTML = `<div class="bubble">${escapeHtml(text)}${extraHtml || ''}<span style="display:block;text-align:right;font-size:10.5px;color:var(--meta);margin-top:4px;">${timeStamp()}</span></div>`;
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function addSystem(text){
+    const row = document.createElement('div');
+    row.className = 'row sys';
+    row.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function escapeHtml(str){
+    const d = document.createElement('div');
+    d.innerText = str;
+    return d.innerHTML;
+  }
+
+  function listingCardHtml(listing){
+    if(!listing) return '';
+    return `<div class="listing-card">
+      <div class="thumb">PLOT MAPPED</div>
+      <div class="body">
+        <div class="title">${escapeHtml(listing.title || 'New listing')}</div>
+        <div class="addr">${escapeHtml(listing.address || '')}</div>
+        <span class="tag">Listing created</span>
+      </div>
+    </div>`;
+  }
+
+  async function sendMessage(text){
+    if(!text.trim()) return;
+    addBubble('out', text);
+    inputEl.value = '';
+    sendBtn.disabled = true;
+    suggestionsEl.style.display = 'none';
+    typingEl.classList.add('show');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    try {
+      const res = await fetch(CFG.API_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, session_id: sessionId })
+      });
+
+      typingEl.classList.remove('show');
+
+      if(!res.ok){
+        throw new Error('HTTP ' + res.status);
+      }
+
+      const data = await res.json();
+      statusline.textContent = 'online';
+      statusline.className = 'status live';
+      fallbackLink.classList.remove('show');
+
+      addBubble('in', data.reply || "Got it — I'm processing that now.", listingCardHtml(data.listing));
+
+    } catch (err){
+      // Log the real error for debugging, but keep what an investor/visitor
+      // sees free of raw HTTP/stack detail.
+      console.error('Plotra web chat: backend request failed —', err);
+      typingEl.classList.remove('show');
+      statusline.textContent = 'reconnecting…';
+      statusline.className = 'status offline';
+      fallbackLink.classList.add('show');
+
+      const row = document.createElement('div');
+      row.className = 'row err';
+      row.innerHTML = `<div class="bubble">Couldn't reach Plotra's assistant just now. Use WhatsApp below, or try again in a moment.</div>`;
+      messagesEl.appendChild(row);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', ()=> sendMessage(inputEl.value));
+  inputEl.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') sendMessage(inputEl.value); });
+  suggestionsEl.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => sendMessage(chip.dataset.text));
+  });
+
+  // Build WhatsApp fallback link with whatever the visitor typed so far, or a sensible default.
+  function updateFallbackHref(){
+    const text = encodeURIComponent(inputEl.value || "Hi Plotra, I'd like to create a listing.");
+    fallbackLink.href = `https://wa.me/${CFG.WHATSAPP_FALLBACK_NUMBER}?text=${text}`;
+  }
+  inputEl.addEventListener('input', updateFallbackHref);
+  updateFallbackHref();
+
+  addSystem("Hi! I'm Plotra's AI assistant. Send a property address and I'll map it and create a listing — try a suggestion below, or type your own.");
+  statusline.textContent = 'connecting…';
+})();
+</script>
+
+</body>
+</html>
