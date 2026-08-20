@@ -9,6 +9,11 @@
 // See BACKEND_API_SPEC.md for the frontend contract this implements.
 const { createListingRecord, ListingLimitError } = require('../services/listingService');
 const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS } = require('../services/listingExtractionService');
+const { isApprovalReply } = require('../utils/agentReplyIntent');
+
+function buildPreviewLink(publicSlug) {
+  return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
+}
 
 // No visitor login, and no natural tenant to attribute a demo-created
 // listing to (there's no phone number to look up like the WhatsApp path
@@ -52,7 +57,7 @@ function getSession(sessionId) {
     existing.touchedAt = Date.now();
     return existing;
   }
-  const fresh = { accumulatedText: '', listingId: null, touchedAt: Date.now() };
+  const fresh = { accumulatedText: '', listingId: null, awaitingApproval: false, touchedAt: Date.now() };
   sessions.set(sessionId, fresh);
   return fresh;
 }
@@ -65,14 +70,18 @@ function formatPrice(price) {
 
 // Accepts either a `listings` DB row (raw_address/plot_area/property_type)
 // or an already-camelCase extracted-fields object — this is the one place
-// that shape gets normalized before going out over the API.
-function listingSummary(listing) {
+// that shape gets normalized before going out over the API. `publicSlug`
+// is passed separately since a freshly-extracted-fields object won't have
+// one yet at the point this is first called during creation.
+function listingSummary(listing, publicSlug, published) {
   return {
     title: listing.title || null,
     address: listing.raw_address || listing.address || null,
     price: formatPrice(listing.price),
     plotArea: listing.plot_area || listing.plotArea || null,
     propertyType: listing.property_type || listing.propertyType || null,
+    link: publicSlug ? buildPreviewLink(publicSlug) : null,
+    published: !!published,
   };
 }
 
@@ -111,8 +120,27 @@ async function handleWebChatMessage(req, res) {
     // resets and falls through to the create path below exactly as if this
     // were the first message.
     if (session.listingId) {
-      const extracted = await extractListingFields(message.trim());
       const existingListing = await knex('listings').where({ id: session.listingId }).first();
+
+      // Approval reply takes priority over re-extraction — "haan"/"approve"
+      // shouldn't get run through GPT extraction as if it were listing
+      // details (it isn't; it has none, and extraction would just return
+      // an all-null object, which is harmless, but there's no reason to
+      // pay for the call when the intent is already unambiguous).
+      if (session.awaitingApproval && isApprovalReply(message.trim())) {
+        if (existingListing.status !== 'active') {
+          await knex('listings').where({ id: session.listingId }).update({ status: 'active', updated_at: knex.fn.now() });
+        }
+        session.awaitingApproval = false;
+
+        const listing = await knex('listings').where({ id: session.listingId }).first();
+        return res.status(200).json({
+          reply: `Live ho gaya! Yahan hai aapki listing ka link:\n${buildPreviewLink(listing.public_slug)}`,
+          listing: listingSummary(listing, listing.public_slug, true),
+        });
+      }
+
+      const extracted = await extractListingFields(message.trim());
 
       if (isSameProperty(existingListing, extracted)) {
         const patch = {};
@@ -129,15 +157,20 @@ async function handleWebChatMessage(req, res) {
           listing = await knex('listings').where({ id: session.listingId }).first();
         }
 
+        const reply = session.awaitingApproval
+          ? "Updated! Sahi hai to reply karo 'haan' ya 'approve' — publish ho jayegi. Kuch aur badalna hai to bata dijiye."
+          : "Updated! Anything else you'd like to add or change?";
+
         return res.status(200).json({
-          reply: "Updated! Anything else you'd like to add or change?",
-          listing: listingSummary(listing),
+          reply,
+          listing: listingSummary(listing, listing.public_slug, listing.status === 'active'),
         });
       }
 
       // Different property — start over rather than folding this message's
       // details into the previous listing's accumulated text.
       session.listingId = null;
+      session.awaitingApproval = false;
       session.accumulatedText = '';
     }
 
@@ -165,10 +198,11 @@ async function handleWebChatMessage(req, res) {
     });
 
     session.listingId = newListing.id;
+    session.awaitingApproval = true;
 
     return res.status(200).json({
-      reply: `Got it! I've mapped the address and created your listing — "${newListing.title}".`,
-      listing: listingSummary({ ...extracted, title: newListing.title }),
+      reply: `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`,
+      listing: listingSummary({ ...extracted, title: newListing.title }, newListing.public_slug, false),
     });
 
   } catch (error) {
