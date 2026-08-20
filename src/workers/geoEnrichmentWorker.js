@@ -64,12 +64,13 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
           formatted_address: formattedAddress,
           lat: lat,
           lng: lng,
-          // WhatsApp agent-intake listings (source: 'whatsapp') wait for the
-          // agent's approval reply before going publicly active — see
-          // agentIntakeController.js/agentIntakeWorker.js. Dashboard-created
-          // listings keep the original immediate pending->active behavior,
-          // unchanged.
-          status: listingData.source === 'whatsapp' ? 'awaiting_approval' : 'active',
+          // Conversational-intake listings (source: 'whatsapp' or 'web') wait
+          // for an approval reply in that same conversation before going
+          // publicly active — see agentIntakeController.js/
+          // agentIntakeWorker.js for WhatsApp, webChatController.js for the
+          // web-chat channel. Dashboard-created listings keep the original
+          // immediate pending->active behavior, unchanged.
+          status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
           updated_at: knex.fn.now()
         });
 

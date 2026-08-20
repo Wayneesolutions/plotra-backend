@@ -10,6 +10,11 @@
 const IORedis = require('ioredis');
 const { createListingRecord, ListingLimitError } = require('../services/listingService');
 const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS } = require('../services/listingExtractionService');
+const { isApprovalReply } = require('../utils/agentReplyIntent');
+
+function buildPreviewLink(publicSlug) {
+  return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
+}
 
 // Same Redis instance BullMQ already connects to (see agentIntakeWorker.js) —
 // no new infra, just a second logical use of it. maxRetriesPerRequest left at
@@ -33,7 +38,7 @@ const MAX_SESSION_ID_LENGTH = 128;
 async function getSession(sessionId) {
   const raw = await redis.get(SESSION_KEY_PREFIX + sessionId);
   if (raw) return JSON.parse(raw);
-  return { accumulatedText: '', listingId: null };
+  return { accumulatedText: '', listingId: null, awaitingApproval: false };
 }
 
 async function saveSession(sessionId, session) {
@@ -98,8 +103,37 @@ async function resolveWebChatIdentity(knex) {
   return { tenantId: tenant.id, createdBy: user.id };
 }
 
-function listingSummary(listing) {
-  return { title: listing.title, address: listing.raw_address || listing.address };
+function formatPrice(price) {
+  const num = parseFloat(price);
+  if (price === null || price === undefined || Number.isNaN(num)) return null;
+  return '₹' + num.toLocaleString('en-IN');
+}
+
+// Accepts either a `listings` DB row (raw_address/plot_area/property_type)
+// or an already-camelCase extracted-fields object — this is the one place
+// that shape gets normalized before going out over the API. `publicSlug`
+// is passed separately since a freshly-extracted-fields object won't have
+// one yet at the point this is first called during creation.
+function listingSummary(listing, publicSlug, published) {
+  return {
+    title: listing.title || null,
+    address: listing.raw_address || listing.address || null,
+    price: formatPrice(listing.price),
+    plotArea: listing.plot_area || listing.plotArea || null,
+    propertyType: listing.property_type || listing.propertyType || null,
+    link: publicSlug ? buildPreviewLink(publicSlug) : null,
+    published: !!published,
+  };
+}
+
+// A message is an edit to the currently-tracked listing only if it doesn't
+// name a different address. No address mentioned at all -> assume it's a
+// correction/addition to the existing property (e.g. "actually make it 60
+// lakh"). A *different* address mentioned -> a new, unrelated property, even
+// though a listing already exists in this session.
+function isSameProperty(existingListing, extracted) {
+  if (!extracted.raw_address) return true;
+  return extracted.raw_address.trim().toLowerCase() === (existingListing.raw_address || '').trim().toLowerCase();
 }
 
 async function handleWebChatMessage(req, res) {
@@ -123,47 +157,79 @@ async function handleWebChatMessage(req, res) {
     }
 
     const session = await getSession(sessionId);
-    session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim().slice(-MAX_ACCUMULATED_CHARS);
 
-    // Listing already created earlier in this session — treat further
-    // messages as a light correction pass rather than re-running the
-    // whole missing-field question loop. Kept intentionally simple (no
-    // re-geocode-on-address-change branch like the WhatsApp correction
-    // path) since this doesn't need that depth.
+    // Listing already created earlier in this session — check whether this
+    // message is actually about that same property, and whether it's the
+    // realtor approving it, before treating it as a correction. A different
+    // address means a brand-new listing, so the session resets and falls
+    // through to the create path below exactly as if this were the first
+    // message.
     if (session.listingId) {
-      const extracted = await extractListingFields(message.trim());
-      const patch = {};
-      if (extracted.title) patch.title = extracted.title.trim();
-      if (extracted.raw_address) patch.raw_address = extracted.raw_address.trim();
-      if (extracted.price) patch.price = parseFloat(extracted.price);
-      if (extracted.plot_area) patch.plot_area = extracted.plot_area.trim();
-      if (extracted.property_type) patch.property_type = extracted.property_type.trim();
-      if (extracted.description) patch.description = extracted.description.trim();
-
       let listing = await knex('listings').where({ id: session.listingId, tenant_id: identity.tenantId }).first();
       if (!listing) {
         // Listing was deleted, or belongs to a different tenant than the
         // one currently configured (e.g. WEB_CHAT_TENANT_ID changed since
         // this session started) — don't silently patch across tenants.
         session.listingId = null;
+        session.awaitingApproval = false;
         await saveSession(sessionId, session);
         return res.status(409).json({
           error: { code: 'LISTING_UNAVAILABLE', message: 'That listing is no longer available. Please start over.' },
         });
       }
-      if (Object.keys(patch).length > 0) {
-        patch.updated_at = knex.fn.now();
-        await knex('listings').where({ id: session.listingId }).update(patch);
-        listing = await knex('listings').where({ id: session.listingId }).first();
+
+      // Approval reply takes priority over re-extraction — "haan"/"approve"
+      // shouldn't get run through GPT extraction as if it were listing
+      // details (it isn't; it has none).
+      if (session.awaitingApproval && isApprovalReply(message.trim())) {
+        if (listing.status !== 'active') {
+          await knex('listings').where({ id: session.listingId }).update({ status: 'active', updated_at: knex.fn.now() });
+          listing = await knex('listings').where({ id: session.listingId }).first();
+        }
+        session.awaitingApproval = false;
+        await saveSession(sessionId, session);
+
+        return res.status(200).json({
+          reply: `Live ho gaya! Yahan hai aapki listing ka link:\n${buildPreviewLink(listing.public_slug)}`,
+          listing: listingSummary(listing, listing.public_slug, true),
+        });
       }
 
-      await saveSession(sessionId, session);
-      return res.status(200).json({
-        reply: "Updated! Anything else you'd like to add or change?",
-        listing: listingSummary(listing),
-      });
+      const extracted = await extractListingFields(message.trim());
+
+      if (isSameProperty(listing, extracted)) {
+        const patch = {};
+        if (extracted.title) patch.title = extracted.title.trim();
+        if (extracted.price) patch.price = parseFloat(extracted.price);
+        if (extracted.plot_area) patch.plot_area = extracted.plot_area.trim();
+        if (extracted.property_type) patch.property_type = extracted.property_type.trim();
+        if (extracted.description) patch.description = extracted.description.trim();
+
+        if (Object.keys(patch).length > 0) {
+          patch.updated_at = knex.fn.now();
+          await knex('listings').where({ id: session.listingId }).update(patch);
+          listing = await knex('listings').where({ id: session.listingId }).first();
+        }
+
+        await saveSession(sessionId, session);
+        const reply = session.awaitingApproval
+          ? "Updated! Sahi hai to reply karo 'haan' ya 'approve' — publish ho jayegi. Kuch aur badalna hai to bata dijiye."
+          : "Updated! Anything else you'd like to add or change?";
+
+        return res.status(200).json({
+          reply,
+          listing: listingSummary(listing, listing.public_slug, listing.status === 'active'),
+        });
+      }
+
+      // Different property — start over rather than folding this message's
+      // details into the previous listing's accumulated text.
+      session.listingId = null;
+      session.awaitingApproval = false;
+      session.accumulatedText = '';
     }
 
+    session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim().slice(-MAX_ACCUMULATED_CHARS);
     const extracted = await extractListingFields(session.accumulatedText);
     const missing = REQUIRED_FIELDS.filter((f) => !extracted[f]);
 
@@ -188,11 +254,12 @@ async function handleWebChatMessage(req, res) {
     });
 
     session.listingId = newListing.id;
+    session.awaitingApproval = true;
     await saveSession(sessionId, session);
 
     return res.status(200).json({
-      reply: `Got it! I've mapped the address and created your listing — "${newListing.title}".`,
-      listing: listingSummary({ title: newListing.title, raw_address: extracted.raw_address }),
+      reply: `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`,
+      listing: listingSummary({ ...extracted, title: newListing.title }, newListing.public_slug, false),
     });
 
   } catch (error) {

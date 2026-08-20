@@ -136,10 +136,17 @@
   .listing-card .body{ padding:9px 10px 10px; }
   .listing-card .title{ font-weight:700; font-size:13.5px; margin-bottom:2px; color:var(--text); }
   .listing-card .addr{ font-size:12px; color:#6b6153; }
+  .listing-card .facts{ font-size:12px; color:var(--brand-dark); font-weight:600; margin-top:3px; }
   .listing-card .tag{
     display:inline-block; margin-top:6px; background:var(--brand-tint); color:var(--brand-dark);
     font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px;
   }
+  .listing-card .tag.pending{ background:#f3e9d2; color:#8a6a1f; }
+  .listing-card .link{
+    display:block; margin-top:7px; font-size:12.5px; font-weight:600;
+    color:var(--brand); text-decoration:none; word-break:break-all;
+  }
+  .listing-card .link:hover{ text-decoration:underline; }
 
   .suggestions{ display:flex; flex-wrap:wrap; gap:6px; padding:0 12px 10px; }
   .chip{
@@ -267,12 +274,24 @@
 
   function listingCardHtml(listing){
     if(!listing) return '';
+    const factsParts = [listing.propertyType, listing.plotArea, listing.price].filter(Boolean);
+    const facts = factsParts.length
+      ? `<div class="facts">${escapeHtml(factsParts.join(' · '))}</div>`
+      : '';
+    const link = listing.link
+      ? `<a class="link" href="${escapeHtml(listing.link)}" target="_blank" rel="noopener">🔗 ${escapeHtml(listing.link)}</a>`
+      : '';
+    const tag = listing.published
+      ? '<span class="tag">Live — client-ready</span>'
+      : '<span class="tag pending">Preview — awaiting approval</span>';
     return `<div class="listing-card">
       <div class="thumb">PLOT MAPPED</div>
       <div class="body">
         <div class="title">${escapeHtml(listing.title || 'New listing')}</div>
         <div class="addr">${escapeHtml(listing.address || '')}</div>
-        <span class="tag">Listing created</span>
+        ${facts}
+        ${link}
+        ${tag}
       </div>
     </div>`;
   }
@@ -340,7 +359,7 @@
   inputEl.addEventListener('input', updateFallbackHref);
   updateFallbackHref();
 
-  addSystem("Hi! I'm Plotra's AI assistant. Send a property address and I'll map it and create a listing — try a suggestion below, or type your own.");
+  addSystem("Hi! I'm Plotra's AI assistant. Send a property address and I'll map it and prepare a listing for you to approve — try a suggestion below, or type your own.");
   statusline.textContent = 'connecting…';
 })();
 </script>
