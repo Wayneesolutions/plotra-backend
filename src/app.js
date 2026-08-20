@@ -6,6 +6,7 @@ const dashboardRouter = require('./routes/dashboard');
 const publicRouter = require('./routes/public');
 const webhooksRouter = require('./routes/webhooks');
 const adminRouter = require('./routes/admin');
+const chatRouter = require('./routes/chat');
 const { servePropertyPreview } = require('./controllers/ogPreviewController');
 
 const app = express();
@@ -49,6 +50,10 @@ app.use('/api/v1/public', publicRouter);
 
 // Public webhook ingest (BSP can't send a Bearer token — verified via HMAC instead)
 app.use('/api/v1/webhooks', webhooksRouter);
+
+// Public web-chat endpoint — synchronous counterpart to the WhatsApp
+// agent-intake flow, for demoing the product without a live WhatsApp number
+app.use('/api/v1/chat', chatRouter);
 
 // Protected dealer dashboard routes
 app.use('/api/v1/dashboard', dashboardRouter);
