@@ -44,7 +44,7 @@ Your job is to answer buyer queries about specific plots professionally, accurat
 PROPERTY DETAILS:
 - Title: ${listing.title}
 - Property Type: ${listing.property_type}
-- Price: INR ${parseFloat(listing.price).toLocaleString('en-IN')}
+- Price: ${listing.price != null ? 'INR ' + parseFloat(listing.price).toLocaleString('en-IN') : 'Not disclosed publicly — if asked, say pricing is available on request and offer to have an agent follow up.'}
 - Area: ${listing.plot_area}
 - Location Description: ${listing.description}
 

@@ -81,11 +81,13 @@ async function servePropertyPreview(req, res, next) {
     }
 
     const address = listing.formatted_address || listing.raw_address;
-    const priceFormatted = new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
-      maximumFractionDigits: 0,
-    }).format(listing.price);
+    const priceFormatted = listing.price != null
+      ? new Intl.NumberFormat('en-IN', {
+          style: 'currency',
+          currency: 'INR',
+          maximumFractionDigits: 0,
+        }).format(listing.price)
+      : 'Price on request';
 
     const description =
       listing.description ||

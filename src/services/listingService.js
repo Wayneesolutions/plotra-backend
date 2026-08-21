@@ -50,8 +50,8 @@ async function createListingRecord(knex, {
   propertyType,
   description,
 }) {
-  if (!title || !rawAddress || !price || !propertyType) {
-    const err = new Error('Title, raw address, price, and property type are required fields.');
+  if (!title || !rawAddress || !propertyType) {
+    const err = new Error('Title, raw address, and property type are required fields.');
     err.name = 'ValidationError';
     throw err;
   }
@@ -78,7 +78,7 @@ async function createListingRecord(knex, {
       source,
       title: title.trim(),
       raw_address: rawAddress.trim(),
-      price: parseFloat(price),
+      price: (price !== null && price !== undefined && price !== '') ? parseFloat(price) : null,
       plot_area: plotArea ? plotArea.trim() : null,
       property_type: propertyType.trim(),
       description: description ? description.trim() : null,

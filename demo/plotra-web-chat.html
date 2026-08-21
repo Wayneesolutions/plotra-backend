@@ -11,6 +11,7 @@
   // ------------------------------------------------------------
   window.PLOTRA_CONFIG = {
     API_ENDPOINT: "https://plotra.wayneesolutions.com/api/v1/chat/web", // <-- backend must implement this
+    PHOTO_ENDPOINT: "https://plotra.wayneesolutions.com/api/v1/chat/web/photo", // dealer photo upload
     WHATSAPP_FALLBACK_NUMBER: "919465339629" // used for the "Continue on WhatsApp" fallback button
   };
 </script>
@@ -220,6 +221,8 @@
     </div>
 
     <div class="inputbar">
+      <input type="file" id="photoInput" accept="image/jpeg,image/png,image/webp" style="display:none;" />
+      <button id="attachBtn" aria-label="Add photo" title="Add a photo of the property" type="button">📷</button>
       <input id="input" type="text" placeholder="Type an address, e.g. Hno 102 Lahri Nagar, Ludhiana…" />
       <button id="sendBtn" aria-label="Send">&#10148;</button>
     </div>
@@ -242,6 +245,8 @@
   const statusline = document.getElementById('statusline');
   const fallbackLink = document.getElementById('fallbackLink');
   const suggestionsEl = document.getElementById('suggestions');
+  const attachBtn = document.getElementById('attachBtn');
+  const photoInput = document.getElementById('photoInput');
 
   // Session id kept in memory only (no localStorage) — resets on page reload.
   const sessionId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
@@ -365,6 +370,52 @@
   inputEl.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') sendMessage(inputEl.value); });
   suggestionsEl.querySelectorAll('.chip').forEach((chip) => {
     chip.addEventListener('click', () => sendMessage(chip.dataset.text));
+  });
+
+  // Photo attach: dealer picks a file -> shown immediately as an outgoing
+  // image bubble (local preview via a data URL, no round trip needed for
+  // that part) -> uploaded to PHOTO_ENDPOINT -> backend's confirmation
+  // (or error, e.g. "describe the property first") comes back as a normal
+  // incoming bubble, same as a text reply.
+  attachBtn.addEventListener('click', () => photoInput.click());
+
+  photoInput.addEventListener('change', async () => {
+    const file = photoInput.files && photoInput.files[0];
+    photoInput.value = ''; // allow picking the same file again later
+    if (!file) return;
+
+    const localPreviewUrl = URL.createObjectURL(file);
+    const row = document.createElement('div');
+    row.className = 'row out';
+    row.innerHTML = `<div class="bubble"><img src="${localPreviewUrl}" alt="Uploaded photo" style="max-width:100%;border-radius:10px;display:block;"/><span style="display:block;text-align:right;font-size:10.5px;color:var(--meta);margin-top:4px;">${timeStamp()}</span></div>`;
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    typingEl.classList.add('show');
+    attachBtn.disabled = true;
+
+    try {
+      const formData = new FormData();
+      formData.append('photo', file);
+      formData.append('session_id', sessionId);
+
+      const res = await fetch(CFG.PHOTO_ENDPOINT, { method: 'POST', body: formData });
+      const data = await res.json().catch(() => ({}));
+      typingEl.classList.remove('show');
+
+      if (!res.ok) {
+        addSystem(data?.error?.message || "Couldn't upload that photo. Please try again.");
+        return;
+      }
+
+      addBubble('in', data.reply || 'Photo added.');
+    } catch (err) {
+      console.error('Plotra web chat: photo upload failed —', err);
+      typingEl.classList.remove('show');
+      addSystem("Couldn't reach Plotra's assistant to upload that photo. Please try again in a moment.");
+    } finally {
+      attachBtn.disabled = false;
+    }
   });
 
   // Build WhatsApp fallback link with whatever the visitor typed so far, or a sensible default.

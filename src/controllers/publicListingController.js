@@ -262,16 +262,21 @@ async function capturePublicLead(req, res) {
 
     // 4. Queue the first-touch message — same shape whatsappOutboundWorker.js
     //    already expects from vocallmWorker.js, so no worker changes needed.
-    const formattedPrice = new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
-      maximumFractionDigits: 0
-    }).format(listing.price);
+    const formattedPrice = listing.price != null
+      ? new Intl.NumberFormat('en-IN', {
+          style: 'currency',
+          currency: 'INR',
+          maximumFractionDigits: 0
+        }).format(listing.price)
+      : null;
 
-    const firstTouchMessage =
-      `Hi${lead.name ? ' ' + lead.name : ''}! Thanks for your interest in "${listing.title}" ` +
-      `(${formattedPrice}). Our team will follow up shortly with more details — feel free to ask ` +
-      `anything about the property here on WhatsApp in the meantime.`;
+    const firstTouchMessage = formattedPrice
+      ? `Hi${lead.name ? ' ' + lead.name : ''}! Thanks for your interest in "${listing.title}" ` +
+        `(${formattedPrice}). Our team will follow up shortly with more details — feel free to ask ` +
+        `anything about the property here on WhatsApp in the meantime.`
+      : `Hi${lead.name ? ' ' + lead.name : ''}! Thanks for your interest in "${listing.title}". ` +
+        `Our team will follow up shortly with more details, including pricing — feel free to ask ` +
+        `anything about the property here on WhatsApp in the meantime.`;
 
     await whatsappOutboundQueue.add('send-first-touch', {
       tenantId,

@@ -9,9 +9,15 @@
 // See BACKEND_API_SPEC.md for the frontend contract this implements.
 const IORedis = require('ioredis');
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
-const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
+const { extractListingFields, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { uploadToS3 } = require('../services/s3Service');
+
+// mediaController.js's MAX_PHOTOS isn't exported (it's a local const there) —
+// duplicated here rather than exporting it just for this, since it's a
+// single number that's safe to keep in sync by hand if it ever changes.
+const MAX_PHOTOS_WEB = 10;
 
 // English counterparts to listingExtractionService's FIELD_QUESTIONS, which
 // is Hindi/Hinglish-only and shared with the WhatsApp agent-intake flow
@@ -19,6 +25,13 @@ const { detectReplyLanguage } = require('../utils/replyLanguage');
 // overwhelmingly write in Hinglish/Punjabi. Kept as a separate object here
 // rather than changing the shared one, so this only changes web-chat
 // behavior. See replyLanguage.js for how the language is picked per message.
+// Price deliberately left out of what's required for web chat — some
+// dealers don't want a public price ("price on request" listings are
+// common). WhatsApp's own required-fields list (listingExtractionService.js)
+// is untouched and still requires it, since that flow wasn't part of what
+// was asked to change here.
+const REQUIRED_FIELDS_WEB = ['title', 'raw_address', 'property_type'];
+
 const FIELD_QUESTIONS_EN = {
   raw_address: "What's the location/address? (e.g. 'Sector 45, Mohali')",
   price: "What's the price? (e.g. 55 lakh)",
@@ -302,7 +315,7 @@ async function handleWebChatMessage(req, res) {
 
     session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim().slice(-MAX_ACCUMULATED_CHARS);
     const extracted = await extractListingFields(session.accumulatedText);
-    const missing = REQUIRED_FIELDS.filter((f) => !extracted[f]);
+    const missing = REQUIRED_FIELDS_WEB.filter((f) => !extracted[f]);
 
     if (missing.length > 0) {
       await saveSession(sessionId, session);
@@ -349,4 +362,79 @@ async function handleWebChatMessage(req, res) {
   }
 }
 
-module.exports = { handleWebChatMessage };
+// POST /api/v1/chat/web/photo — lets a dealer attach a real photo of the
+// property to their in-progress (or already-published) listing, from the
+// same public web chat, no login. Mirrors the dashboard's authenticated
+// upload (mediaController.js) but resolves the listing via the chat
+// session (session.listingId) instead of a JWT-scoped tenant_id, since
+// there's no logged-in user here — same identity-resolution approach
+// handleWebChatMessage already uses.
+async function handleWebChatPhotoUpload(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { session_id: sessionId } = req.body || {};
+
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.length > MAX_SESSION_ID_LENGTH) {
+    return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'session_id is required.' } });
+  }
+  if (!req.file) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'No photo uploaded.' } });
+  }
+
+  try {
+    const identity = await resolveWebChatIdentity(knex);
+    if (!identity) {
+      return res.status(500).json({ error: { code: 'NO_TENANT', message: 'No tenant configured for web chat.' } });
+    }
+
+    const session = await getSession(sessionId);
+    if (!session.listingId) {
+      return res.status(400).json({
+        error: { code: 'NO_LISTING', message: 'Describe the property first — once a listing exists, you can add photos to it.' },
+      });
+    }
+
+    // Same tenant check handleWebChatMessage does — a session's listingId
+    // is already scoped to whatever it created, but this guards against a
+    // stale session pointing at a listing under a since-changed
+    // WEB_CHAT_TENANT_ID, same reasoning as the message handler.
+    const listing = await knex('listings').where({ id: session.listingId, tenant_id: identity.tenantId }).first();
+    if (!listing) {
+      return res.status(404).json({
+        error: { code: 'LISTING_UNAVAILABLE', message: 'That listing is no longer available. Please start over.' },
+      });
+    }
+
+    const mediaRow = await knex('listing_media').where({ listing_id: listing.id }).first();
+    const currentPhotos = mediaRow?.photo_urls || [];
+
+    if (currentPhotos.length >= MAX_PHOTOS_WEB) {
+      return res.status(400).json({
+        error: { code: 'VALIDATION_ERROR', message: `Maximum ${MAX_PHOTOS_WEB} photos allowed per listing.` },
+      });
+    }
+
+    const url = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype);
+    const updatedPhotos = [...currentPhotos, url];
+
+    if (mediaRow) {
+      await knex('listing_media').where({ listing_id: listing.id }).update({ photo_urls: JSON.stringify(updatedPhotos) });
+    } else {
+      await knex('listing_media').insert({ listing_id: listing.id, photo_urls: JSON.stringify(updatedPhotos) });
+    }
+
+    // Kept language-neutral (no accompanying text message to detect a
+    // language from here, unlike handleWebChatMessage) — the emoji + count
+    // reads fine either way rather than guessing a language for one line.
+    return res.status(201).json({
+      success: true,
+      url,
+      photo_count: updatedPhotos.length,
+      reply: `📷 Photo added (${updatedPhotos.length}/${MAX_PHOTOS_WEB}).`,
+    });
+  } catch (err) {
+    console.error('Web chat photo upload failed:', err.message);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to upload photo. Please try again.' } });
+  }
+}
+
+module.exports = { handleWebChatMessage, handleWebChatPhotoUpload };
