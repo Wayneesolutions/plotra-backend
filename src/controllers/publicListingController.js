@@ -1,5 +1,7 @@
 const { Queue } = require('bullmq');
+const axios = require('axios');
 const { normalizePhone, toWaMeDigits } = require('../utils/phone');
+const { applyResolvedLocation } = require('../services/locationResolutionService');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -306,4 +308,101 @@ async function capturePublicLead(req, res) {
   }
 }
 
-module.exports = { getPublicListing, logVisit, capturePublicLead };
+/**
+ * PATCH /api/v1/public/listings/:slug/location
+ * Lets a dealer manually drag the map pin to the exact spot before
+ * approving, when the AI's geocode is close but not quite right (a
+ * plot corner, an address Google can't pin precisely even with a PIN
+ * code). Pre-approval only — see the status check below.
+ *
+ * This route is public/unauthenticated, same as the rest of this
+ * controller (no login on this channel, matching the WhatsApp-style
+ * intake flow) — a listing's public_slug is the only thing gating
+ * access to it. That's an acceptable trust model for a not-yet-
+ * published draft (functionally no different from anyone who already
+ * has the preview link being able to approve/edit it via the chat
+ * itself), but would NOT be acceptable once a listing is live — any
+ * visitor with the link could then silently relocate a published
+ * listing. Hence the hard block on status === 'active' below.
+ */
+async function updateListingLocation(req, res) {
+  const knex = req.app.get('db');
+  const { slug } = req.params;
+  const { lat, lng } = req.body || {};
+
+  const nLat = typeof lat === 'number' ? lat : parseFloat(lat);
+  const nLng = typeof lng === 'number' ? lng : parseFloat(lng);
+
+  if (!Number.isFinite(nLat) || !Number.isFinite(nLng) || nLat < -90 || nLat > 90 || nLng < -180 || nLng > 180) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: 'lat and lng must be valid coordinates.' }
+    });
+  }
+
+  try {
+    const listing = await knex('listings').where({ public_slug: slug }).first();
+    if (!listing) {
+      return res.status(404).json({
+        error: { code: 'NOT_FOUND', message: 'This property listing is no longer available or active.' }
+      });
+    }
+
+    if (listing.status === 'active') {
+      return res.status(409).json({
+        error: { code: 'ALREADY_PUBLISHED', message: 'This listing is already live — its location can no longer be adjusted this way.' }
+      });
+    }
+
+    const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
+    const targetApiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+
+    if (!targetApiKey) {
+      return res.status(500).json({
+        error: { code: 'NO_API_KEY', message: 'Maps configuration is missing for this account.' }
+      });
+    }
+
+    // Best-effort reverse geocode so the displayed address stays roughly
+    // consistent with the manually-corrected point. Not fatal if this
+    // fails — the coordinates are still the dealer's explicit correction
+    // regardless of whether a nice address string comes back for them;
+    // falls back to whatever address the listing already had.
+    let formattedAddress = null;
+    try {
+      const reverseUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${nLat},${nLng}&key=${targetApiKey}`;
+      const reverseResponse = await axios.get(reverseUrl, { timeout: 8000 });
+      if (reverseResponse.data.status === 'OK' && reverseResponse.data.results.length) {
+        formattedAddress = reverseResponse.data.results[0].formatted_address;
+      }
+    } catch (reverseErr) {
+      console.error('Reverse geocode for manual pin correction failed (non-fatal):', reverseErr.message);
+    }
+
+    // Deliberately no extraListingUpdates — status is left exactly as-is
+    // (already 'pending' or 'awaiting_approval', which is why this was
+    // even allowed above). Only geoEnrichmentWorker.js's own job decides
+    // status transitions.
+    await applyResolvedLocation(knex, {
+      listingId: listing.id,
+      lat: nLat,
+      lng: nLng,
+      formattedAddress,
+      targetApiKey,
+      propertyType: listing.property_type,
+    });
+
+    return res.status(200).json({
+      success: true,
+      lat: nLat,
+      lng: nLng,
+      formatted_address: formattedAddress || listing.formatted_address,
+    });
+  } catch (error) {
+    console.error('Failed to update listing location:', error.message);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to update location. Please try again.' }
+    });
+  }
+}
+
+module.exports = { getPublicListing, logVisit, capturePublicLead, updateListingLocation };

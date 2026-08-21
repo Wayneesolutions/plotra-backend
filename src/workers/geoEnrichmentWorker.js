@@ -5,6 +5,7 @@ const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { applyResolvedLocation } = require('../services/locationResolutionService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -12,14 +13,11 @@ const REDIS_PORT = process.env.REDIS_PORT || 6379;
 // Connect to dedicated background Redis event broker
 const redisConnection = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRetriesPerRequest: null }); // required by BullMQ Worker (blocking commands) — omitting this throws on boot
 
-// Queue used to hand off to landmarkWorker.js once coordinates are known
-const landmarkQueue = new Queue('landmark-extraction', { connection: redisConnection });
-// Local Intelligence (real, cited neighborhood news/safety/seasonal context)
-// — same reasoning as landmarks for not blocking anything on it: not shown
-// in the OG preview card, safe to generate in the background.
-const localIntelligenceQueue = new Queue('local-intelligence', { connection: redisConnection });
 // Only used for WhatsApp agent-intake listings (job.data.draftId present) —
-// see agentIntakeWorker.js's 'send-preview' handler.
+// see agentIntakeWorker.js's 'send-preview' handler. landmark-extraction
+// and local-intelligence queues moved into locationResolutionService.js,
+// shared with the manual pin-correction endpoint — no longer declared
+// here to avoid a second, redundant Queue connection to the same queues.
 const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
 
 console.log(`[Worker Engine] Initializing Geo-Enrichment Task Consumer...`);
@@ -90,64 +88,31 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     const formattedAddress = result.formatted_address;
     const { lat, lng } = result.geometry.location;
 
-    // 2. Persist calculations back to listings inside a safe database transaction block
-    await knex.transaction(async (trx) => {
-      await trx('listings')
-        .where({ id: listingId })
-        .update({
-          formatted_address: formattedAddress,
-          lat: lat,
-          lng: lng,
-          // Conversational-intake listings (source: 'whatsapp' or 'web') wait
-          // for an approval reply in that same conversation before going
-          // publicly active — see agentIntakeController.js/
-          // agentIntakeWorker.js for WhatsApp, webChatController.js for the
-          // web-chat channel. Dashboard-created listings keep the original
-          // immediate pending->active behavior, unchanged.
-          status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
-          updated_at: knex.fn.now()
-        });
-
-      // 3. Initialize default structural records inside the listing_media table to avoid null errors on the UI
-      // Pre-configures maps snapshots for immediate rendering
-      const staticSatelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=18&size=800x450&maptype=satellite&key=${targetApiKey}`;
-      const staticStreetViewUrl = `https://maps.googleapis.com/maps/api/streetview?size=800x450&location=${lat},${lng}&key=${targetApiKey}`;
-
-      await trx('listing_media')
-        .insert({
-          id: knex.raw('uuid_generate_v4()'),
-          listing_id: listingId,
-          satellite_image_url: staticSatelliteUrl,
-          streetview_image_url: staticStreetViewUrl,
-          fetched_at: knex.fn.now()
-        })
-        .onConflict('listing_id')
-        .merge();
-    });
-
-    // 4. Now that coordinates exist, hand off to the landmark worker (Phase 2 enrichment)
-    await landmarkQueue.add('extract-infra-landmarks', {
-      listingId: listingId,
-      lat: lat,
-      lng: lng
-    }, {
-      attempts: 2,
-      backoff: 1000
+    // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
+    // street-view fallback images, and re-queue landmark + local-
+    // intelligence enrichment — shared with the manual pin-correction
+    // endpoint (publicListingController.js) via locationResolutionService.js.
+    // Conversational-intake listings (source: 'whatsapp' or 'web') wait for
+    // an approval reply in that same conversation before going publicly
+    // active — see agentIntakeController.js/agentIntakeWorker.js for
+    // WhatsApp, webChatController.js for the web-chat channel. Dashboard-
+    // created listings keep the original immediate pending->active
+    // behavior, unchanged. Folded into the same transaction via
+    // extraListingUpdates rather than a separate statement, so the status
+    // flip and the coordinates land atomically together.
+    await applyResolvedLocation(knex, {
+      listingId,
+      lat,
+      lng,
+      formattedAddress,
+      targetApiKey,
+      propertyType: listingData.property_type,
+      extraListingUpdates: {
+        status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
+      },
     });
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
-
-    // 4b. Also kick off Local Intelligence research in parallel — independent
-    // of the landmark chain, so a slow/failed web-search-grounded lookup
-    // never blocks or fails listing creation itself.
-    await localIntelligenceQueue.add('generate', {
-      listingId: listingId,
-      formattedAddress: formattedAddress,
-      propertyType: listingData.property_type,
-    }, {
-      attempts: 2,
-      backoff: { type: 'exponential', delay: 3000 },
-    });
 
     // 5. WhatsApp agent-intake listings: don't block on landmarks finishing
     // (they're not shown in the OG preview card — title/image/price only,

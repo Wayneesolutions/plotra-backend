@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getPublicListing, logVisit, capturePublicLead } = require('../controllers/publicListingController');
+const { getPublicListing, logVisit, capturePublicLead, updateListingLocation } = require('../controllers/publicListingController');
 const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
 const { submitAccessRequest } = require('../controllers/adminController');
 // Phase 6 — monetization
@@ -33,6 +33,16 @@ router.post('/listings/:slug/visit', publicWriteLimiter, logVisit);
  * @access  Public
  */
 router.post('/listings/:slug/lead', publicWriteLimiter, capturePublicLead);
+
+/**
+ * @route   PATCH /api/v1/public/listings/:slug/location
+ * @desc    Lets a dealer manually drag the map pin to the exact spot
+ *          before approving — pre-approval only (hard-blocked once a
+ *          listing is 'active', so an already-live listing can't be
+ *          silently relocated by anyone with the link).
+ * @access  Public, same reasoning as the routes above.
+ */
+router.patch('/listings/:slug/location', publicWriteLimiter, updateListingLocation);
 
 /**
  * @route   GET /api/v1/public/listings/:slug/builder-profile
