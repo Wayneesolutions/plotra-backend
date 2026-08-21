@@ -8,9 +8,27 @@
 //
 // See BACKEND_API_SPEC.md for the frontend contract this implements.
 const IORedis = require('ioredis');
-const { createListingRecord, ListingLimitError } = require('../services/listingService');
-const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS } = require('../services/listingExtractionService');
+const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
+const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
+const { detectReplyLanguage } = require('../utils/replyLanguage');
+
+// English counterparts to listingExtractionService's FIELD_QUESTIONS, which
+// is Hindi/Hinglish-only and shared with the WhatsApp agent-intake flow
+// (agentIntakeWorker.js) — left untouched there since WhatsApp dealers here
+// overwhelmingly write in Hinglish/Punjabi. Kept as a separate object here
+// rather than changing the shared one, so this only changes web-chat
+// behavior. See replyLanguage.js for how the language is picked per message.
+const FIELD_QUESTIONS_EN = {
+  raw_address: "What's the location/address? (e.g. 'Sector 45, Mohali')",
+  price: "What's the price? (e.g. 55 lakh)",
+  property_type: 'What type of property — Plot, Villa, or Commercial?',
+  title: 'Give me a short title for this listing.',
+};
+
+function fieldQuestionsFor(lang) {
+  return lang === 'en' ? FIELD_QUESTIONS_EN : FIELD_QUESTIONS_HI;
+}
 
 function buildPreviewLink(publicSlug) {
   return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
@@ -156,6 +174,13 @@ async function handleWebChatMessage(req, res) {
       return res.status(500).json({ error: { code: 'NO_TENANT', message: 'No tenant configured for web chat.' } });
     }
 
+    // Detected fresh per message rather than pinned once per session — the
+    // web chat had no language awareness at all before this (every reply
+    // was hardcoded Hindi/Hinglish, regardless of what the realtor typed).
+    // This is a cheap heuristic (see replyLanguage.js), not true language
+    // detection — defaults to English when unclear.
+    const lang = detectReplyLanguage(message);
+
     const session = await getSession(sessionId);
 
     // Listing already created earlier in this session — check whether this
@@ -190,14 +215,29 @@ async function handleWebChatMessage(req, res) {
         await saveSession(sessionId, session);
 
         return res.status(200).json({
-          reply: `Live ho gaya! Yahan hai aapki listing ka link:\n${buildPreviewLink(listing.public_slug)}`,
+          reply: lang === 'en'
+            ? `It's live! Here's your listing link:\n${buildPreviewLink(listing.public_slug)}`
+            : `Live ho gaya! Yahan hai aapki listing ka link:\n${buildPreviewLink(listing.public_slug)}`,
           listing: listingSummary(listing, listing.public_slug, true),
         });
       }
 
       const extracted = await extractListingFields(message.trim());
 
-      if (isSameProperty(listing, extracted)) {
+      // While the listing is still an unpublished draft (awaitingApproval),
+      // ANY follow-up message is an edit to *this* listing — a realtor
+      // correcting "actually it's house 45, not 44" is not trying to start
+      // a second, unrelated property. isSameProperty's exact-text address
+      // match was the wrong gate here: any real correction to the address
+      // almost never matches the original text verbatim, so it fell
+      // through to "different property, start over" — silently abandoning
+      // the draft (and its link/photos) and creating a second listing the
+      // realtor never asked for, which is what looked like the edit "not
+      // being taken." Once a listing is actually published (approved),
+      // session.awaitingApproval is false and isSameProperty's stricter
+      // check takes back over — a new address after publish should start
+      // a fresh listing, which is still correct.
+      if (session.awaitingApproval || isSameProperty(listing, extracted)) {
         const patch = {};
         if (extracted.title) patch.title = extracted.title.trim();
         if (extracted.price) patch.price = parseFloat(extracted.price);
@@ -205,16 +245,47 @@ async function handleWebChatMessage(req, res) {
         if (extracted.property_type) patch.property_type = extracted.property_type.trim();
         if (extracted.description) patch.description = extracted.description.trim();
 
+        // The address itself was never in this patch before — meaning even
+        // a same-property, GPT-confirmed correction to the address text
+        // silently didn't apply. If it actually changed, also re-queue
+        // geo-enrichment (same job creation uses) so lat/lng, the
+        // satellite/street-view media, and nearby landmarks all get
+        // recomputed for the corrected address instead of staying pinned
+        // to wherever the first draft geocoded to.
+        let addressChanged = false;
+        if (extracted.raw_address) {
+          const newAddress = extracted.raw_address.trim();
+          if (newAddress.toLowerCase() !== (listing.raw_address || '').trim().toLowerCase()) {
+            patch.raw_address = newAddress;
+            patch.status = 'pending'; // re-enrichment in flight — same status a brand-new listing starts in
+            addressChanged = true;
+          }
+        }
+
         if (Object.keys(patch).length > 0) {
           patch.updated_at = knex.fn.now();
           await knex('listings').where({ id: session.listingId }).update(patch);
           listing = await knex('listings').where({ id: session.listingId }).first();
         }
 
+        if (addressChanged) {
+          await enqueueGeoEnrichment({ listingId: session.listingId, rawAddress: patch.raw_address });
+        }
+
         await saveSession(sessionId, session);
-        const reply = session.awaitingApproval
-          ? "Updated! Sahi hai to reply karo 'haan' ya 'approve' — publish ho jayegi. Kuch aur badalna hai to bata dijiye."
-          : "Updated! Anything else you'd like to add or change?";
+
+        let reply;
+        if (addressChanged) {
+          reply = lang === 'en'
+            ? "Address updated — mapping the new location now, this'll take a moment (satellite/street view will refresh too). Let me know if there's anything else to change, or reply 'yes'/'approve' once it looks right."
+            : "Address update ho gaya — naya location map ho raha hai, thoda time lagega (satellite/street view bhi refresh hongi). Kuch aur badalna hai to bata dijiye, warna 'haan' ya 'approve' bol dijiye jab sahi lage.";
+        } else if (session.awaitingApproval) {
+          reply = lang === 'en'
+            ? "Updated! Reply 'yes' or 'approve' to publish it. Let me know if there's anything else to change."
+            : "Updated! Sahi hai to reply karo 'haan' ya 'approve' — publish ho jayegi. Kuch aur badalna hai to bata dijiye.";
+        } else {
+          reply = "Updated! Anything else you'd like to add or change?";
+        }
 
         return res.status(200).json({
           reply,
@@ -235,8 +306,9 @@ async function handleWebChatMessage(req, res) {
 
     if (missing.length > 0) {
       await saveSession(sessionId, session);
+      const questions = fieldQuestionsFor(lang);
       return res.status(200).json({
-        reply: missing.map((f) => FIELD_QUESTIONS[f]).join(' '),
+        reply: missing.map((f) => questions[f]).join(' '),
         listing: null,
       });
     }
@@ -258,7 +330,9 @@ async function handleWebChatMessage(req, res) {
     await saveSession(sessionId, session);
 
     return res.status(200).json({
-      reply: `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`,
+      reply: lang === 'en'
+        ? `Here's your listing preview:\n${buildPreviewLink(newListing.public_slug)}\n\nReply "yes" or "approve" if it looks right — it'll go live and be ready to share with a client. Send a new detail if anything needs changing.`
+        : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`,
       listing: listingSummary({ ...extracted, title: newListing.title }, newListing.public_slug, false),
     });
 
