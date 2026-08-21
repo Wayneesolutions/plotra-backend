@@ -72,4 +72,30 @@ async function inviteTenantUser(req, res) {
   }
 }
 
-module.exports = { inviteTenantUser };
+/**
+ * GET /api/v1/dashboard/users
+ * Lists this tenant's team members — powers the "assign to" dropdown for
+ * per-listing WhatsApp attribution (listingController.js) as well as any
+ * general team-management view. Includes users with no phone set too
+ * (the frontend should just make clear those can't be assigned yet).
+ */
+async function listTenantUsers(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { tenant_id } = req.user;
+
+  try {
+    const users = await knex('users')
+      .where({ tenant_id })
+      .select('id', 'name', 'email', 'phone', 'role')
+      .orderBy('name', 'asc');
+
+    return res.status(200).json({ success: true, users });
+  } catch (error) {
+    console.error('Failed to list tenant users:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to load team members.' }
+    });
+  }
+}
+
+module.exports = { inviteTenantUser, listTenantUsers };

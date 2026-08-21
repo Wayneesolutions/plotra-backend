@@ -23,6 +23,11 @@ async function getPublicListing(req, res) {
     //    joined with the owning tenant for dealer/WhatsApp display info.
     const listing = await knex('listings')
       .join('tenants', 'listings.tenant_id', 'tenants.id')
+      // Per-listing WhatsApp attribution (growth/unlimited plans) — when
+      // set, this listing's buyer-facing contact is a specific team
+      // member's number instead of the tenant's shared default. See
+      // migration 20260821_04 and listingService.js's validateAssignedAgent.
+      .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
       .select(
         'listings.id',
         'listings.tenant_id',
@@ -38,7 +43,9 @@ async function getPublicListing(req, res) {
         'listings.status',
         'listings.public_slug',
         'tenants.business_name as dealer_business_name',
-        'tenants.whatsapp_number as dealer_whatsapp_number'
+        'tenants.whatsapp_number as dealer_whatsapp_number',
+        'assigned_agent.phone as assigned_agent_phone',
+        'assigned_agent.name as assigned_agent_name'
       )
       // 'awaiting_approval' included alongside 'active' so the agent who
       // just texted this listing in via WhatsApp can view the exact same
@@ -87,10 +94,11 @@ async function getPublicListing(req, res) {
       : null;
 
     // 4. Dealer's WhatsApp number for the free V4 "chat with us" CTA link —
-    //    dedicated number if the tenant has one (Ch.12.3), else the shared
-    //    platform number from env.
+    //    this listing's assigned agent (per-listing attribution, growth/
+    //    unlimited plans) takes priority if set, then the tenant's own
+    //    dedicated number (Ch.12.3), else the shared platform number from env.
     const dealerWhatsappDigits = toWaMeDigits(
-      listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
+      listing.assigned_agent_phone || listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
     );
 
     // 5. Structure data matching the verified success protocol
@@ -115,6 +123,7 @@ async function getPublicListing(req, res) {
       localIntelligence,
       dealer: {
         businessName: listing.dealer_business_name,
+        agentName: listing.assigned_agent_name || null,
         whatsappDigits: dealerWhatsappDigits || null
       }
     });

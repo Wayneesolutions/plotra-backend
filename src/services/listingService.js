@@ -24,6 +24,42 @@ class ListingLimitError extends Error {
 }
 
 /**
+ * Validates a proposed listings.assigned_agent_id — per-listing WhatsApp
+ * attribution (a specific team member's number shown to buyers on this
+ * listing, instead of the tenant's default) is gated to plans with
+ * multi_agent_whatsapp (growth/unlimited — see migration 20260821_04),
+ * and the referenced user must actually belong to this tenant. Never
+ * silently downgrades an invalid request to null — that would look like
+ * it worked when it didn't; callers should surface the thrown
+ * ValidationError instead.
+ *
+ * Returns null for "no assignment" (clears any existing one) without
+ * needing the plan check — clearing an assignment is always allowed,
+ * same as how a Starter-plan tenant can still see/keep using a listing
+ * that already has one from before a downgrade.
+ */
+async function validateAssignedAgent(knex, { tenantId, plan, assignedAgentId }) {
+  if (assignedAgentId === null || assignedAgentId === undefined || assignedAgentId === '') {
+    return null;
+  }
+
+  if (!plan?.multi_agent_whatsapp) {
+    const err = new Error("Assigning a listing to a specific team member's WhatsApp number requires the Growth or Unlimited plan.");
+    err.name = 'ValidationError';
+    throw err;
+  }
+
+  const agentUser = await knex('users').where({ id: assignedAgentId, tenant_id: tenantId }).first();
+  if (!agentUser) {
+    const err = new Error('The selected team member could not be found on this account.');
+    err.name = 'ValidationError';
+    throw err;
+  }
+
+  return agentUser.id;
+}
+
+/**
  * Shared listing-creation logic — extracted from listingController.js's
  * createListing so both the HTTP dashboard route and agentIntakeWorker.js
  * (WhatsApp agent-intake) go through the exact same validation, plan-limit
@@ -50,6 +86,7 @@ async function createListingRecord(knex, {
   propertyType,
   description,
   pincode,
+  assignedAgentId,
 }) {
   if (!title || !rawAddress || !propertyType) {
     const err = new Error('Title, raw address, and property type are required fields.');
@@ -70,6 +107,8 @@ async function createListingRecord(knex, {
     }
   }
 
+  const validatedAgentId = await validateAssignedAgent(knex, { tenantId, plan, assignedAgentId });
+
   const publicSlug = crypto.randomBytes(16).toString('hex');
 
   const [newListing] = await knex('listings')
@@ -84,6 +123,7 @@ async function createListingRecord(knex, {
       property_type: propertyType.trim(),
       description: description ? description.trim() : null,
       pincode: (typeof pincode === 'string' && /^\d{6}$/.test(pincode.trim())) ? pincode.trim() : null,
+      assigned_agent_id: validatedAgentId,
       public_slug: publicSlug,
       status: 'pending' // Remains 'pending' until the background geocoder confirms coordinates
     })
@@ -119,4 +159,4 @@ async function enqueueGeoEnrichment({ listingId, rawAddress, draftId }) {
   });
 }
 
-module.exports = { createListingRecord, enqueueGeoEnrichment, ListingLimitError };
+module.exports = { createListingRecord, enqueueGeoEnrichment, validateAssignedAgent, ListingLimitError };

@@ -7,7 +7,7 @@ const { getDashboardAnalytics } = require('../controllers/analyticsController');
 const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
 const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../controllers/builderProfileController');
-const { inviteTenantUser } = require('../controllers/userInviteController');
+const { inviteTenantUser, listTenantUsers } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
@@ -109,6 +109,14 @@ router.patch('/leads/:id/status', authGuard, tenantTransaction, updateLeadStatus
  * @access  Protected (owner role)
  */
 router.post('/users/invite', authGuard, tenantTransaction, inviteTenantUser);
+
+/**
+ * @route   GET /api/v1/dashboard/users
+ * @desc    List this tenant's team members — powers the "assign to"
+ *          dropdown for per-listing WhatsApp attribution
+ * @access  Protected
+ */
+router.get('/users', authGuard, tenantTransaction, listTenantUsers);
 
 /**
  * @route   GET  /api/v1/dashboard/listings/:id/media

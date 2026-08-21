@@ -1,4 +1,4 @@
-const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
+const { createListingRecord, enqueueGeoEnrichment, validateAssignedAgent, ListingLimitError } = require('../services/listingService');
 
 /**
  * Inserts a new real estate listing asset safely scoped inside the active
@@ -10,7 +10,7 @@ const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require
 async function createListing(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id, id: userId } = req.user;
-  const { title, raw_address, price, plot_area, property_type, description } = req.body;
+  const { title, raw_address, price, plot_area, property_type, description, assigned_agent_id } = req.body;
 
   try {
     const newListing = await createListingRecord(knex, {
@@ -23,6 +23,7 @@ async function createListing(req, res) {
       plotArea: plot_area,
       propertyType: property_type,
       description,
+      assignedAgentId: assigned_agent_id,
     });
 
     return res.status(201).json({
@@ -56,6 +57,14 @@ async function createListing(req, res) {
  * Not part of the original Gemini code drop; added here because the UI
  * component depends on it and would otherwise have nothing to render.
  */
+/**
+ * Query params (all optional, combinable):
+ *   q            — free-text search against title, raw_address, and
+ *                   formatted_address (case-insensitive substring match)
+ *   min_price    — minimum price (inclusive)
+ *   max_price    — maximum price (inclusive)
+ *   property_type — exact match: "Plot" | "Villa" | "Commercial"
+ */
 async function getListings(req, res) {
   // BUG FIX: this used req.app.get('db') (the raw pool, no tenant context)
   // even though the route already applies tenantTransaction — meaning the
@@ -67,9 +76,10 @@ async function getListings(req, res) {
   // listings.
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id } = req.user;
+  const { q, min_price, max_price, property_type } = req.query;
 
   try {
-    const listings = await knex('listings')
+    let query = knex('listings')
       .leftJoin('listing_visits', 'listings.id', 'listing_visits.listing_id')
       // Surfaces whether/how a listing's builder profile is doing — added so
       // the dashboard can show current link/moderation state instead of
@@ -77,6 +87,9 @@ async function getListings(req, res) {
       // previously no way for the frontend to know this without a second,
       // per-listing endpoint that doesn't exist).
       .leftJoin('builder_profiles', 'listings.builder_profile_id', 'builder_profiles.id')
+      // Per-listing WhatsApp attribution (growth/unlimited plans) — shows
+      // which team member's number (if any) this listing is assigned to.
+      .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
       .select(
         'listings.id',
         'listings.title',
@@ -91,17 +104,51 @@ async function getListings(req, res) {
         'listings.status',
         'listings.public_slug',
         'listings.created_at',
+        'listings.assigned_agent_id',
+        'assigned_agent.name as assigned_agent_name',
+        'assigned_agent.phone as assigned_agent_phone',
         'builder_profiles.id as builder_profile_id',
         'builder_profiles.company_name as builder_company_name',
         'builder_profiles.moderation_status as builder_moderation_status'
       )
       .count('listing_visits.id as visit_count')
-      .where('listings.tenant_id', tenant_id)
+      .where('listings.tenant_id', tenant_id);
+
+    // Free-text search — covers "search by area", since area/locality is
+    // almost always part of raw_address or formatted_address (e.g.
+    // "Sector 45, Mohali"), not a separate structured field. Title is
+    // included too since a dealer often remembers a listing by its title
+    // ("that villa in..."), not necessarily the exact address text.
+    if (q && q.trim()) {
+      const term = `%${q.trim()}%`;
+      query = query.where((builder) => {
+        builder
+          .whereILike('listings.title', term)
+          .orWhereILike('listings.raw_address', term)
+          .orWhereILike('listings.formatted_address', term);
+      });
+    }
+
+    if (min_price !== undefined && min_price !== '') {
+      const parsed = parseFloat(min_price);
+      if (Number.isFinite(parsed)) query = query.where('listings.price', '>=', parsed);
+    }
+    if (max_price !== undefined && max_price !== '') {
+      const parsed = parseFloat(max_price);
+      if (Number.isFinite(parsed)) query = query.where('listings.price', '<=', parsed);
+    }
+
+    if (property_type && ['Plot', 'Villa', 'Commercial'].includes(property_type)) {
+      query = query.where('listings.property_type', property_type);
+    }
+
+    const listings = await query
       .groupBy(
         'listings.id', 'listings.title', 'listings.raw_address', 'listings.formatted_address',
         'listings.lat', 'listings.lng', 'listings.price', 'listings.plot_area',
         'listings.property_type', 'listings.description', 'listings.status',
-        'listings.public_slug', 'listings.created_at',
+        'listings.public_slug', 'listings.created_at', 'listings.assigned_agent_id',
+        'assigned_agent.name', 'assigned_agent.phone',
         'builder_profiles.id', 'builder_profiles.company_name', 'builder_profiles.moderation_status'
       )
       .orderBy('listings.created_at', 'desc');
@@ -135,7 +182,7 @@ async function updateListing(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id } = req.user;
   const { id } = req.params;
-  const { title, raw_address, price, plot_area, property_type, description, status } = req.body;
+  const { title, raw_address, price, plot_area, property_type, description, status, assigned_agent_id } = req.body;
 
   const ALLOWED_STATUSES = ['active', 'inactive', 'sold'];
   if (status !== undefined && !ALLOWED_STATUSES.includes(status)) {
@@ -156,6 +203,12 @@ async function updateListing(req, res) {
     if (plot_area !== undefined) updates.plot_area = plot_area ? plot_area.trim() : null;
     if (property_type !== undefined) updates.property_type = property_type.trim();
     if (description !== undefined) updates.description = description ? description.trim() : null;
+
+    if (assigned_agent_id !== undefined) {
+      const tenant = await knex('tenants').where({ id: tenant_id }).first();
+      const plan = await knex('plans').where({ key: tenant.plan }).first();
+      updates.assigned_agent_id = await validateAssignedAgent(knex, { tenantId: tenant_id, plan, assignedAgentId: assigned_agent_id });
+    }
     if (status !== undefined) updates.status = status;
 
     const addressChanged = raw_address !== undefined && raw_address.trim() !== existing.raw_address;
@@ -186,6 +239,9 @@ async function updateListing(req, res) {
       listing: updated,
     });
   } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: error.message } });
+    }
     console.error('Failed to update listing:', error);
     return res.status(500).json({
       error: { code: 'INTERNAL_ERROR', message: 'Failed to update listing.' }
