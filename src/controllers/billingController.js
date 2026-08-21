@@ -120,8 +120,14 @@ async function getBillingStatus(req, res) {
 
   try {
     const tenant = await knex('tenants')
-      .select('plan', 'subscription_status', 'current_period_end')
-      .where({ id: req.user.tenant_id })
+      .leftJoin('plans', 'tenants.plan', 'plans.key')
+      .select(
+        'tenants.plan',
+        'tenants.subscription_status',
+        'tenants.current_period_end',
+        'plans.multi_agent_whatsapp'
+      )
+      .where({ 'tenants.id': req.user.tenant_id })
       .first();
 
     const history = await knex('payment_events')
