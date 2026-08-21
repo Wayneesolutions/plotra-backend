@@ -42,29 +42,32 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     throw new Error('Missing available Google Maps API Access Token.');
   }
 
-  // Soft geographic bias toward this platform's actual service area
-  // (Ludhiana/Punjab agency, tricity/Mohali listings) — Google's `bounds`
-  // param *influences* ranking without hard-excluding results outside it
-  // (unlike `components`, which is a strict filter). Approximate bounding
-  // box: all of Punjab state plus the Chandigarh/Mohali/Panchkula tricity
-  // area, since addresses there commonly formatted-address as "Chandigarh"
-  // even when colloquially "Mohali" (confirmed live — not a bug, just how
-  // Google's own administrative boundaries work there).
+  // Soft geographic bias toward wherever THIS tenant actually operates —
+  // Google's `bounds` param *influences* ranking without hard-excluding
+  // results outside it (unlike `components`, which is a strict filter).
+  // Config-driven per tenant (tenant_configs.geo_bias_bounds), not a
+  // hardcoded region in code: a single hardcoded bias (e.g. "always
+  // Punjab") would help today's 100%-Punjab dealer base but actively hurt
+  // accuracy the moment a tenant operates somewhere else — their
+  // ambiguous addresses would get quietly tilted toward the wrong
+  // region too. See migration 20260821_02 for the full reasoning and how
+  // existing tenants got today's Punjab/tricity bounds preserved as their
+  // configured value, not lost when this moved out of code.
   //
-  // Without this, a locality name that's common across many Indian cities
-  // (e.g. "Professor Colony", which exists in multiple states) had nothing
-  // steering it toward the dealer's actual market — Google's default
-  // national ranking picked whichever match ranked first for it, which is
-  // exactly how a Punjab listing ended up geocoded to Raipur,
-  // Chhattisgarh, ~1,700km away. Every downstream feature that derives
-  // from lat/lng (satellite/street view, nearby-landmark search) was
-  // consequently wrong too — same root cause, three visible symptoms.
-  const PUNJAB_TRICITY_BOUNDS_SW = '29.30,73.80';
-  const PUNJAB_TRICITY_BOUNDS_NE = '32.55,76.95';
+  // A locality name common across many Indian cities (e.g. "Professor
+  // Colony", which exists in multiple states) has nothing steering it
+  // toward the dealer's actual market without this — Google's default
+  // national ranking just picks whichever match ranks first, which is
+  // exactly how a Punjab listing once geocoded to Raipur, Chhattisgarh,
+  // ~1,700km away. Every downstream feature that derives from lat/lng
+  // (satellite/street view, nearby-landmark search) is consequently wrong
+  // too whenever this happens — same root cause, multiple symptoms.
+  const geoBiasBounds = config?.geo_bias_bounds || null;
+  const boundsQueryParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
 
   try {
     // 1. Dispatch lookup request directly to Google Geocoding engine
-    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN&bounds=${PUNJAB_TRICITY_BOUNDS_SW}|${PUNJAB_TRICITY_BOUNDS_NE}&key=${targetApiKey}`;
+    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN${boundsQueryParam}&key=${targetApiKey}`;
     const response = await axios.get(geoUrl);
 
     if (response.data.status !== 'OK') {
