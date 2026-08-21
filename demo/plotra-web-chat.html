@@ -253,9 +253,25 @@
   function addBubble(dir, text, extraHtml){
     const row = document.createElement('div');
     row.className = 'row ' + dir;
-    row.innerHTML = `<div class="bubble">${escapeHtml(text)}${extraHtml || ''}<span style="display:block;text-align:right;font-size:10.5px;color:var(--meta);margin-top:4px;">${timeStamp()}</span></div>`;
+    row.innerHTML = `<div class="bubble">${linkify(escapeHtml(text))}${extraHtml || ''}<span style="display:block;text-align:right;font-size:10.5px;color:var(--meta);margin-top:4px;">${timeStamp()}</span></div>`;
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // Backend replies often embed a real /p/{slug} link inline in the reply
+  // text itself (e.g. "Yeh raha aapki listing ka preview: https://...") —
+  // that URL was rendering as inert plain text because escapeHtml() only
+  // escapes, it never wraps anything in <a>. This runs *after* escaping
+  // (so it only ever matches already-safe text, never raw user/API input)
+  // and turns any http(s) URL into a tappable, long-press-copyable link.
+  // Kept separate from the listing-card link below, which is still the
+  // primary clickable link for a fresh listing — this just means the
+  // realtor isn't relying on the card alone if it's scrolled out of view.
+  function linkify(escapedText){
+    const urlPattern = /(https?:\/\/[^\s<]+)/g;
+    return escapedText.replace(urlPattern, (url) =>
+      `<a href="${url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;word-break:break-all;">${url}</a>`
+    );
   }
 
   function addSystem(text){
