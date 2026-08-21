@@ -1,7 +1,63 @@
 const { Queue } = require('bullmq');
+const axios = require('axios');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
-const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { uploadToS3 } = require('../services/s3Service');
+
+const MAX_PHOTOS_WHATSAPP = 10;
+
+/**
+ * Derives the Meta Graph API base (origin + version) from BSP_GATEWAY_URL,
+ * which is already configured for outbound sends
+ * (whatsappOutboundWorker.js), shaped like
+ * https://graph.facebook.com/v25.0/{phone_number_id}/messages — reuses
+ * that same config rather than requiring a separate env var. Meta-
+ * specific, matching the existing level of BSP-agnosticism (outbound
+ * send is already hardcoded to Meta Cloud API's payload shape too, not
+ * abstracted across BSPs).
+ */
+function graphApiBase() {
+  const gatewayUrl = process.env.BSP_GATEWAY_URL;
+  if (!gatewayUrl) return null;
+  try {
+    const url = new URL(gatewayUrl);
+    const segments = url.pathname.split('/').filter(Boolean); // ['v25.0', '{phone_number_id}', 'messages']
+    const version = segments[0];
+    return version ? `${url.origin}/${version}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Downloads a WhatsApp media attachment. Meta Cloud API is a two-step
+ * fetch: the media id first resolves to a short-lived signed URL, which
+ * itself STILL requires the same Bearer token to actually download —
+ * unlike a typical presigned S3-style URL, Meta's media URLs aren't
+ * public on their own.
+ */
+async function downloadWhatsAppMedia(mediaId) {
+  const base = graphApiBase();
+  const token = process.env.BSP_API_KEY;
+  if (!base || !token) {
+    throw new Error('WhatsApp media API not configured (BSP_GATEWAY_URL/BSP_API_KEY).');
+  }
+
+  const metaRes = await axios.get(`${base}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 10000,
+  });
+  const mediaUrl = metaRes.data?.url;
+  if (!mediaUrl) throw new Error('WhatsApp media lookup returned no downloadable URL.');
+
+  const fileRes = await axios.get(mediaUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: 'arraybuffer',
+    timeout: 20000,
+  });
+  return Buffer.from(fileRes.data);
+}
 
 const redisConnection = {
   host: process.env.REDIS_HOST || '127.0.0.1',
@@ -154,4 +210,70 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
   }
 }
 
-module.exports = { handleAgentIntakeMessage };
+/**
+ * shape but for a property photo instead of text. Attaches to whichever
+ * listing the agent's current live draft points at; if there's no live
+ * draft with a listing yet, asks them to describe the property first
+ * (same UX as the web chat's equivalent "describe the property first"
+ * case for a photo sent with no listing context).
+ *
+ * Deliberately skips the bsp_message_id duplicate-delivery check
+ * handleAgentIntakeMessage does — a duplicate webhook delivery here in
+ * the worst case uploads the same photo twice, capped by MAX_PHOTOS_WHATSAPP
+ * either way, not worth the complexity of also logging an inbound row for
+ * every photo (which would otherwise pollute detectDraftLanguage's "most
+ * recent inbound message" query with a non-text placeholder).
+ */
+async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType, bspMessageId, res }) {
+  try {
+    const draft = await knex('agent_listing_drafts')
+      .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
+      .whereIn('status', LIVE_STATUSES)
+      .first();
+
+    const lang = await detectDraftLanguage(knex, draft?.id);
+
+    if (!draft || !draft.listing_id) {
+      const body = lang === 'en'
+        ? 'Describe the property first (address, price, type) — then you can send photos.'
+        : 'Pehle property describe kar dijiye (address, price, type) — phir photo bhej sakte ho.';
+      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
+      return res.status(200).json({ success: true });
+    }
+
+    const mediaRow = await knex('listing_media').where({ listing_id: draft.listing_id }).first();
+    const currentPhotos = mediaRow?.photo_urls || [];
+
+    if (currentPhotos.length >= MAX_PHOTOS_WHATSAPP) {
+      const body = `Maximum ${MAX_PHOTOS_WHATSAPP} photos allowed per listing.`;
+      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
+      return res.status(200).json({ success: true });
+    }
+
+    const buffer = await downloadWhatsAppMedia(mediaId);
+    const extension = mediaMimeType?.includes('png') ? 'png' : mediaMimeType?.includes('webp') ? 'webp' : 'jpg';
+    const url = await uploadToS3(buffer, `whatsapp-${mediaId}.${extension}`, mediaMimeType || 'image/jpeg');
+
+    const updatedPhotos = [...currentPhotos, url];
+    if (mediaRow) {
+      await knex('listing_media').where({ listing_id: draft.listing_id }).update({ photo_urls: JSON.stringify(updatedPhotos) });
+    } else {
+      await knex('listing_media').insert({ listing_id: draft.listing_id, photo_urls: JSON.stringify(updatedPhotos) });
+    }
+
+    const confirmBody = `📷 ${lang === 'en' ? 'Photo added' : 'Photo add ho gayi'} (${updatedPhotos.length}/${MAX_PHOTOS_WHATSAPP}).`;
+    await knex.transaction(async (trx) => {
+      await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmBody });
+    });
+    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Failed to process agent WhatsApp photo:', error.message);
+    // Still ack 200 so the BSP doesn't retry-storm us — same rationale as
+    // handleAgentIntakeMessage and the buyer path in webhookController.js.
+    return res.status(200).json({ success: true, trackingError: error.message });
+  }
+}
+
+module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto };

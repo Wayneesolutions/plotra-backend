@@ -10,9 +10,9 @@ const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
-const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
 const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
-const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
+const { FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -30,23 +30,6 @@ function fieldQuestionsFor(lang) {
 }
 
 /**
- * This worker runs in the background, debounced (EXTRACT_DEBOUNCE_MS in
- * agentIntakeController.js) — unlike webChatController.js's synchronous
- * request/response, there's no single "current message" directly in scope
- * here to detect language from. The most recent inbound message logged
- * for this draft is the closest equivalent — same idea as web chat
- * (mirror whatever the person most recently actually typed), just sourced
- * from the transcript instead of a live request body.
- */
-async function detectDraftLanguage(draftId) {
-  const lastInbound = await knex('agent_draft_messages')
-    .where({ draft_id: draftId, direction: 'inbound' })
-    .orderBy('created_at', 'desc')
-    .first();
-  return detectReplyLanguage(lastInbound?.body);
-}
-
-/**
  * Sends the "here's your listing, reply to approve" message and flips the
  * draft to awaiting_approval. Shared between the 'send-preview' job
  * (triggered by geoEnrichmentWorker.js after a fresh geocode) and the
@@ -54,7 +37,7 @@ async function detectDraftLanguage(draftId) {
  * to preview without waiting on a re-geocode).
  */
 async function sendPreviewAndAwaitApproval({ draftId, listingId }) {
-  const lang = await detectDraftLanguage(draftId);
+  const lang = await detectDraftLanguage(knex, draftId);
 
   const result = await knex.transaction(async (trx) => {
     const listing = await trx('listings').where({ id: listingId }).first();
@@ -116,7 +99,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         updated_at: knex.fn.now(),
       });
 
-      const lang = await detectDraftLanguage(draftId);
+      const lang = await detectDraftLanguage(knex, draftId);
       const questions = fieldQuestionsFor(lang);
       const questionBody = missing.map((f) => questions[f]).join(' ');
       await knex.transaction(async (trx) => {
@@ -250,7 +233,7 @@ agentIntakeWorker.on('failed', async (job, err) => {
 
       await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'collecting', updated_at: knex.fn.now() });
 
-      const lang = await detectDraftLanguage(draftId);
+      const lang = await detectDraftLanguage(knex, draftId);
       const body = lang === 'en'
         ? "Sorry, I couldn't understand that — please try again with the property type, location, and a title."
         : "Samajh nahi paya, please dobara try karein — property type, location, aur title zaroor batayein.";

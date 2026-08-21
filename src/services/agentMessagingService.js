@@ -1,4 +1,5 @@
 const { Queue } = require('bullmq');
+const { detectReplyLanguage } = require('../utils/replyLanguage');
 
 // Same fail-fast producer config used throughout (webhookController.js,
 // listingService.js) — this is called from request/job handlers, not a
@@ -48,4 +49,23 @@ async function enqueueAgentWhatsappSend({ tenantId, phone, messageBody }) {
   });
 }
 
-module.exports = { logAgentOutboundMessage, enqueueAgentWhatsappSend };
+/**
+ * Detects the language to reply in, for contexts (like an image message,
+ * or a debounced background job) where there's no single "current
+ * message" in scope to detect from directly — uses the most recent
+ * inbound TEXT message logged for this draft as the best available proxy
+ * for "what language is this person using right now." A pure image
+ * message has no text of its own to detect from, so a bare photo with no
+ * prior text at all correctly falls through to detectReplyLanguage's own
+ * default (English).
+ */
+async function detectDraftLanguage(knex, draftId) {
+  if (!draftId) return detectReplyLanguage(null);
+  const lastInbound = await knex('agent_draft_messages')
+    .where({ draft_id: draftId, direction: 'inbound' })
+    .orderBy('created_at', 'desc')
+    .first();
+  return detectReplyLanguage(lastInbound?.body);
+}
+
+module.exports = { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage };

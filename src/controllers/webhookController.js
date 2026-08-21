@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
-const { handleAgentIntakeMessage } = require('./agentIntakeController');
+const { handleAgentIntakeMessage, handleAgentIntakePhoto } = require('./agentIntakeController');
 
 // Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
@@ -25,6 +25,13 @@ function parseInboundPayload(body) {
     phone: body.contacts?.[0]?.wa_id || body.from_phone || body.sender?.phone,
     leadName: body.contacts?.[0]?.profile?.name || body.from_name || body.sender?.name || 'Visitor',
     incomingText: body.messages?.[0]?.text?.body || body.message_text || body.text,
+    // Image message (Meta Cloud API shape) — messages[0].type === 'image'
+    // when present, with the actual bytes retrievable via a separate
+    // media-id lookup (see agentIntakeController.js's downloadWhatsAppMedia).
+    // Only images are handled — a dealer sending a PDF/document isn't a
+    // property photo, out of scope for now.
+    mediaId: body.messages?.[0]?.image?.id || null,
+    mediaMimeType: body.messages?.[0]?.image?.mime_type || null,
     bspThreadRef: body.messages?.[0]?.id || body.conversation_id || body.msg_id,
     inferredSlug: body.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
     // BUG FIX: this previously always resolved to null whenever
@@ -76,9 +83,9 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType } = parseInboundPayload(req.body);
 
-  if (!phone || !incomingText) {
+  if (!phone || (!incomingText && !mediaId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
   }
@@ -93,6 +100,23 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
+    // A bare photo (no caption text) — route to the photo handler instead
+    // of the text one. A photo WITH caption text still only triggers the
+    // photo path here (the caption itself isn't separately fed into
+    // extraction) — a dealer sending a photo+caption together is
+    // uncommon enough that requiring the address/price as a separate
+    // message is an acceptable tradeoff for now.
+    if (mediaId) {
+      return handleAgentIntakePhoto({
+        knex,
+        agentUser,
+        mediaId,
+        mediaMimeType,
+        bspMessageId: bspThreadRef,
+        res,
+      });
+    }
+
     return handleAgentIntakeMessage({
       knex,
       agentUser,
@@ -100,6 +124,14 @@ async function handleInboundWhatsApp(req, res) {
       bspMessageId: bspThreadRef, // this field is the individual WhatsApp message id (see parseInboundPayload)
       res,
     });
+  }
+
+  // Buyer/lead media messages aren't handled — only agent-intake photos
+  // are (property listing photos). A buyer sending an image with no
+  // caption text would otherwise fall through into the text-processing
+  // logic below with incomingText undefined.
+  if (!incomingText) {
+    return res.status(200).json({ success: true, warning: 'Acknowledged non-text buyer event.' });
   }
 
   try {
