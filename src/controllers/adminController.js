@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 // NEW — Phase 7
 const { sendOnboardingEmail } = require('../services/emailService');
+const { resolveCityBounds } = require('../services/geoBiasService');
 
 function generateTempPassword() {
   return `Welcome${crypto.randomBytes(4).toString('hex')}!`;
@@ -13,7 +14,7 @@ function generateTempPassword() {
  */
 async function submitAccessRequest(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { business_name, contact_name, email, phone, message } = req.body;
+  const { business_name, contact_name, email, phone, message, operating_city, operating_state } = req.body;
 
   if (!business_name || !contact_name || !email || !phone) {
     return res.status(400).json({
@@ -38,6 +39,12 @@ async function submitAccessRequest(req, res) {
       email: email.trim().toLowerCase(),
       phone: phone.trim(),
       message: message?.trim() || null,
+      // Optional — which city/area this agency actually deals in. Used at
+      // approval time to auto-derive their geocoding bias (see
+      // geoBiasService.js) so their listings' addresses resolve accurately
+      // without an admin having to configure that by hand.
+      operating_city: operating_city?.trim() || null,
+      operating_state: operating_state?.trim() || null,
     });
 
     return res.status(201).json({
@@ -108,6 +115,11 @@ async function approveRequest(req, res) {
     const tempPassword = generateTempPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
+    // Resolved before opening the transaction — this is a real HTTP call
+    // to Google, and a DB transaction shouldn't sit open for however long
+    // that takes (or however long a retry/timeout takes if it's slow).
+    const geoBiasBounds = await resolveCityBounds(request.operating_city, request.operating_state);
+
     let newTenant, newUser;
 
     await knex.transaction(async (trx) => {
@@ -116,6 +128,8 @@ async function approveRequest(req, res) {
         plan: 'starter',
         whatsapp_mode: 'shared',
         status: 'active',
+        operating_city: request.operating_city,
+        operating_state: request.operating_state,
       }).returning(['id', 'business_name', 'plan', 'status']);
 
       [newUser] = await trx('users').insert({
@@ -130,6 +144,7 @@ async function approveRequest(req, res) {
         tenant_id: newTenant.id,
         bsp_provider_type: 'shared_gateway',
         bsp_auth_token: null,
+        geo_bias_bounds: geoBiasBounds,
       });
 
       await trx('tenant_requests').where({ id }).update({
@@ -207,7 +222,7 @@ async function rejectRequest(req, res) {
  */
 async function createTenant(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { business_name, contact_name, email, phone } = req.body;
+  const { business_name, contact_name, email, phone, operating_city, operating_state } = req.body;
 
   if (!business_name || !contact_name || !email || !phone) {
     return res.status(400).json({
@@ -226,6 +241,10 @@ async function createTenant(req, res) {
     const tempPassword = generateTempPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
+    // Same reasoning as approveRequest — resolved before the transaction
+    // opens, since it's a real external HTTP call.
+    const geoBiasBounds = await resolveCityBounds(operating_city, operating_state);
+
     let newTenant, newUser;
 
     await knex.transaction(async (trx) => {
@@ -234,6 +253,8 @@ async function createTenant(req, res) {
         plan: 'starter',
         whatsapp_mode: 'shared',
         status: 'active',
+        operating_city: operating_city?.trim() || null,
+        operating_state: operating_state?.trim() || null,
       }).returning(['id', 'business_name', 'plan', 'status']);
 
       [newUser] = await trx('users').insert({
@@ -248,6 +269,7 @@ async function createTenant(req, res) {
         tenant_id: newTenant.id,
         bsp_provider_type: 'shared_gateway',
         bsp_auth_token: null,
+        geo_bias_bounds: geoBiasBounds,
       });
     });
 

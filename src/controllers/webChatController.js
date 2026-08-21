@@ -258,21 +258,33 @@ async function handleWebChatMessage(req, res) {
         if (extracted.property_type) patch.property_type = extracted.property_type.trim();
         if (extracted.description) patch.description = extracted.description.trim();
 
-        // The address itself was never in this patch before — meaning even
-        // a same-property, GPT-confirmed correction to the address text
-        // silently didn't apply. If it actually changed, also re-queue
-        // geo-enrichment (same job creation uses) so lat/lng, the
+        // Neither the address nor the pincode were ever in this patch
+        // before — meaning even a same-property, GPT-confirmed correction
+        // to either silently didn't apply. If either actually changed,
+        // re-queue geo-enrichment (same job creation uses) so lat/lng, the
         // satellite/street-view media, and nearby landmarks all get
-        // recomputed for the corrected address instead of staying pinned
-        // to wherever the first draft geocoded to.
-        let addressChanged = false;
+        // recomputed instead of staying pinned to the original geocode.
+        let needsReenrichment = false;
         if (extracted.raw_address) {
           const newAddress = extracted.raw_address.trim();
           if (newAddress.toLowerCase() !== (listing.raw_address || '').trim().toLowerCase()) {
             patch.raw_address = newAddress;
-            patch.status = 'pending'; // re-enrichment in flight — same status a brand-new listing starts in
-            addressChanged = true;
+            needsReenrichment = true;
           }
+        }
+        // Adding/correcting a pincode doesn't necessarily come with new
+        // address text ("pincode 141001" alone, as a follow-up) — still
+        // needs to re-geocode, since geoEnrichmentWorker.js uses pincode
+        // as a much stronger filter than whatever it used before.
+        if (extracted.pincode) {
+          const newPincode = extracted.pincode.trim();
+          if (/^\d{6}$/.test(newPincode) && newPincode !== (listing.pincode || '')) {
+            patch.pincode = newPincode;
+            needsReenrichment = true;
+          }
+        }
+        if (needsReenrichment) {
+          patch.status = 'pending'; // re-enrichment in flight — same status a brand-new listing starts in
         }
 
         if (Object.keys(patch).length > 0) {
@@ -281,17 +293,21 @@ async function handleWebChatMessage(req, res) {
           listing = await knex('listings').where({ id: session.listingId }).first();
         }
 
-        if (addressChanged) {
-          await enqueueGeoEnrichment({ listingId: session.listingId, rawAddress: patch.raw_address });
+        if (needsReenrichment) {
+          // geoEnrichmentWorker.js's geocode query is keyed on whichever
+          // raw_address this job carries, not re-read from the DB — pass
+          // the just-patched one if the address itself changed, otherwise
+          // the listing's existing address (e.g. a pincode-only follow-up).
+          await enqueueGeoEnrichment({ listingId: session.listingId, rawAddress: patch.raw_address || listing.raw_address });
         }
 
         await saveSession(sessionId, session);
 
         let reply;
-        if (addressChanged) {
+        if (needsReenrichment) {
           reply = lang === 'en'
-            ? "Address updated — mapping the new location now, this'll take a moment (satellite/street view will refresh too). Let me know if there's anything else to change, or reply 'yes'/'approve' once it looks right."
-            : "Address update ho gaya — naya location map ho raha hai, thoda time lagega (satellite/street view bhi refresh hongi). Kuch aur badalna hai to bata dijiye, warna 'haan' ya 'approve' bol dijiye jab sahi lage.";
+            ? "Location updated — mapping it now, this'll take a moment (satellite/street view will refresh too). Let me know if there's anything else to change, or reply 'yes'/'approve' once it looks right."
+            : "Location update ho gaya — map ho raha hai, thoda time lagega (satellite/street view bhi refresh hongi). Kuch aur badalna hai to bata dijiye, warna 'haan' ya 'approve' bol dijiye jab sahi lage.";
         } else if (session.awaitingApproval) {
           reply = lang === 'en'
             ? "Updated! Reply 'yes' or 'approve' to publish it. Let me know if there's anything else to change."
@@ -336,16 +352,27 @@ async function handleWebChatMessage(req, res) {
       plotArea: extracted.plot_area,
       propertyType: extracted.property_type,
       description: extracted.description,
+      pincode: extracted.pincode,
     });
 
     session.listingId = newListing.id;
     session.awaitingApproval = true;
     await saveSession(sessionId, session);
 
+    // Never blocks creation (pincode is optional, like price) — just a
+    // gentle nudge, since sending it noticeably improves map/landmark
+    // accuracy over relying on locality-name text alone.
+    const pincodeNudge = extracted.pincode
+      ? ''
+      : (lang === 'en'
+          ? '\n\n(Tip: send the 6-digit pincode too if you have it — makes the map location more accurate.)'
+          : '\n\n(Tip: pincode bhi bhej dijiye agar pata hai — location aur accurate ho jayegi.)');
+
     return res.status(200).json({
-      reply: lang === 'en'
+      reply: (lang === 'en'
         ? `Here's your listing preview:\n${buildPreviewLink(newListing.public_slug)}\n\nReply "yes" or "approve" if it looks right — it'll go live and be ready to share with a client. Send a new detail if anything needs changing.`
-        : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`,
+        : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`
+      ) + pincodeNudge,
       listing: listingSummary({ ...extracted, title: newListing.title }, newListing.public_slug, false),
     });
 

@@ -49,6 +49,7 @@ async function createListingRecord(knex, {
   plotArea,
   propertyType,
   description,
+  pincode,
 }) {
   if (!title || !rawAddress || !propertyType) {
     const err = new Error('Title, raw address, and property type are required fields.');
@@ -82,6 +83,7 @@ async function createListingRecord(knex, {
       plot_area: plotArea ? plotArea.trim() : null,
       property_type: propertyType.trim(),
       description: description ? description.trim() : null,
+      pincode: (typeof pincode === 'string' && /^\d{6}$/.test(pincode.trim())) ? pincode.trim() : null,
       public_slug: publicSlug,
       status: 'pending' // Remains 'pending' until the background geocoder confirms coordinates
     })

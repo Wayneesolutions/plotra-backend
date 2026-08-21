@@ -24,7 +24,7 @@ const FIELD_QUESTIONS = {
 async function extractListingFields(accumulatedText) {
   const systemPrompt = `You extract real-estate listing fields from a Punjab/India property agent's freeform message (often Hinglish/Punjabi-English mixed, using local shorthand).
 
-Return ONLY a JSON object with exactly these keys: title, raw_address, price, plot_area, property_type, description.
+Return ONLY a JSON object with exactly these keys: title, raw_address, price, plot_area, property_type, description, pincode.
 
 Rules:
 - Use null for any field not actually stated in the text — never guess or invent a value, EXCEPT title (see below).
@@ -33,13 +33,14 @@ Rules:
 - property_type: normalize to one of "Plot", "Villa", or "Commercial" if the text implies one of those (e.g. "3BHK", "house", "makan" -> Villa; "shop", "dukaan" -> Commercial); otherwise null.
 - title: if the agent gave an explicit title, use it verbatim. If not, synthesize a short one from property_type + area/locality (e.g. "Plot in Sector 45 Mohali") — but only if you have enough to make a real one; otherwise null.
 - description: any other descriptive detail mentioned (amenities, condition, etc.) — null if nothing beyond the core fields.
+- pincode: a 6-digit Indian postal code, ONLY if one is literally present in the text (e.g. "141001", "160055") — never infer or guess one from a locality name, even if you think you know the area's usual pincode. null if none is stated.
 
 Examples:
 Input: "3BHK plot 250 gaj sector 45 mohali 55 lakh"
-Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":5500000,"plot_area":"250 gaj","property_type":"Plot","description":"3BHK"}
+Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":5500000,"plot_area":"250 gaj","property_type":"Plot","description":"3BHK","pincode":null}
 
-Input: "shop for sale ludhiana 80 lakh"
-Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"plot_area":null,"property_type":"Commercial","description":null}`;
+Input: "shop for sale ludhiana 80 lakh, pincode 141001"
+Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":"141001"}`;
 
   const response = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o-mini',

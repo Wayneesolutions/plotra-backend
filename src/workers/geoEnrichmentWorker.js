@@ -63,11 +63,23 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   // (satellite/street view, nearby-landmark search) is consequently wrong
   // too whenever this happens — same root cause, multiple symptoms.
   const geoBiasBounds = config?.geo_bias_bounds || null;
-  const boundsQueryParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
+
+  // pincode (optional, dealer-provided — see listingExtractionService.js)
+  // is a much stronger signal than the tenant-level bounds bias: a bounds
+  // box biases ranking across a whole city/region, while a PIN code is a
+  // strict filter (Google's `components` param is AND logic, not a soft
+  // bias like `bounds`) restricting to a small, precise postal area. When
+  // present, it supersedes the bounds bias entirely rather than stacking
+  // with it — there's nothing left for a region-level bias to add once
+  // the search is already pinned to a specific postal code.
+  const components = listingData.pincode
+    ? `postal_code:${listingData.pincode}|country:IN`
+    : 'country:IN';
+  const boundsQueryParam = (!listingData.pincode && geoBiasBounds) ? `&bounds=${geoBiasBounds}` : '';
 
   try {
     // 1. Dispatch lookup request directly to Google Geocoding engine
-    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN${boundsQueryParam}&key=${targetApiKey}`;
+    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=${components}${boundsQueryParam}&key=${targetApiKey}`;
     const response = await axios.get(geoUrl);
 
     if (response.data.status !== 'OK') {
