@@ -30,7 +30,7 @@ Rules:
 - Use null for any field not actually stated in the text — never guess or invent a value, EXCEPT title (see below).
 - price: convert Indian shorthand to a plain number in rupees. "55 lakh" -> 5500000, "1.2 crore" -> 12000000, "80k" -> 80000.
 - plot_area: keep as the agent's own phrasing (e.g. "250 gaj", "5 marla", "1200 sq ft") — don't convert units.
-- property_type: normalize to one of "Plot", "Villa", or "Commercial" if the text implies one of those (e.g. "3BHK", "house", "makan" -> Villa; "shop", "dukaan" -> Commercial); otherwise null.
+- property_type: normalize to one of "Plot", "Villa", or "Commercial". An EXPLICIT type word in the text always wins, even if another word would otherwise suggest a different type — e.g. "3BHK plot" is a Plot (the word "plot" is stated directly), not a Villa, even though "3BHK" alone would normally suggest Villa. Only fall back to inferring from an implicit signal ("3BHK", "house", "makan" -> Villa; "shop", "dukaan" -> Commercial) when no explicit type word is present at all. Use null if genuinely neither is present.
 - title: if the agent gave an explicit title, use it verbatim. If not, synthesize a short one from property_type + area/locality (e.g. "Plot in Sector 45 Mohali") — but only if you have enough to make a real one; otherwise null.
 - description: any other descriptive detail mentioned (amenities, condition, etc.) — null if nothing beyond the core fields.
 - pincode: a 6-digit Indian postal code, ONLY if one is literally present in the text (e.g. "141001", "160055") — never infer or guess one from a locality name, even if you think you know the area's usual pincode. null if none is stated.
@@ -40,7 +40,10 @@ Input: "3BHK plot 250 gaj sector 45 mohali 55 lakh"
 Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":5500000,"plot_area":"250 gaj","property_type":"Plot","description":"3BHK","pincode":null}
 
 Input: "shop for sale ludhiana 80 lakh, pincode 141001"
-Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":"141001"}`;
+Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":"141001"}
+
+Input: "3BHK plot in Sector 45 Mohali"
+Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":null,"plot_area":null,"property_type":"Plot","description":"3BHK","pincode":null}`;
 
   const response = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o-mini',

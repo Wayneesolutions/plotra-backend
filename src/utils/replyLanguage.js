@@ -15,13 +15,26 @@ const DEVANAGARI_OR_GURMUKHI = /[\u0900-\u097F\u0A00-\u0A7F]/;
 // Common romanized Hindi/Punjabi words that show up in Hinglish real-estate
 // chat but essentially never appear in plain English sentences. Not
 // exhaustive — this only needs to catch the common case, not every case.
+//
+// Deliberately does NOT include 'lakh', 'crore', or 'plot' — confirmed via
+// live QA that these caused false-positive Hindi detection on messages
+// that were otherwise 100% English (e.g. "Plot in Model Town, Ludhiana,
+// pincode 141001, 45 lakh" got a Hindi/Hinglish reply purely because it
+// contains "plot" and "lakh"). All three are standard Indian-English
+// words in exactly this domain — "50 lakh," "2 crore," and "a plot of
+// land" are ordinary English real-estate/finance phrasing, not signals
+// that someone is writing in Hindi. gaj/marla/kanal are kept: those are
+// Punjab-specific land-area units that essentially never appear in
+// property listings written by someone who isn't at least partly writing
+// in the local vernacular, unlike lakh/crore/plot which are universal
+// across Indian English.
 const HINGLISH_MARKERS = new Set([
   'hai', 'hain', 'ho', 'hoga', 'hogi', 'kya', 'kyu', 'kyun', 'kitna', 'kitni',
-  'chahiye', 'sahi', 'thik', 'theek', 'haan', 'ha', 'nahi', 'nahin', 'lakh',
-  'crore', 'gaj', 'marla', 'kanal', 'wala', 'wali', 'karo', 'karlo', 'kardo',
+  'chahiye', 'sahi', 'thik', 'theek', 'haan', 'ha', 'nahi', 'nahin',
+  'gaj', 'marla', 'kanal', 'wala', 'wali', 'karo', 'karlo', 'kardo',
   'dijiye', 'dena', 'batao', 'bata', 'bhej', 'bhejo', 'accha', 'achha',
   'bahut', 'zyada', 'thoda', 'abhi', 'yeh', 'ye', 'woh', 'wo', 'mera', 'meri',
-  'aapka', 'aapki', 'aap', 'apna', 'plot', 'makan', 'ghar', 'dukaan',
+  'aapka', 'aapki', 'aap', 'apna', 'makan', 'ghar', 'dukaan',
 ]);
 
 function normalizeWords(text) {
