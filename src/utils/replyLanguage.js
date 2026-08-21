@@ -51,4 +51,17 @@ function detectReplyLanguage(text) {
   return 'en';
 }
 
-module.exports = { detectReplyLanguage };
+// English counterparts to listingExtractionService.js's FIELD_QUESTIONS,
+// which is Hindi/Hinglish-only and shared between the web chat and
+// WhatsApp agent-intake flow. Originally lived only in webChatController.js
+// (web chat was the first channel to get bilingual replies) — moved here
+// so agentIntakeWorker.js (WhatsApp) can use the exact same English text
+// instead of a second, potentially-drifting copy.
+const FIELD_QUESTIONS_EN = {
+  raw_address: "What's the location/address? (e.g. 'Sector 45, Mohali')",
+  price: "What's the price? (e.g. 55 lakh)",
+  property_type: 'What type of property — Plot, Villa, or Commercial?',
+  title: 'Give me a short title for this listing.',
+};
+
+module.exports = { detectReplyLanguage, FIELD_QUESTIONS_EN };

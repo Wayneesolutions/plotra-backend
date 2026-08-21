@@ -4,7 +4,7 @@
 // instead of two copies drifting apart.
 const axios = require('axios');
 
-const REQUIRED_FIELDS = ['title', 'raw_address', 'price', 'property_type'];
+const REQUIRED_FIELDS = ['title', 'raw_address', 'property_type'];
 const FIELD_QUESTIONS = {
   raw_address: "Location/address kya hai? (e.g. 'sector 45 mohali')",
   price: 'Price kitni hai? (e.g. 55 lakh)',

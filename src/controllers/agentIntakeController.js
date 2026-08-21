@@ -1,6 +1,7 @@
 const { Queue } = require('bullmq');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { detectReplyLanguage } = require('../utils/replyLanguage');
 
 const redisConnection = {
   host: process.env.REDIS_HOST || '127.0.0.1',
@@ -36,9 +37,11 @@ async function enqueueExtractJob(draftId) {
   }
 }
 
-function buildConfirmationMessage(publicSlug) {
+function buildConfirmationMessage(publicSlug, lang) {
   const link = `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
-  return `Live ho gaya! Yeh raha aapka link, kisi ko bhi bhej sakte ho:\n${link}`;
+  return lang === 'en'
+    ? `It's live! Here's your link, share it with anyone:\n${link}`
+    : `Live ho gaya! Yeh raha aapka link, kisi ko bhi bhej sakte ho:\n${link}`;
 }
 
 /**
@@ -103,7 +106,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
             .where({ id: draft.id })
             .update({ status: 'approved', updated_at: trx.fn.now() });
 
-          const confirmationBody = buildConfirmationMessage(updatedListing.public_slug);
+          const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
           await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
           return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };

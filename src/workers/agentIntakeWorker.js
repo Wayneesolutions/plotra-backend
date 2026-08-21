@@ -11,7 +11,8 @@ const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
-const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS } = require('../services/listingExtractionService');
+const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
+const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -24,6 +25,27 @@ function buildPreviewLink(publicSlug) {
   return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
 }
 
+function fieldQuestionsFor(lang) {
+  return lang === 'en' ? FIELD_QUESTIONS_EN : FIELD_QUESTIONS_HI;
+}
+
+/**
+ * This worker runs in the background, debounced (EXTRACT_DEBOUNCE_MS in
+ * agentIntakeController.js) — unlike webChatController.js's synchronous
+ * request/response, there's no single "current message" directly in scope
+ * here to detect language from. The most recent inbound message logged
+ * for this draft is the closest equivalent — same idea as web chat
+ * (mirror whatever the person most recently actually typed), just sourced
+ * from the transcript instead of a live request body.
+ */
+async function detectDraftLanguage(draftId) {
+  const lastInbound = await knex('agent_draft_messages')
+    .where({ draft_id: draftId, direction: 'inbound' })
+    .orderBy('created_at', 'desc')
+    .first();
+  return detectReplyLanguage(lastInbound?.body);
+}
+
 /**
  * Sends the "here's your listing, reply to approve" message and flips the
  * draft to awaiting_approval. Shared between the 'send-preview' job
@@ -32,12 +54,16 @@ function buildPreviewLink(publicSlug) {
  * to preview without waiting on a re-geocode).
  */
 async function sendPreviewAndAwaitApproval({ draftId, listingId }) {
+  const lang = await detectDraftLanguage(draftId);
+
   const result = await knex.transaction(async (trx) => {
     const listing = await trx('listings').where({ id: listingId }).first();
     const draft = await trx('agent_listing_drafts').where({ id: draftId }).first();
     if (!listing || !draft) return null;
 
-    const previewBody = `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi. Kuch badalna hai to naya detail bhej dijiye.`;
+    const previewBody = lang === 'en'
+      ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\nReply "yes" or "approve" if it looks right — it'll go live. Send a new detail if anything needs changing.`
+      : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi. Kuch badalna hai to naya detail bhej dijiye.`;
 
     await logAgentOutboundMessage(trx, { draftId, body: previewBody });
     await trx('agent_listing_drafts')
@@ -90,7 +116,9 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         updated_at: knex.fn.now(),
       });
 
-      const questionBody = missing.map((f) => FIELD_QUESTIONS[f]).join(' ');
+      const lang = await detectDraftLanguage(draftId);
+      const questions = fieldQuestionsFor(lang);
+      const questionBody = missing.map((f) => questions[f]).join(' ');
       await knex.transaction(async (trx) => {
         await logAgentOutboundMessage(trx, { draftId, body: questionBody });
       });
@@ -109,6 +137,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         title: extracted.title,
         rawAddress: extracted.raw_address,
         price: extracted.price,
+        pincode: extracted.pincode,
         plotArea: extracted.plot_area,
         propertyType: extracted.property_type,
         description: extracted.description,
@@ -140,10 +169,21 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
   // a previously-confirmed fact just because this particular message
   // didn't repeat it.
   const existingListing = await knex('listings').where({ id: draft.listing_id }).first();
+
+  // Defensive validation here too, same as listingService.js's
+  // createListingRecord — this correction path writes directly via
+  // knex('listings').update(), bypassing that function's own regex check,
+  // so a malformed value from GPT (violating the "only extract a literal
+  // 6-digit PIN" instruction) doesn't end up polluting the strict
+  // geocoding filter downstream.
+  const rawPincode = extracted.pincode ?? existingListing.pincode;
+  const validPincode = (typeof rawPincode === 'string' && /^\d{6}$/.test(rawPincode.trim())) ? rawPincode.trim() : null;
+
   const merged = {
     title: extracted.title ?? existingListing.title,
     raw_address: extracted.raw_address ?? existingListing.raw_address,
     price: extracted.price ?? existingListing.price,
+    pincode: validPincode,
     plot_area: extracted.plot_area ?? existingListing.plot_area,
     property_type: extracted.property_type ?? existingListing.property_type,
     description: extracted.description ?? existingListing.description,
@@ -152,11 +192,18 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
   await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'creating', updated_at: knex.fn.now() });
 
   const addressChanged = merged.raw_address !== existingListing.raw_address;
+  // A pincode-only correction ("pincode 141001" as a follow-up, no new
+  // address text) still needs to re-geocode — pincode becomes a much
+  // stronger filter in geoEnrichmentWorker.js, same reasoning as the web
+  // chat side (webChatController.js's needsReenrichment).
+  const pincodeChanged = merged.pincode !== (existingListing.pincode || null);
+  const needsReenrichment = addressChanged || pincodeChanged;
 
-  if (!addressChanged) {
+  if (!needsReenrichment) {
     await knex('listings').where({ id: draft.listing_id }).update({
       title: merged.title,
       price: merged.price,
+      pincode: merged.pincode,
       plot_area: merged.plot_area,
       property_type: merged.property_type,
       description: merged.description,
@@ -172,7 +219,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     return { success: true, corrected: true, reGeocoded: false };
   }
 
-  // Address changed — hide the stale card and re-run enrichment.
+  // Address or pincode changed — hide the stale card and re-run enrichment.
   await knex('listings').where({ id: draft.listing_id }).update({
     ...merged,
     formatted_address: null,
@@ -203,7 +250,10 @@ agentIntakeWorker.on('failed', async (job, err) => {
 
       await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'collecting', updated_at: knex.fn.now() });
 
-      const body = "Samajh nahi paya, please dobara try karein — property type, location, aur price zaroor batayein.";
+      const lang = await detectDraftLanguage(draftId);
+      const body = lang === 'en'
+        ? "Sorry, I couldn't understand that — please try again with the property type, location, and a title."
+        : "Samajh nahi paya, please dobara try karein — property type, location, aur title zaroor batayein.";
       await knex.transaction(async (trx) => { await logAgentOutboundMessage(trx, { draftId, body }); });
       await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: body });
     } catch (notifyErr) {

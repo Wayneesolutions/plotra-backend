@@ -11,7 +11,7 @@ const IORedis = require('ioredis');
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
 const { extractListingFields, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
-const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
 
 // mediaController.js's MAX_PHOTOS isn't exported (it's a local const there) —
@@ -19,25 +19,14 @@ const { uploadToS3 } = require('../services/s3Service');
 // single number that's safe to keep in sync by hand if it ever changes.
 const MAX_PHOTOS_WEB = 10;
 
-// English counterparts to listingExtractionService's FIELD_QUESTIONS, which
-// is Hindi/Hinglish-only and shared with the WhatsApp agent-intake flow
-// (agentIntakeWorker.js) — left untouched there since WhatsApp dealers here
-// overwhelmingly write in Hinglish/Punjabi. Kept as a separate object here
-// rather than changing the shared one, so this only changes web-chat
-// behavior. See replyLanguage.js for how the language is picked per message.
 // Price deliberately left out of what's required for web chat — some
 // dealers don't want a public price ("price on request" listings are
 // common). WhatsApp's own required-fields list (listingExtractionService.js)
-// is untouched and still requires it, since that flow wasn't part of what
-// was asked to change here.
+// is now optional too (see that file) — this array stays web-chat-specific
+// only because photo upload and a couple of other web-only behaviors are
+// tied to this exact list elsewhere in this file, not because WhatsApp
+// still differs on price.
 const REQUIRED_FIELDS_WEB = ['title', 'raw_address', 'property_type'];
-
-const FIELD_QUESTIONS_EN = {
-  raw_address: "What's the location/address? (e.g. 'Sector 45, Mohali')",
-  price: "What's the price? (e.g. 55 lakh)",
-  property_type: 'What type of property — Plot, Villa, or Commercial?',
-  title: 'Give me a short title for this listing.',
-};
 
 function fieldQuestionsFor(lang) {
   return lang === 'en' ? FIELD_QUESTIONS_EN : FIELD_QUESTIONS_HI;
