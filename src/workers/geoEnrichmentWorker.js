@@ -42,10 +42,29 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     throw new Error('Missing available Google Maps API Access Token.');
   }
 
+  // Soft geographic bias toward this platform's actual service area
+  // (Ludhiana/Punjab agency, tricity/Mohali listings) — Google's `bounds`
+  // param *influences* ranking without hard-excluding results outside it
+  // (unlike `components`, which is a strict filter). Approximate bounding
+  // box: all of Punjab state plus the Chandigarh/Mohali/Panchkula tricity
+  // area, since addresses there commonly formatted-address as "Chandigarh"
+  // even when colloquially "Mohali" (confirmed live — not a bug, just how
+  // Google's own administrative boundaries work there).
+  //
+  // Without this, a locality name that's common across many Indian cities
+  // (e.g. "Professor Colony", which exists in multiple states) had nothing
+  // steering it toward the dealer's actual market — Google's default
+  // national ranking picked whichever match ranked first for it, which is
+  // exactly how a Punjab listing ended up geocoded to Raipur,
+  // Chhattisgarh, ~1,700km away. Every downstream feature that derives
+  // from lat/lng (satellite/street view, nearby-landmark search) was
+  // consequently wrong too — same root cause, three visible symptoms.
+  const PUNJAB_TRICITY_BOUNDS_SW = '29.30,73.80';
+  const PUNJAB_TRICITY_BOUNDS_NE = '32.55,76.95';
+
   try {
     // 1. Dispatch lookup request directly to Google Geocoding engine
-    // Adding local market region indicators to target Ludhiana/Punjab boundaries securely
-    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN&key=${targetApiKey}`;
+    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN&bounds=${PUNJAB_TRICITY_BOUNDS_SW}|${PUNJAB_TRICITY_BOUNDS_NE}&key=${targetApiKey}`;
     const response = await axios.get(geoUrl);
 
     if (response.data.status !== 'OK') {

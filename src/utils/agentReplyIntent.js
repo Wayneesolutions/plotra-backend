@@ -14,6 +14,13 @@
 const APPROVAL_KEYWORDS = new Set([
   'approve', 'approved', 'yes', 'yep', 'ok', 'okay', 'confirm', 'confirmed', 'done', 'go',
   'haan', 'ha', 'haan ji', 'ji haan', 'theek hai', 'thik hai', 'sahi hai', 'ho gaya',
+  // Compound-affirmative phrasing confirmed missing live (e.g. "haan sahi
+  // hai" was misparsed as an edit instruction and reverted the reply to
+  // Hindi mid-English-conversation) — these are still pure affirmatives,
+  // just two of the words above said together, not a real correction like
+  // "theek hai but change the price" which this file deliberately excludes.
+  'haan sahi hai', 'sahi hai haan', 'ha sahi hai', 'haan ji sahi hai',
+  'haan theek hai', 'theek hai haan', 'haan thik hai', 'thik hai haan',
 ]);
 
 /**
