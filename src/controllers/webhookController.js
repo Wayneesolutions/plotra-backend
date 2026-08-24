@@ -77,7 +77,7 @@ function isValidSignature(req, secret) {
  */
 async function handleInboundWhatsApp(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const secret = process.env.WHATSAPP_WEBHOOK_SECRET;
+  const secret = process.env.WHATSAPP_APP_SECRET || process.env.WHATSAPP_WEBHOOK_SECRET;
 
   if (!isValidSignature(req, secret)) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
