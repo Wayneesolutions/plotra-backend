@@ -13,6 +13,74 @@ function normalizeCompanyName(name) {
   return name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+// How "nearby" and "similar price" are defined for the comparison list on
+// mega-project listings. Deliberately generous rather than precise — the
+// goal is "other real options a buyer would actually cross-shop", not a
+// tight match; too narrow and most listings would show zero comparisons.
+const SIMILAR_PROJECT_RADIUS_KM = 5;
+const SIMILAR_PROJECT_PRICE_BAND = 0.2; // ±20%
+const SIMILAR_PROJECT_LIMIT = 6;
+
+/**
+ * Platform-wide (not tenant-scoped — same precedent as builder_profiles
+ * itself, see the 20260817_03 migration header) "other projects nearby in
+ * the same price range" for a mega-project listing. Buyers cross-shop
+ * across dealers, not within one dealer's own catalog, so scoping this to
+ * the current listing's tenant would make it far less useful.
+ *
+ * Only ever includes listings whose OWN builder profile is published —
+ * same moderation discipline as everything else here: a builder company
+ * name/rating never appears anywhere on the site before a human has
+ * explicitly cleared it, comparison lists included.
+ */
+async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
+  if (lat == null || lng == null) return []; // no coordinates, no "nearby" — non-fatal, just skip
+
+  const query = knex('listings as l')
+    .join('builder_profiles as bp', 'bp.id', 'l.builder_profile_id')
+    .select(
+      'l.public_slug', 'l.title', 'l.price', 'l.plot_area', 'l.property_type',
+      'bp.company_name', 'bp.overall_rating',
+      // Explicit ::float8 casts — lat/lng are numeric columns, and while
+      // Postgres's numeric->float8 cast usually resolves fine here, radians()
+      // is only ever defined for double precision, so cast explicitly rather
+      // than lean on implicit-cast resolution for arithmetic this exact.
+      knex.raw(
+        `6371 * acos(least(1, greatest(-1,
+           cos(radians(?::float8)) * cos(radians(l.lat::float8)) * cos(radians(l.lng::float8) - radians(?::float8))
+           + sin(radians(?::float8)) * sin(radians(l.lat::float8))
+         ))) AS distance_km`,
+        [lat, lng, lat]
+      )
+    )
+    .where('l.status', 'active')
+    .where('bp.moderation_status', 'published')
+    .whereNotNull('l.lat')
+    .whereNotNull('l.lng')
+    .whereNot('l.id', listingId);
+
+  if (price != null) {
+    query.whereBetween('l.price', [price * (1 - SIMILAR_PROJECT_PRICE_BAND), price * (1 + SIMILAR_PROJECT_PRICE_BAND)]);
+  }
+
+  const rows = await query;
+
+  return rows
+    .filter((r) => r.distance_km <= SIMILAR_PROJECT_RADIUS_KM)
+    .sort((a, b) => a.distance_km - b.distance_km)
+    .slice(0, SIMILAR_PROJECT_LIMIT)
+    .map((r) => ({
+      slug: r.public_slug,
+      title: r.title,
+      price: r.price,
+      plot_area: r.plot_area,
+      property_type: r.property_type,
+      builder_company_name: r.company_name,
+      builder_rating: r.overall_rating != null ? Number(r.overall_rating) : null,
+      distance_km: Math.round(r.distance_km * 10) / 10,
+    }));
+}
+
 /**
  * POST /api/v1/dashboard/listings/:id/builder-profile
  * Links a listing to a builder_profiles row, marking it as a mega-project
@@ -125,7 +193,7 @@ async function getPublicBuilderProfile(req, res) {
 
   try {
     const listing = await knex('listings')
-      .select('builder_profile_id')
+      .select('id', 'builder_profile_id', 'lat', 'lng', 'price')
       .where({ public_slug: slug })
       .whereIn('status', ['active', 'awaiting_approval'])
       .first();
@@ -135,7 +203,11 @@ async function getPublicBuilderProfile(req, res) {
     }
 
     const profile = await knex('builder_profiles')
-      .select('id', 'company_name', 'rera_registration_ids', 'mca_cin', 'last_researched_at')
+      .select(
+        'id', 'company_name', 'rera_registration_ids', 'mca_cin', 'last_researched_at',
+        'overall_rating', 'rating_source_url', 'rating_source_title',
+        'possession_delivered_count', 'possession_total_count', 'possession_source_url', 'possession_source_title'
+      )
       .where({ id: listing.builder_profile_id, moderation_status: 'published' })
       .first();
 
@@ -148,7 +220,19 @@ async function getPublicBuilderProfile(req, res) {
       .where({ builder_profile_id: profile.id })
       .orderBy('category', 'asc');
 
-    return res.status(200).json({ success: true, builderProfile: profile, claims });
+    // Best-effort — a comparison-query failure shouldn't take down the
+    // whole builder-profile response (the claims/rating above are the
+    // primary content here).
+    let similarProjects = [];
+    try {
+      similarProjects = await findSimilarProjects(knex, {
+        listingId: listing.id, lat: listing.lat, lng: listing.lng, price: listing.price,
+      });
+    } catch (simErr) {
+      console.error('Failed to compute similar projects (non-fatal):', simErr.message);
+    }
+
+    return res.status(200).json({ success: true, builderProfile: profile, claims, similarProjects });
   } catch (error) {
     console.error('Failed to fetch public builder profile:', error);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to load builder profile.' } });

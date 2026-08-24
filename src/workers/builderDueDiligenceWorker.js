@@ -7,10 +7,12 @@
 //
 // Every claim this writes has already passed groundedResearchService.js's
 // filterCitedItems() (safeguard #1) and the DB's source_url NOT NULL
-// constraint is safeguard #2. This worker deliberately does NOT touch
-// moderation_status — that stays 'pending_review' until a human explicitly
-// publishes it (safeguard #3, in builderProfileController.js). Research
-// completing is not the same thing as being cleared to show buyers.
+// constraint is safeguard #2 — same for overall_rating/possession_*
+// (filterCitedSingle() + the CHECK constraints in the 20260824 migration).
+// This worker deliberately does NOT touch moderation_status — that stays
+// 'pending_review' until a human explicitly publishes it (safeguard #3, in
+// builderProfileController.js). Research completing is not the same thing
+// as being cleared to show buyers.
 const { Worker } = require('bullmq');
 const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
@@ -39,7 +41,7 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
   await knex('builder_profiles').where({ id: builderProfileId }).update({ research_status: 'researching', updated_at: knex.fn.now() });
 
   try {
-    const { claims } = await generateBuilderClaims({ companyName: profile.company_name });
+    const { claims, rating, possessionRecord } = await generateBuilderClaims({ companyName: profile.company_name });
 
     await knex.transaction(async (trx) => {
       // Clear any prior claims (re-research case, e.g. a future manual
@@ -59,15 +61,27 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
         );
       }
 
+      // rating/possessionRecord are already null unless generateBuilderClaims
+      // found a real cited source for them (see groundedResearchService.js) —
+      // writing null here on a re-research is correct, not data loss: it
+      // means this run found no citable rating/track record, same as an
+      // empty claims array means no citable claims this time.
       await trx('builder_profiles').where({ id: builderProfileId }).update({
         research_status: 'completed',
         last_researched_at: trx.fn.now(),
         updated_at: trx.fn.now(),
+        overall_rating: rating?.value ?? null,
+        rating_source_url: rating?.source_url ?? null,
+        rating_source_title: rating?.source_title ?? null,
+        possession_delivered_count: possessionRecord?.delivered ?? null,
+        possession_total_count: possessionRecord?.total ?? null,
+        possession_source_url: possessionRecord?.source_url ?? null,
+        possession_source_title: possessionRecord?.source_title ?? null,
       });
     });
 
-    console.log(`[Job ${job.id}] Builder due diligence completed for "${profile.company_name}": ${claims.length} cited claims.`);
-    return { success: true, claimCount: claims.length };
+    console.log(`[Job ${job.id}] Builder due diligence completed for "${profile.company_name}": ${claims.length} cited claims, rating=${rating?.value ?? 'none'}, possession=${possessionRecord ? `${possessionRecord.delivered}/${possessionRecord.total}` : 'none'}.`);
+    return { success: true, claimCount: claims.length, hasRating: !!rating, hasPossessionRecord: !!possessionRecord };
   } catch (error) {
     console.error(`[Job ${job.id}] Builder Due Diligence research failed:`, error.message);
     await knex('builder_profiles').where({ id: builderProfileId }).update({ research_status: 'failed', updated_at: knex.fn.now() });

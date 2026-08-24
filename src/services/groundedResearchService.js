@@ -92,6 +92,20 @@ function filterCitedItems(items) {
   return items.filter((item) => item && isValidHttpUrl(item.source_url));
 }
 
+/**
+ * Same "no citation, doesn't exist" rule as filterCitedItems(), but for a
+ * single nullable object (rating / possession record) rather than an array
+ * — generateBuilderClaims() below returns these as at-most-one values, not
+ * lists. Returns null if the item itself is null/malformed or its
+ * source_url isn't a real URL — never a half-populated object with a
+ * number but no citation.
+ */
+function filterCitedSingle(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (!isValidHttpUrl(item.source_url)) return null;
+  return item;
+}
+
 const LOCAL_INTEL_SYSTEM_PROMPT = `You research real, current, publicly-reported information about a specific location in India for a property-listing website. You MUST use the web_search tool to find REAL information — never invent facts, statistics, or crime figures, even plausible-sounding ones.
 
 Return ONLY a JSON object with exactly these keys: news, safety, seasonal — each an array of objects shaped { "text": string, "source_url": string, "source_title": string }.
@@ -144,25 +158,32 @@ const BUILDER_DD_SYSTEM_PROMPT = `You research real, publicly-verifiable informa
 
 Prioritize authoritative sources: RERA (India's Real Estate Regulatory Authority) state registries for project registration/delivery history, MCA (Ministry of Corporate Affairs) filings for company/director information, court records, and credible news outlets. Do not rely on the builder's own marketing materials as a sole source for delivery-history or financial claims.
 
-Return ONLY a JSON object with key "claims": an array of objects shaped:
-{ "category": "delivery_history" | "leadership" | "financial_condition" | "rating" | "legal_issue", "claim_text": string, "source_url": string, "source_title": string, "source_domain": string }
+Return ONLY a JSON object with exactly these keys:
+{
+  "claims": [ { "category": "delivery_history" | "leadership" | "financial_condition" | "rating" | "legal_issue", "claim_text": string, "source_url": string, "source_title": string, "source_domain": string }, ... ],
+  "rating": { "value": number, "source_url": string, "source_title": string } | null,
+  "possession_record": { "delivered": number, "total": number, "source_url": string, "source_title": string } | null
+}
 
 Rules:
 - Phrase every claim_text as attributed reporting, e.g. "Reported by [source] that..." or "According to RERA filings,..." — NEVER as a flat assertion of fact, even when the source seems reliable.
 - EVERY claim must have a real source_url. If you cannot find a citable source, do not include the claim at all.
 - For "legal_issue": only include this if you find an actual reported case, filing, or credible news report — never infer or guess based on company size or reputation.
 - If you find nothing reliable about this company at all, return an empty claims array — do not pad with generic or inferred content.
+- "rating": a numeric score (out of 5) ONLY if a real published rating/ranking exists for this exact company (e.g. a credible real-estate ratings platform, a reputable news ranking of builders, RERA standing where it's expressed as a score). NEVER compute or infer a rating yourself from the claims you found, and never estimate one from company size, reputation, or general impression — if no real published numeric rating exists, this must be null. Convert to a 0-5 scale if the source uses a different scale, and say so in source_title.
+- "possession_record": delivered/total project counts ONLY from a real source that states them explicitly (e.g. RERA project registry showing completion status across the builder's registered projects, or credible reporting that gives exact figures) — NEVER count claims from your own "claims" array to derive these numbers, and never estimate. total must be >= delivered. If no such source exists, this must be null.
 - Output ONLY the JSON object, no markdown code fences, no other text.`;
 
 /**
- * Feature 2: Builder Due Diligence. Returns { claims, citationCount } with
- * every claim guaranteed to carry a real citation (post-filter) — this is
- * the FIRST of three independent safeguards; see the migration for the
- * second (NOT NULL source_url) and builderProfileController.js for the
+ * Feature 2: Builder Due Diligence. Returns { claims, rating, possessionRecord,
+ * citationCount } with every claim (and rating/possessionRecord, if present)
+ * guaranteed to carry a real citation (post-filter) — this is the FIRST of
+ * three independent safeguards; see the migration for the second (NOT NULL /
+ * CHECK source_url constraints) and builderProfileController.js for the
  * third (human moderation gate before anything is public).
  */
 async function generateBuilderClaims({ companyName }) {
-  const userPrompt = `Builder/developer company: "${companyName}" (India). Find real, cited information on: past project delivery history, ownership/board of directors, financial condition, standing relative to other builders, and any reported legal or criminal matters.`;
+  const userPrompt = `Builder/developer company: "${companyName}" (India). Find real, cited information on: past project delivery history, ownership/board of directors, financial condition, standing relative to other builders, any reported legal or criminal matters, a real published rating/ranking if one exists, and a real possession/delivery track record (projects delivered vs. total, from an authoritative source) if one is stated anywhere.`;
 
   const { text } = await callWebSearchGroundedGPT({
     systemPrompt: BUILDER_DD_SYSTEM_PROMPT,
@@ -186,7 +207,32 @@ async function generateBuilderClaims({ companyName }) {
     source_domain: c.source_domain || (() => { try { return new URL(c.source_url).hostname; } catch { return null; } })(),
   }));
 
-  return { claims, citationCount: claims.length, rawResponseText: text };
+  const ratingRaw = filterCitedSingle(parsed.rating);
+  const rating = (ratingRaw && Number.isFinite(Number(ratingRaw.value)))
+    ? {
+        value: Math.max(0, Math.min(5, Number(ratingRaw.value))),
+        source_url: ratingRaw.source_url,
+        source_title: ratingRaw.source_title || null,
+      }
+    : null;
+
+  const possessionRaw = filterCitedSingle(parsed.possession_record);
+  const possessionRecord = (
+    possessionRaw
+    && Number.isInteger(possessionRaw.delivered)
+    && Number.isInteger(possessionRaw.total)
+    && possessionRaw.delivered >= 0
+    && possessionRaw.total >= possessionRaw.delivered
+  )
+    ? {
+        delivered: possessionRaw.delivered,
+        total: possessionRaw.total,
+        source_url: possessionRaw.source_url,
+        source_title: possessionRaw.source_title || null,
+      }
+    : null;
+
+  return { claims, rating, possessionRecord, citationCount: claims.length, rawResponseText: text };
 }
 
 module.exports = {
