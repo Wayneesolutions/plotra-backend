@@ -32,6 +32,12 @@ const SIMILAR_PROJECT_LIMIT = 6;
  * same moderation discipline as everything else here: a builder company
  * name/rating never appears anywhere on the site before a human has
  * explicitly cleared it, comparison lists included.
+ *
+ * Flat-only, both ends: the caller (getPublicBuilderProfile) already only
+ * reaches this for a Flat listing, and the query below additionally
+ * restricts candidates to property_type='Flat' — a plot/villa should
+ * never show up as a "comparable project" and should never trigger this
+ * developer-comparison content on its own page.
  */
 async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
   if (lat == null || lng == null) return []; // no coordinates, no "nearby" — non-fatal, just skip
@@ -54,6 +60,7 @@ async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
       )
     )
     .where('l.status', 'active')
+    .where('l.property_type', 'Flat') // Flat-only comparisons — a house should never appear here, or be compared against
     .where('bp.moderation_status', 'published')
     .whereNotNull('l.lat')
     .whereNotNull('l.lng')
@@ -102,6 +109,17 @@ async function linkOrCreateBuilderProfile(req, res) {
     const listing = await knex('listings').where({ id: listingId, tenant_id }).first();
     if (!listing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
+    }
+
+    // Builder Due Diligence (developer profile, rating, possession record,
+    // "compare nearby projects") is a Flat-only feature — a plot or villa
+    // buyer shouldn't see developer-comparison content that doesn't apply
+    // to an individually-owned property. Enforced here, not just in the UI,
+    // so this can't be bypassed by calling the API directly.
+    if (listing.property_type !== 'Flat') {
+      return res.status(400).json({
+        error: { code: 'VALIDATION_ERROR', message: "Builder profiles can only be linked to 'Flat' listings." }
+      });
     }
 
     const normalizedName = normalizeCompanyName(companyName);
@@ -193,12 +211,16 @@ async function getPublicBuilderProfile(req, res) {
 
   try {
     const listing = await knex('listings')
-      .select('id', 'builder_profile_id', 'lat', 'lng', 'price')
+      .select('id', 'builder_profile_id', 'lat', 'lng', 'price', 'property_type')
       .where({ public_slug: slug })
       .whereIn('status', ['active', 'awaiting_approval'])
       .first();
 
-    if (!listing || !listing.builder_profile_id) {
+    // property_type !== 'Flat' is checked here too, not just at link time
+    // (linkOrCreateBuilderProfile) — a defensive second gate so this never
+    // shows developer/comparison content on a house even if a listing's
+    // type was changed after linking, or via any older data.
+    if (!listing || !listing.builder_profile_id || listing.property_type !== 'Flat') {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No builder profile for this listing.' } });
     }
 
