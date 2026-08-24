@@ -82,6 +82,8 @@ async function handleInboundWhatsApp(req, res) {
 
   const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType } = parseInboundPayload(req.body);
 
+  console.log('[Webhook] parsed phone=%s text=%s media=%s', phone || 'null', incomingText || 'null', mediaId || 'null');
+
   if (!phone || (!incomingText && !mediaId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
