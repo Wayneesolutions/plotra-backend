@@ -21,30 +21,27 @@ const vocallmChatQueue = new Queue('vocallm-chat-processor', { connection: redis
  * nothing else in this file should need to change.
  */
 function parseInboundPayload(body) {
+  // Meta Cloud API wraps the actual message data inside entry[0].changes[0].value.
+  // Other BSPs (Gupshup, Interakt, Chat Mitra) send a flat top-level body.
+  // Unwrap if the envelope is present; fall back to the raw body otherwise so
+  // non-Meta BSPs continue to work unchanged.
+  const value = body.entry?.[0]?.changes?.[0]?.value ?? body;
+
   return {
-    phone: body.contacts?.[0]?.wa_id || body.from_phone || body.sender?.phone,
-    leadName: body.contacts?.[0]?.profile?.name || body.from_name || body.sender?.name || 'Visitor',
-    incomingText: body.messages?.[0]?.text?.body || body.message_text || body.text,
+    phone: value.contacts?.[0]?.wa_id || body.from_phone || body.sender?.phone,
+    leadName: value.contacts?.[0]?.profile?.name || body.from_name || body.sender?.name || 'Visitor',
+    incomingText: value.messages?.[0]?.text?.body || body.message_text || body.text,
     // Image message (Meta Cloud API shape) — messages[0].type === 'image'
     // when present, with the actual bytes retrievable via a separate
     // media-id lookup (see agentIntakeController.js's downloadWhatsAppMedia).
     // Only images are handled — a dealer sending a PDF/document isn't a
     // property photo, out of scope for now.
-    mediaId: body.messages?.[0]?.image?.id || null,
-    mediaMimeType: body.messages?.[0]?.image?.mime_type || null,
-    bspThreadRef: body.messages?.[0]?.id || body.conversation_id || body.msg_id,
-    inferredSlug: body.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
-    // BUG FIX: this previously always resolved to null whenever
-    // phone_number_id was present, with a comment promising it would be
-    // "resolved below" — that resolution code never existed. Meta Cloud API
-    // identifies the receiving number by phone_number_id (an opaque ID, not
-    // the raw phone number), so every Meta inbound message fell through to
-    // the "oldest active tenant" fallback regardless of which tenant's
-    // number it actually arrived on. Now surfaces both fields; the caller
-    // resolves whichever one is present against tenants.whatsapp_number or
-    // tenants.phone_number_id.
-    receivingNumber: body.to || body.to_phone || body.receiver?.phone || null,
-    receivingPhoneNumberId: body.metadata?.phone_number_id || null,
+    mediaId: value.messages?.[0]?.image?.id || null,
+    mediaMimeType: value.messages?.[0]?.image?.mime_type || null,
+    bspThreadRef: value.messages?.[0]?.id || body.conversation_id || body.msg_id,
+    inferredSlug: value.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
+    receivingNumber: value.metadata?.display_phone_number || body.to || body.to_phone || null,
+    receivingPhoneNumberId: value.metadata?.phone_number_id || body.metadata?.phone_number_id || null,
   };
 }
 
