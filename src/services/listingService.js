@@ -97,7 +97,25 @@ async function createListingRecord(knex, {
   const tenant = await knex('tenants').where({ id: tenantId }).first();
   const plan = await knex('plans').where({ key: tenant.plan }).first();
 
-  if (plan && plan.listing_limit !== null) {
+  // monthly_listing_limit (see 20260825_01_plan_tier_gates.js) takes over
+  // from the legacy lifetime listing_limit once a plan has it set — the
+  // new Tier 1/2/3 system caps listings per calendar month (40-50/100/200),
+  // not for the account's whole lifetime. A plan with monthly_listing_limit
+  // still null (any plan not yet migrated to the new tier system) keeps
+  // the original all-time check exactly as before — additive, not a
+  // behavior change for those plans.
+  if (plan && plan.monthly_listing_limit !== null && plan.monthly_listing_limit !== undefined) {
+    const [{ count }] = await knex('listings')
+      .where({ tenant_id: tenantId })
+      .where('created_at', '>=', knex.raw("date_trunc('month', now())"))
+      .count('id as count');
+    if (parseInt(count, 10) >= plan.monthly_listing_limit) {
+      throw new ListingLimitError(
+        `Your ${plan.label} plan allows up to ${plan.monthly_listing_limit} listings per month. Upgrade your plan, or add more next month.`,
+        plan
+      );
+    }
+  } else if (plan && plan.listing_limit !== null) {
     const [{ count }] = await knex('listings').where({ tenant_id: tenantId }).count('id as count');
     if (parseInt(count, 10) >= plan.listing_limit) {
       throw new ListingLimitError(
