@@ -12,6 +12,7 @@ const {
   getTenantDetail,
   updateTenantStatus,
   updateTenantPlan,
+  listCallingOverage,
 } = require('../controllers/adminController');
 const {
   listAdPlacements,
@@ -119,5 +120,13 @@ router.patch('/plans/:key', updatePlan);
  * @desc    Delete a plan — blocked if any tenants are currently on it
  */
 router.delete('/plans/:key', deletePlan);
+
+/**
+ * @route   GET /api/v1/admin/calling-overage
+ * @desc    Tenants currently over their plan's included calling minutes
+ *          this month, and what they owe at the plan's overage rate.
+ *          Read-only — does not charge anything.
+ */
+router.get('/calling-overage', listCallingOverage);
 
 module.exports = router;

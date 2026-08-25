@@ -7,6 +7,7 @@ const {
   constructStripeEvent,
 } = require('../services/billingService');
 const { sendPaymentReceiptEmail } = require('../services/emailService');
+const { getMonthlyCallingUsage } = require('../services/callingUsageService');
 
 /**
  * GET /api/v1/public/billing/plans
@@ -125,10 +126,24 @@ async function getBillingStatus(req, res) {
         'tenants.plan',
         'tenants.subscription_status',
         'tenants.current_period_end',
-        'plans.multi_agent_whatsapp'
+        'plans.multi_agent_whatsapp',
+        // Tier gates (Part 2) — surfaced here so the dashboard can render
+        // conditionally (e.g. hiding the calling-minutes card entirely for
+        // a plan without calling_access) without a second round-trip.
+        'plans.dashboard_access',
+        'plans.calling_access',
+        'plans.max_whatsapp_numbers'
       )
       .where({ 'tenants.id': req.user.tenant_id })
       .first();
+
+    // Calling usage/overage only meaningful (and only computed) for a plan
+    // that has calling access at all — see getMonthlyCallingUsage's own
+    // comment on why every other plan gets includedMinutes: null, no
+    // overage math run for them.
+    const callingUsage = tenant?.calling_access
+      ? await getMonthlyCallingUsage(knex, req.user.tenant_id)
+      : null;
 
     const history = await knex('payment_events')
       .select('plan', 'amount_paise', 'status', 'created_at')
@@ -136,7 +151,7 @@ async function getBillingStatus(req, res) {
       .orderBy('created_at', 'desc')
       .limit(5);
 
-    return res.json({ success: true, billing: tenant, history });
+    return res.json({ success: true, billing: tenant, callingUsage, history });
   } catch (error) {
     console.error('Failed to fetch billing status:', error.message);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to fetch billing status.' } });
