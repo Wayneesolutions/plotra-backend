@@ -69,9 +69,14 @@ const landmarkWorker = new Worker('landmark-extraction', async (job) => {
       let walkMinutes = Math.round((distanceMeters / 80)); // 80 meters per minute standard walking pace
       let driveMinutes = Math.round((distanceMeters / 300)); // 300 meters per minute coarse driving rate
 
-      // Identify primary type mapping category
-      const primaryType = place.types.find(t => PLACE_TYPE_MAP[t]) || 'market';
-      const normalizedType = PLACE_TYPE_MAP[primaryType] || 'market';
+      // Identify primary type mapping category — no genuine match means this
+      // place isn't actually a school/hospital/market/transit point (Google's
+      // Nearby Search can return unrelated businesses alongside a real
+      // match), so drop it instead of defaulting to 'market' and mislabeling
+      // it as a fake landmark.
+      const primaryType = place.types.find(t => PLACE_TYPE_MAP[t]);
+      if (!primaryType) return null;
+      const normalizedType = PLACE_TYPE_MAP[primaryType];
 
       return {
         id: knex.raw('uuid_generate_v4()'),
@@ -85,7 +90,7 @@ const landmarkWorker = new Worker('landmark-extraction', async (job) => {
         drive_minutes: driveMinutes > 0 ? driveMinutes : 1,
         fetched_at: knex.fn.now()
       };
-    });
+    }).filter(Boolean);
 
     // 3. Clear any historical landmarks and batch write new assets into the transactional pool cleanly
     await knex.transaction(async (trx) => {
