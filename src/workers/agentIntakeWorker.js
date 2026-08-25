@@ -13,6 +13,32 @@ const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
 const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
 const { FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
+const {
+  linkOrCreateBuilderProfileCore,
+  buildBuilderAutoLinkNote,
+  BuilderProfileLinkError,
+  BUILDER_ELIGIBLE_TYPES,
+} = require('../controllers/builderProfileController');
+
+// WhatsApp counterpart to webChatController.js's autoLinkBuilderProfile —
+// same trigger ("flat available in DLF Chandigarh One" naming a specific
+// building/mall), same underlying linkOrCreateBuilderProfileCore, just
+// sent as a separate outbound WhatsApp message here instead of appended
+// inline to a synchronous HTTP reply, since this worker's own replies are
+// already fire-and-forget messages rather than one HTTP response body.
+async function sendBuilderAutoLinkNote({ tenantId, phone, draftId, listingId, propertyType, buildingName, lang }) {
+  if (!buildingName || !BUILDER_ELIGIBLE_TYPES.includes(propertyType)) return;
+  try {
+    const { profile, isNew } = await linkOrCreateBuilderProfileCore(knex, { tenantId, listingId, companyName: buildingName });
+    const body = buildBuilderAutoLinkNote({ isNew, companyName: profile.company_name, lang }).trim();
+    await knex.transaction(async (trx) => { await logAgentOutboundMessage(trx, { draftId, body }); });
+    await enqueueAgentWhatsappSend({ tenantId, phone, messageBody: body });
+  } catch (err) {
+    if (!(err instanceof BuilderProfileLinkError)) {
+      console.error('Agent intake: builder auto-link failed:', err.message);
+    }
+  }
+}
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -133,6 +159,17 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         missing_fields: null,
         updated_at: knex.fn.now(),
       });
+
+      // "flat available in DLF Chandigarh One" / "retail space in Elante
+      // Mall" — a named building/mall auto-links a builder profile right
+      // at creation, same as the manual dashboard button, just inline.
+      // Sent as its own WhatsApp message rather than folded into the
+      // preview (which only goes out later, once geocoding finishes).
+      await sendBuilderAutoLinkNote({
+        tenantId: draft.tenant_id, phone: agentUser.phone, draftId, listingId: newListing.id,
+        propertyType: extracted.property_type, buildingName: extracted.building_name,
+        lang: await detectDraftLanguage(knex, draftId),
+      });
     } catch (err) {
       if (err instanceof ListingLimitError) {
         await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'collecting', updated_at: knex.fn.now() });
@@ -197,6 +234,15 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       extracted_fields: JSON.stringify(merged),
       updated_at: knex.fn.now(),
     });
+
+    // A building/mall name can arrive on a correction message too ("it's
+    // actually in DLF Chandigarh One") rather than at first creation.
+    await sendBuilderAutoLinkNote({
+      tenantId: draft.tenant_id, phone: agentUser.phone, draftId, listingId: draft.listing_id,
+      propertyType: merged.property_type, buildingName: extracted.building_name,
+      lang: await detectDraftLanguage(knex, draftId),
+    });
+
     // Same slug/link, no re-geocode needed — go straight back to preview.
     await sendPreviewAndAwaitApproval({ draftId, listingId: draft.listing_id });
     return { success: true, corrected: true, reGeocoded: false };
@@ -217,6 +263,12 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     updated_at: knex.fn.now(),
   });
   await enqueueGeoEnrichment({ listingId: draft.listing_id, rawAddress: merged.raw_address, draftId });
+
+  await sendBuilderAutoLinkNote({
+    tenantId: draft.tenant_id, phone: agentUser.phone, draftId, listingId: draft.listing_id,
+    propertyType: merged.property_type, buildingName: extracted.building_name,
+    lang: await detectDraftLanguage(knex, draftId),
+  });
 
   return { success: true, corrected: true, reGeocoded: true };
 }, { connection: redisConnection });

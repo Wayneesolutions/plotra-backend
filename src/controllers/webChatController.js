@@ -13,6 +13,34 @@ const { extractListingFields, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('.
 const { isApprovalReply } = require('../utils/agentReplyIntent');
 const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
+const {
+  linkOrCreateBuilderProfileCore,
+  buildBuilderAutoLinkNote,
+  BuilderProfileLinkError,
+  BUILDER_ELIGIBLE_TYPES,
+} = require('./builderProfileController');
+
+// Auto-links a chat-created listing to a builder profile when the dealer
+// named a specific building/mall in the same message ("flat available in
+// DLF Chandigarh One") — reuses the exact same linking logic the manual
+// dashboard "Link Builder" button calls (see builderProfileController.js),
+// just triggered inline instead of by a button click. Returns a reply
+// snippet to append, or '' if there was nothing to link (no building
+// named, wrong property type, or the link attempt itself failed — never
+// lets a builder-link failure take down listing creation/correction,
+// which already succeeded by the time this runs).
+async function autoLinkBuilderProfile({ knex, tenantId, listingId, propertyType, buildingName, lang }) {
+  if (!buildingName || !BUILDER_ELIGIBLE_TYPES.includes(propertyType)) return '';
+  try {
+    const { profile, isNew } = await linkOrCreateBuilderProfileCore(knex, { tenantId, listingId, companyName: buildingName });
+    return buildBuilderAutoLinkNote({ isNew, companyName: profile.company_name, lang });
+  } catch (err) {
+    if (!(err instanceof BuilderProfileLinkError)) {
+      console.error('Web chat: builder auto-link failed:', err.message);
+    }
+    return '';
+  }
+}
 
 // mediaController.js's MAX_PHOTOS isn't exported (it's a local const there) —
 // duplicated here rather than exporting it just for this, since it's a
@@ -305,6 +333,14 @@ async function handleWebChatMessage(req, res) {
           reply = "Updated! Anything else you'd like to add or change?";
         }
 
+        // A building/mall name can arrive on a correction message too ("it's
+        // actually in DLF Chandigarh One") rather than the very first one —
+        // same auto-link, just triggered from here instead of creation.
+        reply += await autoLinkBuilderProfile({
+          knex, tenantId: identity.tenantId, listingId: session.listingId,
+          propertyType: listing.property_type, buildingName: extracted.building_name, lang,
+        });
+
         return res.status(200).json({
           reply,
           listing: listingSummary(listing, listing.public_slug, listing.status === 'active'),
@@ -357,11 +393,19 @@ async function handleWebChatMessage(req, res) {
           ? '\n\n(Tip: send the 6-digit pincode too if you have it — makes the map location more accurate.)'
           : '\n\n(Tip: pincode bhi bhej dijiye agar pata hai — location aur accurate ho jayegi.)');
 
+    // "flat available in DLF Chandigarh One" / "retail space in Elante
+    // Mall" — a named building/mall auto-links a builder profile right at
+    // creation, same as the manual dashboard button, just inline.
+    const builderNote = await autoLinkBuilderProfile({
+      knex, tenantId: identity.tenantId, listingId: newListing.id,
+      propertyType: extracted.property_type, buildingName: extracted.building_name, lang,
+    });
+
     return res.status(200).json({
       reply: (lang === 'en'
         ? `Here's your listing preview:\n${buildPreviewLink(newListing.public_slug)}\n\nReply "yes" or "approve" if it looks right — it'll go live and be ready to share with a client. Send a new detail if anything needs changing.`
         : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(newListing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi aur client ke saath share karne ke liye taiyaar hogi. Kuch badalna hai to naya detail bhej dijiye.`
-      ) + pincodeNudge,
+      ) + pincodeNudge + builderNote,
       listing: listingSummary({ ...extracted, title: newListing.title }, newListing.public_slug, false),
     });
 
