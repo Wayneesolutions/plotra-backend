@@ -25,7 +25,12 @@ async function listPlansAdmin(req, res) {
 async function updatePlan(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { key } = req.params;
-  const allowedFields = ['label', 'price_inr', 'listing_limit', 'features', 'is_active', 'sort_order'];
+  const allowedFields = [
+    'label', 'price_inr', 'listing_limit', 'features', 'is_active', 'sort_order',
+    // Tier gates (see 20260825_01_plan_tier_gates.js) — editable here same
+    // as everything else, no deploy needed to change what a plan unlocks.
+    'dashboard_access', 'calling_access', 'max_whatsapp_numbers', 'monthly_listing_limit',
+  ];
 
   const updates = {};
   for (const field of allowedFields) {
@@ -42,6 +47,22 @@ async function updatePlan(req, res) {
 
   if (updates.listing_limit !== undefined && updates.listing_limit !== null && (!Number.isInteger(updates.listing_limit) || updates.listing_limit <= 0)) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'listing_limit must be a positive integer, or null for unlimited.' } });
+  }
+
+  if (updates.monthly_listing_limit !== undefined && updates.monthly_listing_limit !== null && (!Number.isInteger(updates.monthly_listing_limit) || updates.monthly_listing_limit <= 0)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'monthly_listing_limit must be a positive integer, or null.' } });
+  }
+
+  if (updates.max_whatsapp_numbers !== undefined && (!Number.isInteger(updates.max_whatsapp_numbers) || updates.max_whatsapp_numbers < 1)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'max_whatsapp_numbers must be a positive integer (at least 1).' } });
+  }
+
+  if (updates.dashboard_access !== undefined && typeof updates.dashboard_access !== 'boolean') {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'dashboard_access must be a boolean.' } });
+  }
+
+  if (updates.calling_access !== undefined && typeof updates.calling_access !== 'boolean') {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'calling_access must be a boolean.' } });
   }
 
   if (updates.features !== undefined) {
@@ -70,12 +91,27 @@ async function updatePlan(req, res) {
  */
 async function createPlan(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { key, label, price_inr, listing_limit = null, features = [], sort_order = 0 } = req.body;
+  const {
+    key, label, price_inr, listing_limit = null, features = [], sort_order = 0,
+    // Tier gates — default to the same "don't restrict anything" values
+    // the migration seeded onto existing plans, not e.g. dashboard_access
+    // defaulting false, so a freshly-created plan doesn't accidentally
+    // lock its tenants out until someone explicitly restricts it.
+    dashboard_access = true, calling_access = true, max_whatsapp_numbers = 1, monthly_listing_limit = null,
+  } = req.body;
 
   if (!key || !label || !Number.isFinite(price_inr) || price_inr <= 0) {
     return res.status(400).json({
       error: { code: 'VALIDATION_ERROR', message: 'key, label, and a positive price_inr are required.' },
     });
+  }
+
+  if (!Number.isInteger(max_whatsapp_numbers) || max_whatsapp_numbers < 1) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'max_whatsapp_numbers must be a positive integer (at least 1).' } });
+  }
+
+  if (monthly_listing_limit !== null && (!Number.isInteger(monthly_listing_limit) || monthly_listing_limit <= 0)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'monthly_listing_limit must be a positive integer, or null.' } });
   }
 
   try {
@@ -93,6 +129,10 @@ async function createPlan(req, res) {
         features: JSON.stringify(features),
         sort_order,
         is_active: true,
+        dashboard_access,
+        calling_access,
+        max_whatsapp_numbers,
+        monthly_listing_limit,
       })
       .returning('*');
 
