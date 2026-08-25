@@ -359,6 +359,19 @@ async function triggerOutboundCall(req, res) {
       return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'This lead has no phone number to call.' } });
     }
 
+    // Part 2, build-order item 6 — the actual plan-level permission check
+    // that was missing (MONTHLY_CALL_CAP above is a flat safety guard, not
+    // a plan gate — see its own comment). A Tier 1/2 tenant's plan has
+    // calling_access = false; Tier 3 (and every existing starter/growth/
+    // unlimited plan, unless explicitly changed) has it true.
+    const tenant = await knex('tenants').where({ id: tenant_id }).first();
+    const plan = await knex('plans').where({ key: tenant?.plan }).first();
+    if (plan && plan.calling_access === false) {
+      return res.status(403).json({
+        error: { code: 'PLAN_RESTRICTED', message: 'Your current plan does not include AI calling.' }
+      });
+    }
+
     const monthStart = new Date();
     monthStart.setDate(1);
     monthStart.setHours(0, 0, 0, 0);
