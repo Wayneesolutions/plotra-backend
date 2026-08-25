@@ -10,6 +10,7 @@ const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../contr
 const { inviteTenantUser, listTenantUsers } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
+const { getWhatsappNumbers, postWhatsappNumber, deleteWhatsappNumber, patchWhatsappNumberDefault } = require('../controllers/tenantWhatsappNumberController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
 // getLeads aliased to getOpsLeadInbox: leadsController.js's getLeads (tenant-wide
 // lead list, mounted at /leads below) and dealerOpsController.js's getLeads
@@ -159,5 +160,15 @@ router.get('/ops/calls', authGuard, tenantTransaction, getCalls);
 router.post('/ops/leads/:id/call', authGuard, tenantTransaction, triggerOutboundCall);
 router.get('/ops/visits', authGuard, tenantTransaction, getVisits);
 router.patch('/ops/visits/:id', authGuard, tenantTransaction, updateVisit);
+
+/**
+ * NEW — tenant WhatsApp number management (Part 2, build-order item 4).
+ * Owner-only (enforced in the controller, same pattern as /users/invite).
+ * Adding is capped by plans.max_whatsapp_numbers.
+ */
+router.get('/whatsapp-numbers', authGuard, tenantTransaction, getWhatsappNumbers);
+router.post('/whatsapp-numbers', authGuard, tenantTransaction, postWhatsappNumber);
+router.delete('/whatsapp-numbers/:id', authGuard, tenantTransaction, deleteWhatsappNumber);
+router.patch('/whatsapp-numbers/:id/default', authGuard, tenantTransaction, patchWhatsappNumberDefault);
 
 module.exports = router;
