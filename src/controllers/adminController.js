@@ -1,8 +1,13 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 // NEW — Phase 7
 const { sendOnboardingEmail } = require('../services/emailService');
 const { resolveCityBounds } = require('../services/geoBiasService');
+// Part 3 — WhatsApp self-serve onboarding
+const { getPlan, createCheckoutSession } = require('../services/billingService');
+const { addNumber } = require('../services/tenantWhatsappNumberService');
+const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 
 function generateTempPassword() {
   return `Welcome${crypto.randomBytes(4).toString('hex')}!`;
@@ -105,6 +110,17 @@ async function approveRequest(req, res) {
       });
     }
 
+    // WhatsApp-origin signups (Part 3) follow a different shape entirely —
+    // no dashboard login (Tier 1 gets none, see the shape decided for that
+    // tier), tenant created here but NOT activated until payment is
+    // confirmed (confirmSignupPayment), and a WhatsApp reply instead of an
+    // email as the notification channel. Branches out to its own function
+    // rather than threading a dozen if(source==='whatsapp') checks through
+    // the web-form logic below.
+    if (request.source === 'whatsapp') {
+      return approveWhatsappSignupRequest(req, res, knex, request, adminUserId);
+    }
+
     const existingUser = await knex('users').where({ email: request.email }).first();
     if (existingUser) {
       return res.status(409).json({
@@ -177,6 +193,170 @@ async function approveRequest(req, res) {
     return res.status(500).json({
       error: { code: 'INTERNAL_ERROR', message: 'Failed to approve request.' }
     });
+  }
+}
+
+/**
+ * Approval path for a WhatsApp self-serve signup (request.source ===
+ * 'whatsapp'). Creates the tenant now, but in status = 'pending_payment'
+ * — NOT active, and with NO users row at all (Tier 1 has no dashboard
+ * login by design; there is no owner to create). Sends the prospect a
+ * Stripe Checkout link over WhatsApp as the payment step ("QR code" per
+ * the brief — Stripe's own hosted Checkout page renders a UPI QR to an
+ * Indian payer who selects UPI, without Plotra needing to generate and
+ * send an image itself, which nothing in this codebase does today).
+ * Actual activation (tenants.status -> 'active', wiring the requested
+ * number into tenant_whatsapp_numbers) only happens in
+ * confirmSignupPayment, once a human explicitly confirms payment — not
+ * automatically from a Stripe webhook, matching the brief's "Once payment
+ * is confirmed by super-admin" for both the QR and cash paths alike.
+ */
+async function approveWhatsappSignupRequest(req, res, knex, request, adminUserId) {
+  try {
+    const plan = await getPlan(knex, request.requested_plan);
+    if (!plan) {
+      return res.status(500).json({
+        error: { code: 'INTERNAL_ERROR', message: `Requested plan "${request.requested_plan}" does not exist.` }
+      });
+    }
+
+    let newTenant;
+    await knex.transaction(async (trx) => {
+      [newTenant] = await trx('tenants').insert({
+        business_name: request.business_name,
+        plan: plan.key,
+        whatsapp_mode: 'dedicated',
+        status: 'pending_payment',
+      }).returning(['id', 'business_name', 'plan', 'status']);
+
+      await trx('tenant_configs').insert({
+        tenant_id: newTenant.id,
+        bsp_provider_type: 'shared_gateway',
+        bsp_auth_token: null,
+        // No structured city/state was collected in the WhatsApp flow
+        // (just a free-text area, stored in tenant_requests.message) —
+        // resolveCityBounds needs both to look up real bounds, so this
+        // is left unset rather than guessed. A super-admin can set it
+        // later the same way any tenant_config gets edited.
+        geo_bias_bounds: null,
+      });
+
+      await trx('tenant_requests').where({ id: request.id }).update({
+        status: 'approved',
+        reviewed_by: adminUserId,
+        reviewed_at: trx.fn.now(),
+        tenant_id: newTenant.id,
+        updated_at: trx.fn.now(),
+      });
+    });
+
+    const paymentEventId = uuidv4();
+    const { sessionId, url } = await createCheckoutSession({
+      plan: plan.key,
+      planRow: plan,
+      paymentEventId,
+      userEmail: undefined, // none collected in this flow — Stripe Checkout will ask for one itself
+      stripeCustomerId: null,
+      successUrl: process.env.WHATSAPP_SIGNUP_PAYMENT_SUCCESS_URL || `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/`,
+      cancelUrl: process.env.WHATSAPP_SIGNUP_PAYMENT_CANCEL_URL || `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/`,
+    });
+
+    await knex('payment_events').insert({
+      id: paymentEventId,
+      tenant_id: newTenant.id,
+      stripe_session_id: sessionId,
+      plan: plan.key,
+      amount_paise: plan.price_inr * 100,
+      status: 'created',
+    });
+
+    await knex('tenant_requests').where({ id: request.id }).update({ payment_status: 'qr_sent', updated_at: knex.fn.now() });
+    await knex('whatsapp_signup_sessions').where({ tenant_request_id: request.id }).update({ state: 'awaiting_payment', updated_at: knex.fn.now() });
+
+    await enqueueAgentWhatsappSend({
+      tenantId: null,
+      phone: request.phone,
+      messageBody: `You're approved! 🎉 Complete payment (₹${plan.price_inr}/month) to activate your account:\n\n${url}\n\nAlready paid in cash? Just reply CASH.`,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Request approved. Tenant created (pending payment) and payment link sent over WhatsApp.',
+      tenant: newTenant,
+      checkoutUrl: url,
+    });
+  } catch (error) {
+    console.error('Failed to approve WhatsApp signup request:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to approve request.' } });
+  }
+}
+
+/**
+ * PATCH /api/v1/admin/requests/:id/confirm-payment
+ * Body: { method: 'qr' | 'cash' }
+ * The one required human sign-off before a WhatsApp signup's tenant
+ * actually goes live — see approveWhatsappSignupRequest's header for why
+ * this isn't automatic even for the Stripe-paid ("qr") path. Activates
+ * the tenant and wires its requested number into tenant_whatsapp_numbers
+ * as the default.
+ */
+async function confirmSignupPayment(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  const { method } = req.body || {};
+  const adminUserId = req.user.id;
+
+  if (!['qr', 'cash'].includes(method)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: "method must be 'qr' or 'cash'." } });
+  }
+
+  try {
+    const request = await knex('tenant_requests').where({ id }).first();
+    if (!request || request.source !== 'whatsapp') {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'WhatsApp signup request not found.' } });
+    }
+    if (request.status !== 'approved' || !request.tenant_id) {
+      return res.status(409).json({ error: { code: 'CONFLICT', message: 'Request must be approved (with a tenant created) before confirming payment.' } });
+    }
+    if (request.payment_status && request.payment_status.startsWith('paid_')) {
+      return res.status(409).json({ error: { code: 'CONFLICT', message: 'Payment for this request has already been confirmed.' } });
+    }
+
+    let tenant;
+    await knex.transaction(async (trx) => {
+      [tenant] = await trx('tenants')
+        .where({ id: request.tenant_id })
+        .update({ status: 'active', updated_at: trx.fn.now() })
+        .returning(['id', 'business_name', 'plan', 'status']);
+
+      await trx('tenant_requests').where({ id }).update({
+        payment_status: method === 'qr' ? 'paid_qr' : 'paid_cash',
+        payment_confirmed_by: adminUserId,
+        payment_confirmed_at: trx.fn.now(),
+        updated_at: trx.fn.now(),
+      });
+
+      await trx('whatsapp_signup_sessions').where({ tenant_request_id: id }).update({ state: 'completed', updated_at: trx.fn.now() });
+    });
+
+    // Enforces plans.max_whatsapp_numbers same as any other add — a Tier 1
+    // plan allows exactly 1, so this is always the tenant's first and only
+    // number, becoming the default automatically (see addNumber).
+    await addNumber(knex, {
+      tenantId: request.tenant_id,
+      whatsappNumber: request.requested_whatsapp_number,
+    });
+
+    await enqueueAgentWhatsappSend({
+      tenantId: null,
+      phone: request.phone,
+      messageBody: "Payment confirmed! 🎉 You're all set — text your property details here anytime to list them on Plotra.",
+    });
+
+    return res.json({ success: true, message: 'Payment confirmed. Tenant activated.', tenant });
+  } catch (error) {
+    console.error('Failed to confirm signup payment:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to confirm payment.' } });
   }
 }
 
@@ -502,6 +682,7 @@ module.exports = {
   submitAccessRequest,
   listRequests,
   approveRequest,
+  confirmSignupPayment,
   rejectRequest,
   createTenant,
   listTenants,
