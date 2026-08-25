@@ -498,6 +498,63 @@ async function updateTenantPlan(req, res) {
   }
 }
 
+/**
+ * GET /api/v1/admin/calling-overage
+ * Part 2, build-order item 6 — platform-wide visibility into who owes
+ * calling overage this month (Tier 3: 100 min included, then billed
+ * per-minute). Deliberately read-only: this surfaces what's owed, it does
+ * not charge anything — Stripe metered-billing automation is a separate,
+ * later piece that needs its own explicit sign-off on charging mechanics.
+ * Only ever non-empty for a plan that has calling_access AND
+ * included_calling_minutes set (see callingUsageService.js) — every plan
+ * today except a future Tier 3 row.
+ */
+async function listCallingOverage(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+
+  try {
+    const rows = await knex('tenants as t')
+      .join('plans as p', 'p.key', 't.plan')
+      .whereNotNull('p.included_calling_minutes')
+      .select(
+        't.id as tenant_id',
+        't.business_name',
+        'p.key as plan',
+        'p.included_calling_minutes',
+        'p.overage_rate_paise_per_minute',
+        knex.raw(`
+          CEIL(COALESCE((
+            SELECT SUM(duration_seconds) FROM ai_voice_calls
+            WHERE ai_voice_calls.tenant_id = t.id
+              AND called_at >= date_trunc('month', now())
+          ), 0) / 60.0) AS minutes_used
+        `)
+      );
+
+    const overageRows = rows
+      .map((r) => {
+        const minutesUsed = parseInt(r.minutes_used, 10) || 0;
+        const overageMinutes = Math.max(0, minutesUsed - r.included_calling_minutes);
+        const overageOwedPaise = overageMinutes * (r.overage_rate_paise_per_minute || 0);
+        return {
+          tenantId: r.tenant_id,
+          businessName: r.business_name,
+          plan: r.plan,
+          minutesUsed,
+          includedMinutes: r.included_calling_minutes,
+          overageMinutes,
+          overageOwedPaise,
+        };
+      })
+      .filter((r) => r.overageMinutes > 0);
+
+    return res.json({ success: true, overage: overageRows });
+  } catch (error) {
+    console.error('Failed to compute calling overage:', error.message);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to compute calling overage.' } });
+  }
+}
+
 module.exports = {
   submitAccessRequest,
   listRequests,
@@ -508,4 +565,5 @@ module.exports = {
   getTenantDetail,
   updateTenantStatus,
   updateTenantPlan,
+  listCallingOverage,
 };
