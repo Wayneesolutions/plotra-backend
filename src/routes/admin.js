@@ -6,6 +6,7 @@ const serviceContext = require('../middleware/serviceContext');
 const {
   listRequests,
   approveRequest,
+  confirmSignupPayment,
   rejectRequest,
   createTenant,
   listTenants,
@@ -37,9 +38,23 @@ router.get('/requests', listRequests);
 
 /**
  * @route   POST /api/v1/admin/requests/:id/approve
- * @desc    Approve a pending request — creates tenant + owner user + tenant_config
+ * @desc    Approve a pending request. For a web-form request: creates
+ *          tenant + owner user + tenant_config, active immediately (as
+ *          today). For a WhatsApp signup (source='whatsapp', Part 3):
+ *          creates the tenant in status='pending_payment' with NO users
+ *          row (Tier 1 has no dashboard login) and sends a payment link
+ *          over WhatsApp — see confirmSignupPayment for activation.
  */
 router.post('/requests/:id/approve', approveRequest);
+
+/**
+ * @route   PATCH /api/v1/admin/requests/:id/confirm-payment
+ * @desc    WhatsApp-signup only. Body: { method: 'qr' | 'cash' }. The
+ *          required human sign-off before the tenant created at approval
+ *          actually goes live — activates it and adds the requested
+ *          number to tenant_whatsapp_numbers.
+ */
+router.patch('/requests/:id/confirm-payment', confirmSignupPayment);
 
 /**
  * @route   POST /api/v1/admin/requests/:id/reject

@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
 const { handleAgentIntakeMessage, handleAgentIntakePhoto } = require('./agentIntakeController');
+const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
+const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 
 // Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
@@ -123,6 +125,25 @@ async function handleInboundWhatsApp(req, res) {
       bspMessageId: bspThreadRef, // this field is the individual WhatsApp message id (see parseInboundPayload)
       res,
     });
+  }
+
+  // Part 3 — WhatsApp self-serve onboarding (Tier 1). Distinct from the
+  // shared-number buyer-routing fallback below: WHATSAPP_ONBOARDING_NUMBER/
+  // _PHONE_NUMBER_ID is Plotra's own dedicated "sign up here" number, never
+  // a number any tenant actually owns or shares for buyer inquiries — so
+  // this can never collide with the existing WHATSAPP_SHARED_NUMBER
+  // multi-tenant buyer-routing feature. Also continues an already-started
+  // signup conversation regardless of which number a later reply reports,
+  // so a signup in progress never gets silently dropped mid-conversation.
+  const isOnboardingChannel = Boolean(
+    (receivingPhoneNumberId && receivingPhoneNumberId === process.env.WHATSAPP_ONBOARDING_PHONE_NUMBER_ID)
+    || (receivingNumber && receivingNumber === process.env.WHATSAPP_ONBOARDING_NUMBER)
+  );
+  if (!mediaId && (isOnboardingChannel || await hasActiveSignupSession(knex, phone))) {
+    const session = await getOrCreateSession(knex, phone);
+    const replyText = await advanceSession(knex, session, incomingText ? incomingText.trim() : '');
+    await enqueueAgentWhatsappSend({ tenantId: null, phone, messageBody: replyText });
+    return res.status(200).json({ success: true });
   }
 
   // Buyer/lead media messages aren't handled — only agent-intake photos
