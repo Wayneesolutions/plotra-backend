@@ -10,20 +10,30 @@ const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
 const redisConnection = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRetriesPerRequest: null }); // required by BullMQ Worker (blocking commands) — omitting this throws on boot
 
-// Core mapping dictionary to map Google Place Types to our strict schema categories
-const PLACE_TYPE_MAP = {
+// One Google Places "type" searched per category, and the category label it
+// maps to in our schema. Previously this ran FOUR searches (school, hospital,
+// shopping_mall, transit_station) but then re-derived each result's category
+// by scanning ITS OWN place.types array against a much bigger map — which
+// silently mislabeled anything whose Google type tags didn't happen to
+// include one of ~10 hardcoded keys, dumping it into 'market' by default
+// REGARDLESS of which search actually found it (a school found via the
+// "school" search, with no exact "school" tag in its own types array — not
+// uncommon for coaching institutes, smaller private schools, etc. — would
+// silently become a "market" entry). Searching one type per category and
+// trusting the category we searched for, rather than re-inferring it from
+// ambiguous data Google itself sends back inconsistently, removes that
+// entire class of mislabeling.
+//
+// shopping_mall -> supermarket: a full shopping mall is the wrong Google
+// category for what "nearby market" means to a buyer in a Punjab/Tier-2-3
+// India town (a local market/grocery, not a mall) — supermarket is a much
+// closer real-world match, and was already declared (but never actually
+// searched) in the old map.
+const CATEGORY_SEARCH_TYPES = {
   school: 'school',
-  primary_school: 'school',
-  secondary_school: 'school',
   hospital: 'hospital',
-  medical_center: 'hospital',
-  doctor: 'hospital',
-  supermarket: 'market',
-  shopping_mall: 'market',
-  grocery_or_supermarket: 'market',
-  transit_station: 'transit',
-  bus_station: 'transit',
-  train_station: 'transit'
+  market: 'supermarket',
+  transit: 'transit_station',
 };
 
 console.log(`[Worker Engine] Initializing Regional Landmark Extractor...`);
@@ -42,42 +52,61 @@ const landmarkWorker = new Worker('landmark-extraction', async (job) => {
   if (!targetApiKey) throw new Error('Missing available API credential token.');
 
   try {
-    // 1. Fire Google Places API Nearby Request seeking core infrastructural types within a 2000m radius
-    const typesToSearch = ['school', 'hospital', 'shopping_mall', 'transit_station'];
+    // 1. One Google Places Nearby Search per category, ranked by actual
+    // distance (rankby=distance) rather than the API's default "prominence"
+    // ranking. Prominence surfaces well-known/highly-rated places even when
+    // a much closer, smaller one exists — exactly what produced "nearby"
+    // landmarks that weren't really nearby. Google requires `radius` to be
+    // OMITTED when using rankby=distance (the two are mutually exclusive),
+    // so there's no explicit distance cap here — that's fine, the code
+    // below already sorts by real haversine distance before keeping only
+    // the closest 3 per category.
     let collectedPlaces = [];
 
-    for (const searchType of typesToSearch) {
-      const placesUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=2000&type=${searchType}&key=${targetApiKey}`;
+    for (const [category, searchType] of Object.entries(CATEGORY_SEARCH_TYPES)) {
+      const placesUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&rankby=distance&type=${searchType}&key=${targetApiKey}`;
       const response = await axios.get(placesUrl);
 
       if (response.data.status === 'OK' || response.data.status === 'ZERO_RESULTS') {
         const results = response.data.results || [];
-        // Grab up to top 3 nearest locations per type block to prevent database bloat
-        collectedPlaces = [...collectedPlaces, ...results.slice(0, 3)];
+        for (const place of results) {
+          collectedPlaces.push({ place, category });
+        }
       }
     }
 
-    // 2. Process and compute distance matrices iteratively
-    const landmarkInserts = collectedPlaces.map(place => {
+    // 2. Compute real distance for every candidate, dedupe (the same place
+    // can occasionally surface under more than one search — a hospital with
+    // an attached pharmacy/clinic block, for instance), then keep only the
+    // 3 geographically closest PER CATEGORY — not just the first 3 Google
+    // happened to return.
+    const byPlaceId = new Map();
+    for (const { place, category } of collectedPlaces) {
+      if (byPlaceId.has(place.place_id)) continue;
       const placeLat = place.geometry.location.lat;
       const placeLng = place.geometry.location.lng;
+      const distanceMeters = Math.round(calculateHaversineDistance(lat, lng, placeLat, placeLng));
+      byPlaceId.set(place.place_id, { place, category, placeLat, placeLng, distanceMeters });
+    }
 
+    const nearestPerCategory = Object.keys(CATEGORY_SEARCH_TYPES).flatMap((category) => {
+      const candidates = Array.from(byPlaceId.values()).filter((c) => c.category === category);
+      candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
+      return candidates.slice(0, 3); // nearest 3 of this category, now genuinely nearest
+    });
+
+    // 3. Build the DB rows.
+    const landmarkInserts = nearestPerCategory.map(({ place, category, placeLat, placeLng, distanceMeters }) => {
       // Haversine/Coarse matrix mapping logic to calculate walking vs driving estimates quickly
       // (1000 meters ~ 12 minutes walk, ~3 minutes drive under typical Ludhiana town transit speeds)
-      const distanceMeters = Math.round(calculateHaversineDistance(lat, lng, placeLat, placeLng));
-      
       let walkMinutes = Math.round((distanceMeters / 80)); // 80 meters per minute standard walking pace
       let driveMinutes = Math.round((distanceMeters / 300)); // 300 meters per minute coarse driving rate
-
-      // Identify primary type mapping category
-      const primaryType = place.types.find(t => PLACE_TYPE_MAP[t]) || 'market';
-      const normalizedType = PLACE_TYPE_MAP[primaryType] || 'market';
 
       return {
         id: knex.raw('uuid_generate_v4()'),
         listing_id: listingId,
         place_name: place.name,
-        place_type: normalizedType,
+        place_type: category,
         lat: placeLat,
         lng: placeLng,
         distance_meters: distanceMeters,
@@ -87,7 +116,7 @@ const landmarkWorker = new Worker('landmark-extraction', async (job) => {
       };
     });
 
-    // 3. Clear any historical landmarks and batch write new assets into the transactional pool cleanly
+    // 4. Clear any historical landmarks and batch write new assets into the transactional pool cleanly
     await knex.transaction(async (trx) => {
       await trx('listing_landmarks').where({ listing_id: listingId }).del();
       if (landmarkInserts.length > 0) {
