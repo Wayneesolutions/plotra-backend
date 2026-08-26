@@ -79,16 +79,23 @@ const LIVE_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'awa
 const EXTRACT_DEBOUNCE_MS = 7000;
 
 async function enqueueExtractJob(draftId) {
+  const jobId = `extract-${draftId}`;
   try {
+    // Remove any stale completed/failed job with this ID before adding —
+    // BullMQ blocks duplicate jobIds regardless of state, so a previously
+    // failed extraction would permanently block retries for the same draft.
+    const existing = await agentIntakeQueue.getJob(jobId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === 'failed' || state === 'completed') await existing.remove();
+    }
     await agentIntakeQueue.add('extract', { draftId }, {
       delay: EXTRACT_DEBOUNCE_MS,
-      jobId: `extract-${draftId}`,
+      jobId,
       attempts: 3,
       backoff: { type: 'exponential', delay: 2000 },
     });
   } catch (err) {
-    // A duplicate jobId add() failing is expected/harmless — an extraction
-    // for this draft is already scheduled.
     console.log(`[agentIntake] extract job for draft ${draftId} already scheduled:`, err.message);
   }
 }
