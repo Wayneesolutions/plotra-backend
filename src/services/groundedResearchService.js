@@ -94,9 +94,9 @@ function filterCitedItems(items) {
 
 /**
  * Same "no citation, doesn't exist" rule as filterCitedItems(), but for a
- * single nullable object (rating / possession record) rather than an array
- * — generateBuilderClaims() below returns these as at-most-one values, not
- * lists. Returns null if the item itself is null/malformed or its
+ * single nullable object (possession record) rather than an array —
+ * generateBuilderClaims() below returns this as an at-most-one value, not
+ * a list. Returns null if the item itself is null/malformed or its
  * source_url isn't a real URL — never a half-populated object with a
  * number but no citation.
  */
@@ -104,6 +104,40 @@ function filterCitedSingle(item) {
   if (!item || typeof item !== 'object') return null;
   if (!isValidHttpUrl(item.source_url)) return null;
   return item;
+}
+
+/**
+ * Validates and normalizes the `rating` field, which — per the 2026-08-26
+ * product decision — can be grounded in two different ways:
+ *   - an external citation (source_url), the original 20260824 behavior, or
+ *   - a synthesized 0-10 assessment (basis text) built from the claims
+ *     this same research call already gathered and had cited.
+ * Either way it's clamped to 0-10 and never accepted with NEITHER a
+ * source_url NOR a basis — and a synthesized rating additionally requires
+ * at least one actual cited claim to synthesize from (claimCount > 0):
+ * a company nothing was found about gets no invented score just because
+ * the model decided to guess one anyway.
+ */
+function validateRating(raw, claimCount) {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = Number(raw.value);
+  if (!Number.isFinite(value)) return null;
+  const clamped = Math.max(0, Math.min(10, value));
+
+  if (raw.is_ai_assessment) {
+    const basis = typeof raw.basis === 'string' ? raw.basis.trim() : '';
+    if (!basis || claimCount === 0) return null;
+    return { value: clamped, basis, isAiAssessment: true, source_url: null, source_title: null };
+  }
+
+  if (!isValidHttpUrl(raw.source_url)) return null;
+  return {
+    value: clamped,
+    source_url: raw.source_url,
+    source_title: raw.source_title || null,
+    isAiAssessment: false,
+    basis: null,
+  };
 }
 
 const LOCAL_INTEL_SYSTEM_PROMPT = `You research real, current, publicly-reported information about a specific location in India for a property-listing website. You MUST use the web_search tool to find REAL information — never invent facts, statistics, or crime figures, even plausible-sounding ones.
@@ -154,36 +188,54 @@ async function generateLocalIntelligence({ formattedAddress, propertyType }) {
   };
 }
 
-const BUILDER_DD_SYSTEM_PROMPT = `You research real, publicly-verifiable information about an Indian real-estate developer/builder company, for a buyer-facing due-diligence summary. This is legally sensitive: false claims about a real company or its named owners/directors is a defamation risk. You MUST use the web_search tool and cite every single claim to a real source.
+const BUILDER_DD_SYSTEM_PROMPT = `You research real, publicly-verifiable information about an Indian real-estate developer/builder company, for a buyer-facing due-diligence summary. This is legally sensitive: false claims about a real company or its named owners/directors is a defamation risk. You MUST use the web_search tool and cite every single fact you report to a real source.
 
 Prioritize authoritative sources: RERA (India's Real Estate Regulatory Authority) state registries for project registration/delivery history, MCA (Ministry of Corporate Affairs) filings for company/director information, court records, and credible news outlets. Do not rely on the builder's own marketing materials as a sole source for delivery-history or financial claims.
 
 Return ONLY a JSON object with exactly these keys:
 {
   "claims": [ { "category": "delivery_history" | "leadership" | "financial_condition" | "rating" | "legal_issue", "claim_text": string, "source_url": string, "source_title": string, "source_domain": string }, ... ],
-  "rating": { "value": number, "source_url": string, "source_title": string } | null,
+  "rating": { "value": number, "source_url": string, "source_title": string, "is_ai_assessment": false } | { "value": number, "basis": string, "is_ai_assessment": true } | null,
   "possession_record": { "delivered": number, "total": number, "source_url": string, "source_title": string } | null
 }
 
 Rules:
 - Phrase every claim_text as attributed reporting, e.g. "Reported by [source] that..." or "According to RERA filings,..." — NEVER as a flat assertion of fact, even when the source seems reliable.
 - EVERY claim must have a real source_url. If you cannot find a citable source, do not include the claim at all.
+- Leadership claims are limited to a director/promoter's PROFESSIONAL, corporate-facing record only — role/title, tenure, other companies they direct, reported track record on those companies' projects. Never include personal-life details about a named individual (family, residence, personal history unrelated to their corporate role) even if a source reports them.
 - For "legal_issue": only include this if you find an actual reported case, filing, or credible news report — never infer or guess based on company size or reputation.
 - If you find nothing reliable about this company at all, return an empty claims array — do not pad with generic or inferred content.
-- "rating": a numeric score (out of 5) ONLY if a real published rating/ranking exists for this exact company (e.g. a credible real-estate ratings platform, a reputable news ranking of builders, RERA standing where it's expressed as a score). NEVER compute or infer a rating yourself from the claims you found, and never estimate one from company size, reputation, or general impression — if no real published numeric rating exists, this must be null. Convert to a 0-5 scale if the source uses a different scale, and say so in source_title.
+- "rating" — a 0-10 score representing this developer's overall ability to deliver, in one of two forms:
+  1. PREFERRED, when it exists: a real already-published rating/ranking for this exact company (a credible real-estate ratings platform, a reputable news ranking of builders, RERA standing expressed as a score). Convert to the 0-10 scale if the source uses a different one, keep source_url/source_title, and set "is_ai_assessment": false.
+  2. Otherwise, IF you found at least one citable claim above: synthesize your own 0-10 assessment FROM ONLY those cited claims — weigh delivery history, financial condition, any legal issues, and leadership stability/track record. Also search for and weigh how this developer compares to other developers active in the same city and a similar project price segment, if you can find real information about comparable developers there — but the comparison only informs the number, it does not need its own separate citation. Set "is_ai_assessment": true and "basis" to a short (1-3 sentence) plain-English summary of which specific claims/facts the score weighs — someone reading "basis" should be able to see the number isn't arbitrary. Do NOT include source_url on this form (it has none by definition) and do NOT invent one.
+  - If you found ZERO citable claims about this company at all, "rating" must be null — never synthesize a score with nothing behind it.
 - "possession_record": delivered/total project counts ONLY from a real source that states them explicitly (e.g. RERA project registry showing completion status across the builder's registered projects, or credible reporting that gives exact figures) — NEVER count claims from your own "claims" array to derive these numbers, and never estimate. total must be >= delivered. If no such source exists, this must be null.
 - Output ONLY the JSON object, no markdown code fences, no other text.`;
 
 /**
  * Feature 2: Builder Due Diligence. Returns { claims, rating, possessionRecord,
- * citationCount } with every claim (and rating/possessionRecord, if present)
+ * citationCount } with every claim (and possessionRecord, if present)
  * guaranteed to carry a real citation (post-filter) — this is the FIRST of
  * three independent safeguards; see the migration for the second (NOT NULL /
- * CHECK source_url constraints) and builderProfileController.js for the
- * third (human moderation gate before anything is public).
+ * CHECK source_url-or-basis constraints) and builderProfileController.js for
+ * the third (human moderation gate before anything is public). `rating` is
+ * grounded differently — see validateRating() below — since it can now be
+ * either an external citation OR a synthesis of the claims above; either way
+ * it's never accepted with nothing behind it.
+ *
+ * `marketContext` (optional) — city/locality + price band of whichever
+ * listing triggered this research, if known — lets the model's comparison
+ * step ("how does this developer compare to others in the same
+ * city/price segment") be about a concrete market instead of a vague
+ * national one. Purely additive context; research still runs fine without
+ * it (e.g. re-research of an existing profile with no specific triggering
+ * listing).
  */
-async function generateBuilderClaims({ companyName }) {
-  const userPrompt = `Builder/developer company: "${companyName}" (India). Find real, cited information on: past project delivery history, ownership/board of directors, financial condition, standing relative to other builders, any reported legal or criminal matters, a real published rating/ranking if one exists, and a real possession/delivery track record (projects delivered vs. total, from an authoritative source) if one is stated anywhere.`;
+async function generateBuilderClaims({ companyName, marketContext }) {
+  const marketLine = marketContext
+    ? ` For the comparison-to-other-developers part of your assessment, weigh this specifically against other developers building in ${marketContext}.`
+    : '';
+  const userPrompt = `Builder/developer company: "${companyName}" (India). Find real, cited information on: past project delivery history, ownership/board of directors (professional record only), financial condition, standing relative to other builders, any reported legal or criminal matters, a real published rating/ranking if one exists, and a real possession/delivery track record (projects delivered vs. total, from an authoritative source) if one is stated anywhere.${marketLine}`;
 
   const { text } = await callWebSearchGroundedGPT({
     systemPrompt: BUILDER_DD_SYSTEM_PROMPT,
@@ -207,14 +259,7 @@ async function generateBuilderClaims({ companyName }) {
     source_domain: c.source_domain || (() => { try { return new URL(c.source_url).hostname; } catch { return null; } })(),
   }));
 
-  const ratingRaw = filterCitedSingle(parsed.rating);
-  const rating = (ratingRaw && Number.isFinite(Number(ratingRaw.value)))
-    ? {
-        value: Math.max(0, Math.min(5, Number(ratingRaw.value))),
-        source_url: ratingRaw.source_url,
-        source_title: ratingRaw.source_title || null,
-      }
-    : null;
+  const rating = validateRating(parsed.rating, claims.length);
 
   const possessionRaw = filterCitedSingle(parsed.possession_record);
   const possessionRecord = (

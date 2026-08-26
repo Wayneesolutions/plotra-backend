@@ -32,7 +32,7 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
     return { success: false, skipped: true };
   }
 
-  const { builderProfileId } = job.data;
+  const { builderProfileId, listingId } = job.data;
   console.log(`[Job ${job.id}] Researching builder profile ${builderProfileId}`);
 
   const profile = await knex('builder_profiles').where({ id: builderProfileId }).first();
@@ -40,8 +40,26 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
 
   await knex('builder_profiles').where({ id: builderProfileId }).update({ research_status: 'researching', updated_at: knex.fn.now() });
 
+  // Best-effort context for the "compare to other developers in the same
+  // market" part of the assessment — a plain city/price-band phrase, not
+  // structured data the model needs to parse. Missing/failed lookup is
+  // non-fatal; research still runs fine without it, just less targeted.
+  let marketContext = null;
+  if (listingId) {
+    try {
+      const listing = await knex('listings').where({ id: listingId }).first();
+      if (listing) {
+        const city = (listing.formatted_address || listing.raw_address || '').split(',').slice(-2, -1)[0]?.trim();
+        const priceBand = listing.price != null ? `around ₹${Number(listing.price).toLocaleString('en-IN')}` : null;
+        if (city) marketContext = [city, priceBand].filter(Boolean).join(', ');
+      }
+    } catch (ctxErr) {
+      console.error(`[Job ${job.id}] Failed to load market context (non-fatal):`, ctxErr.message);
+    }
+  }
+
   try {
-    const { claims, rating, possessionRecord } = await generateBuilderClaims({ companyName: profile.company_name });
+    const { claims, rating, possessionRecord } = await generateBuilderClaims({ companyName: profile.company_name, marketContext });
 
     await knex.transaction(async (trx) => {
       // Clear any prior claims (re-research case, e.g. a future manual
@@ -73,6 +91,8 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
         overall_rating: rating?.value ?? null,
         rating_source_url: rating?.source_url ?? null,
         rating_source_title: rating?.source_title ?? null,
+        rating_basis: rating?.basis ?? null,
+        rating_is_ai_assessment: rating ? !!rating.isAiAssessment : null,
         possession_delivered_count: possessionRecord?.delivered ?? null,
         possession_total_count: possessionRecord?.total ?? null,
         possession_source_url: possessionRecord?.source_url ?? null,
