@@ -13,6 +13,15 @@ function normalizeCompanyName(name) {
   return name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+// Builder Due Diligence (developer profile, rating, possession record,
+// "compare nearby projects") applies to any listing that's a unit inside a
+// larger, named project — a flat in a residential tower, or a shop/retail
+// unit in a mall. It does NOT apply to an individually-owned property (a
+// plot or a standalone villa/house), where there's no separate developer
+// to research in the first place. Both the chat-intake auto-link path and
+// the manual dashboard "Link Builder" path share this one list.
+const BUILDER_ELIGIBLE_TYPES = ['Flat', 'Commercial'];
+
 // How "nearby" and "similar price" are defined for the comparison list on
 // mega-project listings. Deliberately generous rather than precise — the
 // goal is "other real options a buyer would actually cross-shop", not a
@@ -33,11 +42,11 @@ const SIMILAR_PROJECT_LIMIT = 6;
  * name/rating never appears anywhere on the site before a human has
  * explicitly cleared it, comparison lists included.
  *
- * Flat-only, both ends: the caller (getPublicBuilderProfile) already only
- * reaches this for a Flat listing, and the query below additionally
- * restricts candidates to property_type='Flat' — a plot/villa should
- * never show up as a "comparable project" and should never trigger this
- * developer-comparison content on its own page.
+ * Builder-eligible types only, both ends: the caller (getPublicBuilderProfile)
+ * already only reaches this for a Flat/Commercial listing, and the query
+ * below additionally restricts candidates to BUILDER_ELIGIBLE_TYPES — a
+ * plot/villa should never show up as a "comparable project" and should
+ * never trigger this developer-comparison content on its own page.
  */
 async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
   if (lat == null || lng == null) return []; // no coordinates, no "nearby" — non-fatal, just skip
@@ -60,7 +69,7 @@ async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
       )
     )
     .where('l.status', 'active')
-    .where('l.property_type', 'Flat') // Flat-only comparisons — a house should never appear here, or be compared against
+    .whereIn('l.property_type', BUILDER_ELIGIBLE_TYPES) // a plot/villa should never appear here, or be compared against
     .where('bp.moderation_status', 'published')
     .whereNotNull('l.lat')
     .whereNotNull('l.lng')
@@ -88,59 +97,101 @@ async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
     }));
 }
 
+// Thrown by linkOrCreateBuilderProfileCore for the two expected failure
+// cases — callers (HTTP handler, chat-intake auto-link) map these to
+// whatever response shape fits their own transport.
+class BuilderProfileLinkError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
 /**
- * POST /api/v1/dashboard/listings/:id/builder-profile
- * Links a listing to a builder_profiles row, marking it as a mega-project
- * listing. If a profile for this company (by normalized name) already
- * exists, reuses it immediately — no re-research, no wait. Only a brand-new
+ * Core of POST /api/v1/dashboard/listings/:id/builder-profile — links a
+ * listing to a builder_profiles row, marking it as a mega-project listing.
+ * If a profile for this company (by normalized name) already exists,
+ * reuses it immediately — no re-research, no wait. Only a brand-new
  * company name triggers the (slower, web-search-backed) research worker.
+ *
+ * Transport-agnostic on purpose: the HTTP handler below calls this, and so
+ * does the chat-intake auto-link (webChatController.js / agentIntakeWorker.js)
+ * when a dealer names a building/mall directly in the conversation — same
+ * validation, same reuse-or-research behavior, same moderation gate
+ * (nothing here ever bypasses the human publish step) either way.
  */
+async function linkOrCreateBuilderProfileCore(knex, { tenantId, listingId, companyName }) {
+  if (!companyName || !companyName.trim()) {
+    throw new BuilderProfileLinkError('VALIDATION_ERROR', 'companyName is required.');
+  }
+
+  const listing = await knex('listings').where({ id: listingId, tenant_id: tenantId }).first();
+  if (!listing) {
+    throw new BuilderProfileLinkError('NOT_FOUND', 'Listing not found.');
+  }
+
+  // Builder Due Diligence (developer profile, rating, possession record,
+  // "compare nearby projects") only applies to a unit inside a larger named
+  // project (a flat or a mall/commercial unit) — a plot or standalone villa
+  // buyer shouldn't see developer-comparison content that doesn't apply to
+  // an individually-owned property. Enforced here, not just in the UI, so
+  // this can't be bypassed by calling the API (or the chat flow) directly.
+  if (!BUILDER_ELIGIBLE_TYPES.includes(listing.property_type)) {
+    throw new BuilderProfileLinkError(
+      'VALIDATION_ERROR',
+      `Builder profiles can only be linked to ${BUILDER_ELIGIBLE_TYPES.join('/')} listings.`
+    );
+  }
+
+  const normalizedName = normalizeCompanyName(companyName);
+  let profile = await knex('builder_profiles').where({ normalized_name: normalizedName }).first();
+  let isNew = false;
+
+  if (!profile) {
+    isNew = true;
+    [profile] = await knex('builder_profiles')
+      .insert({ company_name: companyName.trim(), normalized_name: normalizedName })
+      .returning(['id', 'company_name', 'research_status', 'moderation_status']);
+  }
+
+  await knex('listings').where({ id: listingId, tenant_id: tenantId }).update({ builder_profile_id: profile.id, updated_at: knex.fn.now() });
+
+  if (isNew) {
+    await builderDueDiligenceQueue.add('research', { builderProfileId: profile.id }, {
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 5000 },
+    });
+  }
+
+  return { profile, isNew };
+}
+
+/**
+ * Bilingual chat-reply note for a chat-intake auto-link (webChatController.js
+ * / agentIntakeWorker.js) — kept here alongside linkOrCreateBuilderProfileCore
+ * so both chat channels send identical wording rather than drifting apart.
+ * Never claims the rating/possession record is visible yet — the moderation
+ * gate in moderateBuilderProfile still applies unchanged; this only tells
+ * the dealer that research has started (or an existing profile got reused).
+ */
+function buildBuilderAutoLinkNote({ isNew, companyName, lang }) {
+  return lang === 'en'
+    ? (isNew
+        ? `\n\n🏗️ Found "${companyName}" — researching the builder/developer now (a few minutes); once your owner publishes it, buyers will see the rating and possession record on this listing.`
+        : `\n\n🏗️ Linked to "${companyName}"'s existing builder profile — its rating and possession record will show here once published.`)
+    : (isNew
+        ? `\n\n🏗️ "${companyName}" mila — builder/developer research shuru ho gayi hai (thoda time lagega); owner publish karega to buyers ko is listing par rating aur possession record dikhega.`
+        : `\n\n🏗️ "${companyName}" ke existing builder profile se link ho gaya — publish hone ke baad yahan rating/possession record dikhega.`);
+}
+
 async function linkOrCreateBuilderProfile(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id } = req.user;
   const { id: listingId } = req.params;
   const { companyName } = req.body;
 
-  if (!companyName || !companyName.trim()) {
-    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'companyName is required.' } });
-  }
-
   try {
-    const listing = await knex('listings').where({ id: listingId, tenant_id }).first();
-    if (!listing) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
-    }
-
-    // Builder Due Diligence (developer profile, rating, possession record,
-    // "compare nearby projects") is a Flat-only feature — a plot or villa
-    // buyer shouldn't see developer-comparison content that doesn't apply
-    // to an individually-owned property. Enforced here, not just in the UI,
-    // so this can't be bypassed by calling the API directly.
-    if (listing.property_type !== 'Flat') {
-      return res.status(400).json({
-        error: { code: 'VALIDATION_ERROR', message: "Builder profiles can only be linked to 'Flat' listings." }
-      });
-    }
-
-    const normalizedName = normalizeCompanyName(companyName);
-    let profile = await knex('builder_profiles').where({ normalized_name: normalizedName }).first();
-    let isNew = false;
-
-    if (!profile) {
-      isNew = true;
-      [profile] = await knex('builder_profiles')
-        .insert({ company_name: companyName.trim(), normalized_name: normalizedName })
-        .returning(['id', 'company_name', 'research_status', 'moderation_status']);
-    }
-
-    await knex('listings').where({ id: listingId, tenant_id }).update({ builder_profile_id: profile.id, updated_at: knex.fn.now() });
-
-    if (isNew) {
-      await builderDueDiligenceQueue.add('research', { builderProfileId: profile.id }, {
-        attempts: 2,
-        backoff: { type: 'exponential', delay: 5000 },
-      });
-    }
+    const { profile, isNew } = await linkOrCreateBuilderProfileCore(knex, { tenantId: tenant_id, listingId, companyName });
 
     return res.status(200).json({
       success: true,
@@ -150,6 +201,10 @@ async function linkOrCreateBuilderProfile(req, res) {
       builderProfile: profile,
     });
   } catch (error) {
+    if (error instanceof BuilderProfileLinkError) {
+      const status = error.code === 'NOT_FOUND' ? 404 : 400;
+      return res.status(status).json({ error: { code: error.code, message: error.message } });
+    }
     console.error('Failed to link/create builder profile:', error);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to link builder profile.' } });
   }
@@ -216,11 +271,11 @@ async function getPublicBuilderProfile(req, res) {
       .whereIn('status', ['active', 'awaiting_approval'])
       .first();
 
-    // property_type !== 'Flat' is checked here too, not just at link time
-    // (linkOrCreateBuilderProfile) — a defensive second gate so this never
-    // shows developer/comparison content on a house even if a listing's
-    // type was changed after linking, or via any older data.
-    if (!listing || !listing.builder_profile_id || listing.property_type !== 'Flat') {
+    // The type check is repeated here too, not just at link time
+    // (linkOrCreateBuilderProfileCore) — a defensive second gate so this
+    // never shows developer/comparison content on a plot/villa even if a
+    // listing's type was changed after linking, or via any older data.
+    if (!listing || !listing.builder_profile_id || !BUILDER_ELIGIBLE_TYPES.includes(listing.property_type)) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No builder profile for this listing.' } });
     }
 
@@ -261,4 +316,12 @@ async function getPublicBuilderProfile(req, res) {
   }
 }
 
-module.exports = { linkOrCreateBuilderProfile, moderateBuilderProfile, getPublicBuilderProfile };
+module.exports = {
+  linkOrCreateBuilderProfile,
+  linkOrCreateBuilderProfileCore,
+  buildBuilderAutoLinkNote,
+  BuilderProfileLinkError,
+  BUILDER_ELIGIBLE_TYPES,
+  moderateBuilderProfile,
+  getPublicBuilderProfile,
+};
