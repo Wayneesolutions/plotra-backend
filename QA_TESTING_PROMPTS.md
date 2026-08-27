@@ -255,6 +255,68 @@ Report pass/fail for each of the 4 numbered checks.
 
 ---
 
+## Prompt 10 — Builder rating shows /10, and discloses when it's an AI assessment
+
+```
+Go to [SITE_URL] and log in as [OWNER_EMAIL] / [OWNER_PASSWORD].
+Find a Flat or Commercial listing with a PUBLISHED builder profile (use
+one created in Prompt 6/7, published via the dashboard 🏗️ button), and
+open its public /p/:slug page.
+
+1. Find the developer/builder section and confirm the rating is shown
+   as "X.X /10" — NOT "/5".
+2. Look for a label above the rating: it should say either "Rating"
+   (if sourced from a real external ranking, with a "Source: ..." link)
+   OR "Plotra's Assessment" (if synthesized).
+3. If it says "Plotra's Assessment": confirm there's a short plain-
+   English sentence explaining what the score is based on, AND an
+   explicit disclaimer that this is an AI-generated assessment, not an
+   official/certified rating. Confirm there is NOT a "Source: ..." link
+   on this version (that's only for the external-citation form).
+4. Confirm the cited claims below the rating (delivery history,
+   leadership, financial condition, legal record) each still have a
+   working "Source: ..." link — this part is unchanged regardless of
+   which rating form is shown.
+
+Report exactly what label and text you saw, and flag if the rating
+shows /5 anywhere (that would mean the old scale is still live) or if
+a synthesized assessment is missing its disclaimer.
+```
+
+---
+
+## Prompt 11 — Branding and design consistency across the whole app
+
+```
+Go to [SITE_URL]. Visit, in order: the homepage (/), /login,
+/request-access, /pricing, the dashboard (log in first), the admin
+panel (/admin, as [ADMIN_EMAIL]), the ops panel (/dashboard/ops), and
+any public listing page (/p/:slug).
+
+For EACH page:
+1. Search the visible text for "WayneState", "Wayne State", or "Wayne
+   Estate" — none of these should appear anywhere. The brand name
+   everywhere should read "Plotra". ("Wayne E Solutions" IS correct and
+   expected on the footer/legal/team pages — that's the company name,
+   not the product name, leave it alone.)
+2. Note the primary accent color used for buttons/links/highlights on
+   this page (should be a warm coral/orange tone) and the general dark
+   color used for headers/sidebars (should be a dark ink/navy-black,
+   NOT a brass/gold-and-charcoal combo, and NOT a plain bright blue).
+3. Note the font used for headings vs body text.
+
+After visiting all pages, report:
+- Any page where "WayneState"/"Wayne Estate" still appears (should be
+  none).
+- Whether the accent color, dark color, and fonts looked THE SAME
+  across all pages, or whether any page visibly clashed with the
+  others (e.g. one page using gold/brass while another uses coral/
+  orange, or one page in a different heading font than the rest).
+Screenshot any page that looks inconsistent with the others.
+```
+
+---
+
 ## What to do with the results
 
 For each prompt, Claude for Chrome should give you a clear pass/fail per numbered step plus screenshots of anything unexpected. If something fails:
