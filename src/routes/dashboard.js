@@ -7,7 +7,7 @@ const { getDashboardAnalytics } = require('../controllers/analyticsController');
 const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
 const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../controllers/builderProfileController');
-const { inviteTenantUser, listTenantUsers } = require('../controllers/userInviteController');
+const { inviteTenantUser, listTenantUsers, updateTenantUser } = require('../controllers/userInviteController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
@@ -117,6 +117,14 @@ router.post('/users/invite', authGuard, tenantTransaction, inviteTenantUser);
  * @access  Protected
  */
 router.get('/users', authGuard, tenantTransaction, listTenantUsers);
+
+/**
+ * @route   PATCH /api/v1/dashboard/users/:id
+ * @desc    Add/change a team member's phone (WhatsApp listing intake) after
+ *          creation — owner only, scoped to the owner's own tenant
+ * @access  Protected (owner role)
+ */
+router.patch('/users/:id', authGuard, tenantTransaction, updateTenantUser);
 
 /**
  * @route   GET  /api/v1/dashboard/listings/:id/media
