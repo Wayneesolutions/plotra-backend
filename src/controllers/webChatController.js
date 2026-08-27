@@ -13,6 +13,7 @@ const { extractListingFields, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('.
 const { isApprovalReply } = require('../utils/agentReplyIntent');
 const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
+const { normalizeWebChatCode } = require('../utils/webChatCode');
 const {
   linkOrCreateBuilderProfileCore,
   buildBuilderAutoLinkNote,
@@ -95,17 +96,48 @@ async function saveSession(sessionId, session) {
 
 // No visitor login, and no natural tenant to attribute a web-chat-created
 // listing to (there's no phone number to look up like the WhatsApp path
-// has) — WEB_CHAT_TENANT_ID/WEB_CHAT_AGENT_USER_ID pin this explicitly to
-// whichever tenant/user should own listings created through this endpoint
-// (e.g. a dedicated demo tenant, or a real dealer's own web-chat widget).
+// has). Two ways to resolve one:
 //
-// In production these are REQUIRED — silently guessing a tenant would mean
-// a real buyer's listing gets created under whatever tenant happens to be
-// oldest in the table, which is wrong in a way that's easy to miss. Local
-// dev only: falls back to the oldest active tenant/user so it works
-// out-of-the-box without extra setup, same fallback the buyer-inbound path
-// in webhookController.js already uses.
-async function resolveWebChatIdentity(knex) {
+//   1. A per-tenant activation code (`code`, from the widget — see
+//      ChatWidget.jsx / handleWebChatActivate below). This is the primary
+//      mechanism: each tenant gets their own unique code
+//      (webChatCodeController.js), so the same hosted widget can serve
+//      every tenant instead of just one.
+//   2. WEB_CHAT_TENANT_ID/WEB_CHAT_AGENT_USER_ID env vars — the original,
+//      single-tenant mechanism, kept as a fallback for when no code is
+//      sent at all (e.g. an existing deployment that hasn't moved to
+//      per-tenant codes). In production these are REQUIRED when used this
+//      way — silently guessing a tenant would mean a real buyer's listing
+//      gets created under whatever tenant happens to be oldest in the
+//      table, which is wrong in a way that's easy to miss. Local dev only:
+//      falls back to the oldest active tenant/user so it works
+//      out-of-the-box without extra setup, same fallback the buyer-inbound
+//      path in webhookController.js already uses.
+async function resolveWebChatIdentity(knex, code) {
+  if (code) {
+    const tenant = await knex('tenants').where({ web_chat_code: normalizeWebChatCode(code), status: 'active' }).first();
+    if (!tenant) {
+      const err = new Error('Invalid or inactive web chat code.');
+      err.name = 'InvalidCodeError';
+      throw err;
+    }
+
+    // No per-code equivalent of WEB_CHAT_AGENT_USER_ID — attribute to the
+    // tenant's owner (falling back to their oldest user, same as the dev
+    // fallback below, in the unlikely case a tenant somehow has no owner).
+    let user = await knex('users').where({ tenant_id: tenant.id, role: 'owner' }).first();
+    if (!user) {
+      user = await knex('users').where({ tenant_id: tenant.id }).orderBy('created_at', 'asc').first();
+    }
+    if (!user) {
+      const err = new Error('This tenant has no user to attribute listings to.');
+      err.name = 'ConfigurationError';
+      throw err;
+    }
+
+    return { tenantId: tenant.id, createdBy: user.id };
+  }
+
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (isProduction) {
@@ -186,7 +218,7 @@ function isSameProperty(existingListing, extracted) {
 
 async function handleWebChatMessage(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { message, session_id: sessionId } = req.body || {};
+  const { message, session_id: sessionId, tenant_code: tenantCode } = req.body || {};
 
   if (!message || typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'message is required.' } });
@@ -199,7 +231,7 @@ async function handleWebChatMessage(req, res) {
   }
 
   try {
-    const identity = await resolveWebChatIdentity(knex);
+    const identity = await resolveWebChatIdentity(knex, tenantCode);
     if (!identity) {
       return res.status(500).json({ error: { code: 'NO_TENANT', message: 'No tenant configured for web chat.' } });
     }
@@ -417,6 +449,9 @@ async function handleWebChatMessage(req, res) {
       console.error('Web chat misconfigured:', error.message);
       return res.status(500).json({ error: { code: 'MISCONFIGURED', message: 'Web chat is not configured. Please try again later.' } });
     }
+    if (error.name === 'InvalidCodeError') {
+      return res.status(400).json({ error: { code: 'INVALID_CODE', message: 'That activation code is no longer valid. Please re-enter it.' } });
+    }
     console.error('Failed to process web chat message:', error.message);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Something went wrong processing that message.' } });
   }
@@ -431,7 +466,7 @@ async function handleWebChatMessage(req, res) {
 // handleWebChatMessage already uses.
 async function handleWebChatPhotoUpload(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { session_id: sessionId } = req.body || {};
+  const { session_id: sessionId, tenant_code: tenantCode } = req.body || {};
 
   if (!sessionId || typeof sessionId !== 'string' || sessionId.length > MAX_SESSION_ID_LENGTH) {
     return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'session_id is required.' } });
@@ -441,7 +476,7 @@ async function handleWebChatPhotoUpload(req, res) {
   }
 
   try {
-    const identity = await resolveWebChatIdentity(knex);
+    const identity = await resolveWebChatIdentity(knex, tenantCode);
     if (!identity) {
       return res.status(500).json({ error: { code: 'NO_TENANT', message: 'No tenant configured for web chat.' } });
     }
@@ -492,9 +527,39 @@ async function handleWebChatPhotoUpload(req, res) {
       reply: `📷 Photo added (${updatedPhotos.length}/${MAX_PHOTOS_WEB}).`,
     });
   } catch (err) {
+    if (err.name === 'InvalidCodeError') {
+      return res.status(400).json({ error: { code: 'INVALID_CODE', message: 'That activation code is no longer valid. Please re-enter it.' } });
+    }
     console.error('Web chat photo upload failed:', err.message);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to upload photo. Please try again.' } });
   }
 }
 
-module.exports = { handleWebChatMessage, handleWebChatPhotoUpload };
+/**
+ * POST /api/v1/chat/web/activate
+ * Validates a tenant's web chat code and identifies them to the widget —
+ * no listing/session involved, just confirms the code is real before the
+ * widget starts sending actual chat messages with it attached.
+ */
+async function handleWebChatActivate(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { code } = req.body || {};
+
+  if (!code || typeof code !== 'string') {
+    return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'code is required.' } });
+  }
+
+  try {
+    const tenant = await knex('tenants').where({ web_chat_code: normalizeWebChatCode(code), status: 'active' }).first();
+    if (!tenant) {
+      return res.status(404).json({ error: { code: 'INVALID_CODE', message: "That code isn't recognized. Please check it and try again." } });
+    }
+
+    return res.status(200).json({ success: true, tenantName: tenant.business_name });
+  } catch (error) {
+    console.error('Failed to activate web chat code:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Something went wrong. Please try again.' } });
+  }
+}
+
+module.exports = { handleWebChatMessage, handleWebChatPhotoUpload, handleWebChatActivate };

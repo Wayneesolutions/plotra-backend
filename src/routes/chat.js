@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { handleWebChatMessage, handleWebChatPhotoUpload } = require('../controllers/webChatController');
+const { handleWebChatMessage, handleWebChatPhotoUpload, handleWebChatActivate } = require('../controllers/webChatController');
 const { uploadMiddleware } = require('../controllers/mediaController');
 const serviceContext = require('../middleware/serviceContext');
 const { publicWriteLimiter } = require('../middleware/rateLimiter');
@@ -17,6 +17,16 @@ const { publicWriteLimiter } = require('../middleware/rateLimiter');
  *          inside the controller instead.
  */
 router.post('/web', publicWriteLimiter, serviceContext, handleWebChatMessage);
+
+/**
+ * @route   POST /api/v1/chat/web/activate
+ * @desc    Validates a tenant's web chat activation code (see
+ *          webChatCodeController.js) and returns their business name so
+ *          the widget can confirm before it starts sending real messages
+ *          with the code attached.
+ * @access  Public, same reasoning as POST /web above.
+ */
+router.post('/web/activate', publicWriteLimiter, serviceContext, handleWebChatActivate);
 
 /**
  * @route   POST /api/v1/chat/web/photo
