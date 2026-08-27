@@ -8,24 +8,27 @@ This doc is for whoever deploys this next. §1 covers what changed in this sessi
 
 ---
 
-## ⚠️ Known gap — read this before deploying the web chat work
+## ✅ Widget gap closed — one web chat widget now, action needed on your side
 
-This session **discovered a pre-existing web chat widget it didn't know about**: `plotra-backend/demo/plotra-web-chat.html` (a static HTML file, referenced in §7/§4 below as "the real one"). The new per-tenant activation-code work (§1.4) was built as a **second, separate widget** — `plotra-frontend`'s new `/widget` React route — without realizing that static file already existed and is what's presumably actually embedded/linked anywhere today.
+The previous version of this doc flagged two out-of-sync web chat widgets. That's resolved in code:
 
-Net effect right now:
-- `demo/plotra-web-chat.html` still calls `POST /api/v1/chat/web` with **no `tenant_code`** — it only works via the old single-tenant `WEB_CHAT_TENANT_ID`/`WEB_CHAT_AGENT_USER_ID` env-var fallback (still supported, see §1.4), not the new per-tenant code system.
-- The new React widget at `/widget` is the only one that actually supports entering a per-tenant code.
-- **These two widgets are now out of sync** and only one should probably continue to exist. Two realistic paths, neither done yet:
-  1. Patch `demo/plotra-web-chat.html` to add the same code-activation gate (small change: an activation step calling `POST /api/v1/chat/web/activate`, then send `tenant_code` on every `/web` and `/web/photo` call, same as `ChatWidget.jsx` does) — keeps the static-file deployment model.
-  2. Retire `demo/plotra-web-chat.html` and standardize on `plotra-frontend`'s `/widget` route (iframe-embeddable) — one fewer thing to keep in sync, but changes the deploy story (§4 below documents both as they stand today).
+- **`plotra-backend/demo/plotra-web-chat.html` has been deleted.** It was the old static-file widget, didn't support per-tenant codes, and every doc reference to it (`BACKEND_API_SPEC.md`, `QA_TESTING_PROMPTS.md` in both repos, this file) has been updated to point at its replacement instead.
+- **`plotra-frontend`'s `/widget` route (`ChatWidget.jsx`) is now the one and only web chat widget.** It supports per-tenant activation codes (§1.4) and is what §2/§4/§5 below now describe exclusively.
 
-**Recommend deciding this and closing the gap before telling any tenant to use their new code** — right now, only the not-yet-linked-anywhere `/widget` route actually honors it.
+**What I could NOT do myself, because this session has no DNS/hosting/AWS access (same limitation as earlier in this session):**
+
+Whatever currently serves `plotra.wayneesolutions.com` (per `BACKEND_API_SPEC.md`'s old config, that's where the deleted static file was expected to be reachable) needs to be re-pointed by hand:
+- If `plotra.wayneesolutions.com` is a dedicated static-hosting target (S3/CloudFront bucket, Nginx `location` block, etc.) that served `plotra-web-chat.html` directly — either redirect it (HTTP 301) to the deployed `plotra-frontend`'s `/widget` path, or repoint the DNS record so that hostname resolves to wherever `plotra-frontend` is actually hosted, with `/widget` as the path tenants use.
+- If it was just one page within a larger static site deploy, remove/redirect that one path instead of the whole hostname.
+- Whichever way you do it: the end state should be that visiting `plotra.wayneesolutions.com` (or a specific path on it) lands on `plotra-frontend`'s `/widget` route, not a 404 or the deleted file.
+
+This is a manual step — I can't reach your DNS/hosting provider from this session. Everything else in this section is done and pushed to the branch.
 
 ---
 
 ## 1. What shipped this session
 
-Four pieces of work, all on branch `claude/plotra-code-fixes-eboqnb`, all requested and built in the same session. None merged yet.
+Five pieces of work, all on branch `claude/plotra-code-fixes-eboqnb`, all requested and built in the same session. None merged yet.
 
 ### 1.1 Fix: agent WhatsApp intake mishandled `awaiting_approval` replies
 **Backend commit `97422d7`.** In `agentIntakeController.js`, any message sent while a dealer's draft listing was `awaiting_approval` — even a non-informative one like "Hello", or an unrelated new listing's address — was silently glued onto the pending draft's `accumulated_text` and treated as a correction. Now:
@@ -49,14 +52,17 @@ Four pieces of work, all on branch `claude/plotra-code-fixes-eboqnb`, all reques
 - `Settings.jsx` gained a "Pending Agent Signups" section (owner-only) with Approve/Reject, matching the interaction pattern of `AdminPanel.jsx`'s existing Pending Requests tab.
 - **New worker process** — `npm run worker:agentSignup` (`src/workers/agentSignupWorker.js`) needs to run continuously alongside the other 8 workers. `package.json`'s `worker:*` scripts and the combined `workers` script were updated.
 
-### 1.4 Feature: per-tenant web chat activation codes (see the ⚠️ gap above)
+### 1.4 Feature: per-tenant web chat activation codes
 **Backend commit `ca88207`, frontend commit `8970196`.** Replaces the single hardcoded `WEB_CHAT_TENANT_ID`/`WEB_CHAT_AGENT_USER_ID` env-var pair (one tenant per backend deployment, previously required to be set by hand) with a unique, human-typeable code per tenant, so the same web chat mechanism can serve every tenant.
 - New migration: `tenants.web_chat_code` (unique, nullable) — generated **lazily** the first time an owner asks for it (not backfilled/patched into every tenant-creation code path).
 - New owner-only endpoints: `GET /api/v1/dashboard/web-chat-code`, `POST .../regenerate`.
 - New public endpoint: `POST /api/v1/chat/web/activate { code }` — validates a code, returns the tenant's business name.
 - `webChatController.js`'s `resolveWebChatIdentity` now resolves the tenant by code first (attributing new listings to that tenant's **owner** user), falling back to the old env vars only when no code is sent at all — an existing single-tenant deployment keeps working unchanged, so **`WEB_CHAT_TENANT_ID`/`WEB_CHAT_AGENT_USER_ID` are no longer hard requirements**, just an optional fallback (see §3 update below).
 - `Settings.jsx` gained a "Web Chat Widget" section (owner-only) showing/regenerating the tenant's code.
-- **New widget**: `plotra-frontend`'s `ChatWidget.jsx`, mounted full-page at `/widget` (meant to be iframed on a tenant's own external site — same-origin from inside the iframe, so no per-tenant CORS config needed). Prompts for the code once, stores it (`localStorage`), then sends it as `tenant_code` on every `/api/v1/chat/web` and `/api/v1/chat/web/photo` call. **This is the widget that does NOT yet have a linked/known deployment location** — see the gap callout above.
+- **New widget**: `plotra-frontend`'s `ChatWidget.jsx`, mounted full-page at `/widget` (meant to be iframed on a tenant's own external site — same-origin from inside the iframe, so no per-tenant CORS config needed). Prompts for the code once, stores it (`localStorage`), then sends it as `tenant_code` on every `/api/v1/chat/web` and `/api/v1/chat/web/photo` call.
+
+### 1.5 Cleanup: retired the old static web chat widget
+**Backend-only, same branch, no separate commit hash beyond the one deleting `demo/plotra-web-chat.html`.** Discovered while writing up §1.4 that a second, pre-existing web chat widget already existed as a static HTML file (`plotra-backend/demo/plotra-web-chat.html`) — it didn't support per-tenant codes and was now redundant with §1.4's `/widget` route. Deleted it after confirming (via repo-wide search) nothing in either repo's code references it — only docs did, all updated: `BACKEND_API_SPEC.md` (marked historical, endpoint contract unchanged), `QA_TESTING_PROMPTS.md` in both repos (now point at `/widget` + an activation-code step), and this file. **See the "✅ Widget gap closed" section above for a manual DNS/hosting step still needed on your end.**
 
 ---
 
@@ -78,9 +84,7 @@ plotra-backend (Node/Express API)
      a WhatsApp BSP (Meta Cloud API or similar), Stripe, SMTP, WayneRing (voice calling)
 ```
 
-There are now **two web chat widgets** (see the ⚠️ gap above) — pick one before telling tenants about their activation code:
-- `plotra-backend/demo/plotra-web-chat.html` — static HTML, the one referenced by the previous session (§7) as "the real one." Does not yet support per-tenant codes.
-- `plotra-frontend`'s `/widget` route (`ChatWidget.jsx`) — new this session, supports per-tenant codes, not yet linked/deployed anywhere specific.
+The web chat widget is **`plotra-frontend`'s `/widget` route** (`ChatWidget.jsx`) — the old static `plotra-backend/demo/plotra-web-chat.html` (referenced by the previous session, §7, as "the real one") has been deleted; see §1.5. `/widget` is iframe-embeddable on a tenant's own site and gated by their per-tenant activation code (§1.4). **Still needs a manual DNS/hosting repoint** — see the "✅ Widget gap closed" section at the top of this doc.
 
 The backend is **not** a single process. In production you need the API server *and* all 9 workers running continuously (see `package.json`'s `worker:*` scripts, or the combined `npm run workers` for **dev only**). If you only deploy `src/server.js`, WhatsApp messages will be logged but never actually processed — nothing will geocode, nothing will get a reply, no builder research or agent signup will run.
 
@@ -138,9 +142,7 @@ Full details and comments for every one of these live in `plotra-backend/.env.ex
 4. **S3 bucket**: for photo/media uploads (`s3Service.js`) — set the relevant AWS credentials/bucket vars per that file.
 5. **Backend API**: deploy `src/server.js` (e.g. behind an ALB, ECS/Fargate, or EC2 + PM2). Set every env var from §3 — note `WEB_CHAT_TENANT_ID`/`WEB_CHAT_AGENT_USER_ID` are now optional.
 6. **Backend workers**: deploy all **9** as **separate long-running processes** (own ECS service/task each, or PM2 processes) — `worker:geo`, `worker:landmark`, `worker:vocallm`, `worker:whatsapp`, `worker:agentIntake`, **`worker:agentSignup` (NEW)**, `worker:localIntel`, `worker:builderDD`, `worker:wayneRingSync`. Don't just run `npm run workers` (concurrently) in production — that's a dev convenience, one process for all 9, with no per-worker restart isolation.
-7. **Web chat widget — resolve the ⚠️ gap above first**, then either:
-   - host `plotra-backend/demo/plotra-web-chat.html` somewhere reachable (S3/CloudFront, or served statically by the backend) and update its `PLOTRA_CONFIG.API_ENDPOINT`/`PHOTO_ENDPOINT` — **after** patching it to send `tenant_code` (see the gap callout), or
-   - build+deploy `plotra-frontend` and point tenants at `https://<your-frontend-host>/widget` (embed via `<iframe>` on their own site) instead.
+7. **Web chat widget**: build+deploy `plotra-frontend` (already covered by step 8 below) and point tenants at `https://<your-frontend-host>/widget` (embed via `<iframe>` on their own site). The old static `demo/plotra-web-chat.html` is deleted — if `plotra.wayneesolutions.com` (or wherever it used to be hosted) still needs to resolve somewhere, repoint its DNS/hosting to this `/widget` path by hand (manual step, not done as part of this session — see the "✅ Widget gap closed" section at the top).
 8. **Frontend**: `npm run build` → static assets → S3+CloudFront (or wherever). Set `VITE_GOOGLE_MAPS_API_KEY` and, if split-host, `VITE_API_BASE_URL` at build time — Vite bakes these in at build, not runtime.
 9. **WhatsApp BSP webhook**: point your BSP's inbound webhook at `POST /api/v1/webhooks/whatsapp` (or your BSP's configured path — see `src/routes/webhooks.js`) on the deployed backend URL.
 10. **Stripe webhook** (if billing is live): point at `POST /api/v1/webhooks/stripe`, subscribed to `checkout.session.completed`, `invoice.paid`, `customer.subscription.deleted`.
@@ -154,7 +156,8 @@ Full details and comments for every one of these live in `plotra-backend/.env.ex
 - [ ] Dashboard → Settings → invite a team member with a phone number; confirm they appear in the new Team Members list; edit an existing member's phone inline and confirm it saves.
 - [ ] Text **"join as agent"** to a tenant's WhatsApp number from an unregistered phone; provide name/area when asked; confirm the request appears under Settings → Pending Agent Signups; Approve it and confirm the same phone number can now use the existing WhatsApp listing-intake flow immediately.
 - [ ] Dashboard → Settings → Web Chat Widget: confirm a code is shown, Regenerate produces a new one.
-- [ ] Whichever widget you resolve the ⚠️ gap with: enter the tenant's code, confirm it activates and shows the tenant's business name, then create a listing via chat and confirm it lands under that tenant.
+- [ ] Go to the deployed `/widget` route: enter the tenant's code, confirm it activates and shows the tenant's business name, then create a listing via chat and confirm it lands under that tenant.
+- [ ] Confirm `plotra.wayneesolutions.com` (or wherever the old widget was reachable) now lands on `/widget`, not a 404 or the deleted file — this depends on the manual DNS/hosting step above having been done.
 
 **Previous session's work (still applicable, unchanged):**
 - [ ] Log into the dashboard, view a listing — satellite view shows road labels while pending; street view (not satellite) still shows once the listing is approved/live.
@@ -185,7 +188,7 @@ Property Edit modal and Tenant drill-down (the other two fixes in that PR) merge
 - **Satellite/street-view behavior fixed.** Satellite view now shows road/place labels while a dealer is dragging the pin to correct a location (was a blank image before). Once a listing goes live, satellite view drops away (it's a pin-correction tool only), but **street view now stays visible to buyers** on the public listing — it used to disappear along with satellite.
 - **5 dealer/admin PRs merged**: WhatsApp number management in Settings, re-pointed multi-agent-WhatsApp gate, WhatsApp signup admin approval flow, plan-assignment dropdown for admin tenant management, and Lead Inbox / Property Edit modal / Tenant drill-down (a stale PR that needed manual conflict resolution — see §6 above).
 - **Builder/developer profile UI extended from Flat-only to Flat + Commercial** (mall/retail units), matching the backend change below.
-- **Cleanup**: removed a stray committed `dist.zip` build artifact, an orphaned unused component (`ListingMediaManager.jsx`, superseded by `DashboardListings.jsx`'s own inline photo modal), and a stale/incomplete duplicate of the web chat widget (`public/webchat.html` — the real one lives in the backend repo, see below — **now itself out of date, see the ⚠️ gap at the top of this doc**).
+- **Cleanup**: removed a stray committed `dist.zip` build artifact, an orphaned unused component (`ListingMediaManager.jsx`, superseded by `DashboardListings.jsx`'s own inline photo modal), and a stale/incomplete duplicate of the web chat widget (`public/webchat.html` — the real one lived in the backend repo at the time, see below — **that backend copy has since been deleted too, see §1.5 above; the widget now lives at plotra-frontend's `/widget` route**).
 
 ### plotra-backend
 - **New feature: chat-based builder/developer auto-linking.** A dealer can now type something like *"flat available in DLF Chandigarh One"* or *"retail space available in Elante Mall"* over WhatsApp **or** the web chat widget, and:

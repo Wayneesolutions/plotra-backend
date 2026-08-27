@@ -8,7 +8,11 @@
 - `[OWNER_EMAIL]` / `[OWNER_PASSWORD]` — a tenant **owner** login (needed for plan-change/moderation steps)
 - `[AGENT_EMAIL]` / `[AGENT_PASSWORD]` — a tenant **agent** login (non-owner, for permission-boundary checks), if you have one
 - `[ADMIN_EMAIL]` / `[ADMIN_PASSWORD]` — a **super-admin** login
-- `[WEBCHAT_URL]` — wherever `demo/plotra-web-chat.html` ended up hosted
+- `[WEBCHAT_URL]` — the deployed frontend's `/widget` route (e.g.
+  `https://app.yourdomain.com/widget`) — the old standalone
+  `demo/plotra-web-chat.html` page has been retired
+- `[WEBCHAT_CODE]` — a tenant's web chat activation code (Dashboard →
+  Settings → Web Chat Widget, owner login)
 - `[TEST_WHATSAPP_NUMBER]` — a real WhatsApp number you can send test messages from, if testing that channel
 
 Run the prompts in order — several later ones depend on state created by earlier ones (e.g. Prompt 5 needs a listing Prompt 3 or 4 created).
@@ -121,15 +125,15 @@ new plan persisted, not just an optimistic UI update that silently failed).
 ## Prompt 5 — Web chat: plain listing creation still works
 
 ```
-Go to [WEBCHAT_URL].
+Go to [WEBCHAT_URL] (a fresh browser tab, so you get a fresh session).
 
-1. Confirm the chat widget loads and shows a greeting message and two
-   clickable suggestion chips.
+1. Confirm the widget first prompts for an activation code (not a chat
+   box yet). Enter [WEBCHAT_CODE] and confirm it activates, showing the
+   tenant's business name.
 2. Type a plain listing description with a real address, e.g.
-   "3BHK plot 250 gaj sector 45 mohali 55 lakh" (or click the matching
-   suggestion chip), send it, and confirm you get back a listing preview
-   with a working /p/:slug link, correct property type (Plot), price,
-   and area.
+   "3BHK plot 250 gaj sector 45 mohali 55 lakh", send it, and confirm you
+   get back a listing preview with a working /p/:slug link, correct
+   property type (Plot), price, and area.
 3. Reply "yes" to approve it, and confirm you get a "it's live" message
    with the same link, and that opening the link shows a live public
    listing page.
@@ -146,7 +150,8 @@ the resulting public listing page looks correct.
 ## Prompt 6 — Web chat: NEW feature — building/mall name auto-recognition + builder profile
 
 ```
-Go to [WEBCHAT_URL] (a fresh page load, so you get a new chat session).
+Go to [WEBCHAT_URL] in a fresh browser tab (so you get a new chat
+session), and activate it with [WEBCHAT_CODE] if prompted.
 
 1. Type exactly: "flat available in DLF Chandigarh One" and send it.
 2. Confirm the reply includes BOTH a listing preview link AND a second
@@ -158,7 +163,9 @@ Go to [WEBCHAT_URL] (a fresh page load, so you get a new chat session).
 4. Reply "yes" to approve it.
 
 Then start a second, separate test:
-5. Reload the page for a fresh session, type exactly:
+5. Open another fresh browser tab (the session id persists across a
+   same-tab reload, so a reload alone won't give you a new session),
+   activate with [WEBCHAT_CODE] again, type exactly:
    "retail space available in Elante Mall, 60 lakh" and send it.
 6. Confirm the reply again includes a listing preview AND a builder-
    profile note, and that the listing's property type comes back as
