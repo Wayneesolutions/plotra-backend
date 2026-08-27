@@ -157,7 +157,14 @@ async function linkOrCreateBuilderProfileCore(knex, { tenantId, listingId, compa
   await knex('listings').where({ id: listingId, tenant_id: tenantId }).update({ builder_profile_id: profile.id, updated_at: knex.fn.now() });
 
   if (isNew) {
-    await builderDueDiligenceQueue.add('research', { builderProfileId: profile.id }, {
+    // listingId travels through purely for market-comparison context (city/
+    // price band, so the "how does this developer compare to others in the
+    // same market" part of the assessment has something concrete to weigh
+    // against) — see builderDueDiligenceWorker.js. The profile itself stays
+    // company-level, shared across every listing that links to it; only
+    // whichever listing happened to trigger the FIRST research run informs
+    // that one-time comparison framing.
+    await builderDueDiligenceQueue.add('research', { builderProfileId: profile.id, listingId }, {
       attempts: 2,
       backoff: { type: 'exponential', delay: 5000 },
     });
@@ -282,7 +289,7 @@ async function getPublicBuilderProfile(req, res) {
     const profile = await knex('builder_profiles')
       .select(
         'id', 'company_name', 'rera_registration_ids', 'mca_cin', 'last_researched_at',
-        'overall_rating', 'rating_source_url', 'rating_source_title',
+        'overall_rating', 'rating_source_url', 'rating_source_title', 'rating_basis', 'rating_is_ai_assessment',
         'possession_delivered_count', 'possession_total_count', 'possession_source_url', 'possession_source_title'
       )
       .where({ id: listing.builder_profile_id, moderation_status: 'published' })
