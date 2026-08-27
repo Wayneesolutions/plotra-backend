@@ -15,10 +15,11 @@
     "worker:vocallm": "node src/workers/vocallmWorker.js",
     "worker:whatsapp": "node src/workers/whatsappOutboundWorker.js",
     "worker:agentIntake": "node src/workers/agentIntakeWorker.js",
+    "worker:agentSignup": "node src/workers/agentSignupWorker.js",
     "worker:localIntel": "node src/workers/localIntelligenceWorker.js",
     "worker:builderDD": "node src/workers/builderDueDiligenceWorker.js",
     "worker:wayneRingSync": "node src/workers/wayneRingCallSyncWorker.js",
-    "workers": "concurrently \"npm:worker:geo\" \"npm:worker:landmark\" \"npm:worker:vocallm\" \"npm:worker:whatsapp\" \"npm:worker:agentIntake\" \"npm:worker:localIntel\" \"npm:worker:builderDD\" \"npm:worker:wayneRingSync\""
+    "workers": "concurrently \"npm:worker:geo\" \"npm:worker:landmark\" \"npm:worker:vocallm\" \"npm:worker:whatsapp\" \"npm:worker:agentIntake\" \"npm:worker:agentSignup\" \"npm:worker:localIntel\" \"npm:worker:builderDD\" \"npm:worker:wayneRingSync\""
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1084.0",
