@@ -2,6 +2,7 @@ const { Queue } = require('bullmq');
 const axios = require('axios');
 const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -390,7 +391,10 @@ async function updateListingLocation(req, res) {
     // Deliberately no extraListingUpdates — status is left exactly as-is
     // (already 'pending' or 'awaiting_approval', which is why this was
     // even allowed above). Only geoEnrichmentWorker.js's own job decides
-    // status transitions.
+    // status transitions. pin_manually_corrected=true is set here though —
+    // it's what tells the approval step (agentIntakeController.js) not to
+    // also record an 'implicit_approval' cache entry, since this explicit
+    // correction already recorded the stronger 'manual_pin_drag' one below.
     await applyResolvedLocation(knex, {
       listingId: listing.id,
       lat: nLat,
@@ -398,6 +402,21 @@ async function updateListingLocation(req, res) {
       formattedAddress,
       targetApiKey,
       propertyType: listing.property_type,
+      extraListingUpdates: { pin_manually_corrected: true },
+    });
+
+    // Self-learning cache: a dealer just explicitly confirmed this is the
+    // right spot for this building/locality — worth remembering for the
+    // NEXT listing that names the same building/society/locality. See
+    // resolvedLocalityService.js / migration 20260828_04.
+    await recordResolvedLocality(knex, {
+      tenantId: listing.tenant_id,
+      buildingName: listing.building_name,
+      rawAddress: listing.raw_address,
+      lat: nLat,
+      lng: nLng,
+      formattedAddress,
+      source: 'manual_pin_drag',
     });
 
     return res.status(200).json({

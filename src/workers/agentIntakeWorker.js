@@ -168,6 +168,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         plotArea: extracted.plot_area,
         propertyType: extracted.property_type,
         description: extracted.description,
+        buildingName: extracted.building_name,
       });
 
       await knex('agent_listing_drafts').where({ id: draftId }).update({
@@ -225,6 +226,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     plot_area: extracted.plot_area ?? existingListing.plot_area,
     property_type: extracted.property_type ?? existingListing.property_type,
     description: extracted.description ?? existingListing.description,
+    building_name: extracted.building_name ?? existingListing.building_name,
   };
 
   await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'creating', updated_at: knex.fn.now() });
@@ -266,6 +268,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       plot_area: merged.plot_area,
       property_type: merged.property_type,
       description: merged.description,
+      building_name: merged.building_name,
       updated_at: knex.fn.now(),
     });
     await knex('agent_listing_drafts').where({ id: draftId }).update({

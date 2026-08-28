@@ -5,6 +5,7 @@ const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage }
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
 const { extractListingFields } = require('../services/listingExtractionService');
+const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -299,7 +300,9 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const [updatedListing] = await trx('listings')
           .where({ id: draft.listing_id })
           .update({ status: 'active', updated_at: trx.fn.now() })
-          .returning(['id', 'public_slug']);
+          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
+
+        await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
         await trx('agent_listing_drafts')
           .where({ id: draft.id })
@@ -323,13 +326,15 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const [updatedListing] = await trx('listings')
             .where({ id: draft.listing_id, status: 'awaiting_approval' })
             .update({ status: 'active', updated_at: trx.fn.now() })
-            .returning(['id', 'public_slug']);
+            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
 
           if (!updatedListing) {
             // Already approved (or otherwise moved on) by a prior message —
             // treat as a harmless no-op ack, not an error.
             return { action: 'noop' };
           }
+
+          await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
           await trx('agent_listing_drafts')
             .where({ id: draft.id })
