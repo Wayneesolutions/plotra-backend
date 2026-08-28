@@ -69,7 +69,7 @@ const redisConnection = {
 };
 const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
 
-const LIVE_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'confirming_address', 'awaiting_approval'];
+const LIVE_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'awaiting_approval'];
 
 // Short delay so a few rapid-fire agent messages collapse into one GPT
 // extraction call — a cost optimization only, NOT a correctness mechanism:
@@ -228,11 +228,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       // listing linked to this draft, never treat it as new listing text.
       // Also handles pending (still geocoding) — tell agent to wait rather
       // than appending "yes" to accumulated_text and causing a broken loop.
-      // Skipped for confirming_address: that state's own "yes" handler below
-      // queues send-preview rather than approving — the listing is in
-      // awaiting_approval at that point but the agent hasn't seen the preview
-      // yet, so approving here would skip the entire preview step.
-      if (isApprovalReply(incomingText) && draft.listing_id && draft.status !== 'confirming_address') {
+      if (isApprovalReply(incomingText) && draft.listing_id) {
         const linkedListing = await trx('listings')
           .where({ id: draft.listing_id })
           .whereIn('status', ['awaiting_approval', 'pending'])
@@ -268,36 +264,6 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
         return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
-      }
-
-      if (draft.status === 'confirming_address') {
-        await trx('agent_draft_messages').insert({
-          draft_id: draft.id,
-          direction: 'inbound',
-          body: incomingText,
-          bsp_message_id: bspMessageId || null,
-        });
-
-        if (isApprovalReply(incomingText)) {
-          // Agent confirmed the resolved address — queue send-preview now.
-          // sendPreviewAndAwaitApproval (agentIntakeWorker.js) will flip
-          // the draft to awaiting_approval; don't change status here.
-          return { action: 'send-preview', draftId: draft.id, listingId: draft.listing_id };
-        }
-
-        // Not a "yes" — treat as a corrected address. Replace accumulated_text
-        // with ONLY this correction message (don't append): the listing already
-        // exists, all other fields will be COALESCED from it in agentIntakeWorker.js,
-        // so handing GPT a clean single message avoids it picking up old failed
-        // addresses that built up in the history and confusing the re-extraction.
-        await trx('agent_listing_drafts')
-          .where({ id: draft.id })
-          .update({
-            status: 'collecting',
-            accumulated_text: incomingText,
-            updated_at: trx.fn.now(),
-          });
-        return { action: 'extract', draftId: draft.id };
       }
 
       if (draft.status === 'awaiting_approval') {
@@ -426,11 +392,6 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody });
     } else if (result.action === 'extract') {
       await enqueueExtractJob(result.draftId);
-    } else if (result.action === 'send-preview') {
-      await agentIntakeQueue.add('send-preview', { draftId: result.draftId, listingId: result.listingId }, {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 2000 },
-      });
     }
 
     return res.status(200).json({ success: true });

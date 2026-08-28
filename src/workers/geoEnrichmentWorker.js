@@ -130,31 +130,17 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
 
-    // 5. WhatsApp agent-intake listings: before sending the full listing
-    // preview, first confirm the resolved address with the agent — Google
-    // sometimes geocodes an ambiguous locality name to the wrong city, and
-    // the agent has no way to know unless we show them what was resolved.
-    // Sends a short "📍 Found: [formatted_address] — correct?" message and
-    // parks the draft in 'confirming_address'. The agent's "yes" reply in
-    // agentIntakeController.js then queues the actual send-preview job.
+    // 5. WhatsApp agent-intake listings: send the preview link directly.
+    // The listing preview page shows a satellite map with a draggable pin —
+    // the agent can visually verify the location, drag the pin to fix it if
+    // needed, and click Save, then reply "yes" to publish. This is better
+    // than a text address confirmation: a formatted_address string is hard
+    // to verify mentally, the map is the right tool.
     if (draftId) {
-      const draft = await knex('agent_listing_drafts').where({ id: draftId }).first();
-      if (draft) {
-        const agentUser = await knex('users').where({ id: draft.user_id }).first();
-        const confirmBody =
-          `📍 *Address found:*\n${formattedAddress}\n\n` +
-          `Is this the correct location for your listing?\n` +
-          `Reply *"yes"* to continue, or send the corrected address.`;
-
-        await knex.transaction(async (trx) => {
-          await logAgentOutboundMessage(trx, { draftId, body: confirmBody });
-          await trx('agent_listing_drafts')
-            .where({ id: draftId })
-            .update({ status: 'confirming_address', updated_at: trx.fn.now() });
-        });
-
-        await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
-      }
+      await agentIntakeQueue.add('send-preview', { draftId, listingId }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
     }
 
     console.log(`[Job ${job.id}] Successfully completed Geocoding & media initialization mapping for ${listingId}.`);

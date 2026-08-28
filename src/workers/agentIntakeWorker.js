@@ -71,8 +71,8 @@ async function sendPreviewAndAwaitApproval({ draftId, listingId }) {
     if (!listing || !draft) return null;
 
     const previewBody = lang === 'en'
-      ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\nReply "yes" or "approve" if it looks right — it'll go live. Send a new detail if anything needs changing.`
-      : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nSahi hai to reply karo "haan" ya "approve" — publish ho jayegi. Kuch badalna hai to naya detail bhej dijiye.`;
+      ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\nOpen the link — check the map pin is on the right spot. If it's off, drag it to the exact location and tap *Save*. Reply *"yes"* when you're ready to publish.`
+      : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nLink kholo — map pin sahi jagah hai kya check karo. Agar thoda hatna hai, pin ko drag karke sahi jagah pe laao aur *Save* dabao. Publish karna ho to *"haan"* reply karo.`;
 
     await logAgentOutboundMessage(trx, { draftId, body: previewBody });
     await trx('agent_listing_drafts')
