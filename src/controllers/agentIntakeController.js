@@ -228,7 +228,11 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       // listing linked to this draft, never treat it as new listing text.
       // Also handles pending (still geocoding) — tell agent to wait rather
       // than appending "yes" to accumulated_text and causing a broken loop.
-      if (isApprovalReply(incomingText) && draft.listing_id) {
+      // Skipped for confirming_address: that state's own "yes" handler below
+      // queues send-preview rather than approving — the listing is in
+      // awaiting_approval at that point but the agent hasn't seen the preview
+      // yet, so approving here would skip the entire preview step.
+      if (isApprovalReply(incomingText) && draft.listing_id && draft.status !== 'confirming_address') {
         const linkedListing = await trx('listings')
           .where({ id: draft.listing_id })
           .whereIn('status', ['awaiting_approval', 'pending'])
