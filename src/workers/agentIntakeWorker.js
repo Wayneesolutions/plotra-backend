@@ -220,6 +220,27 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
   const needsReenrichment = addressChanged || pincodeChanged;
 
   if (!needsReenrichment) {
+    // Even when the address text didn't change, re-geocode if the listing
+    // never got coordinates (a previous geo attempt failed). Sending a
+    // preview for a listing with no lat/lng is worse than re-trying.
+    if (!existingListing.lat || !existingListing.lng) {
+      await knex('listings').where({ id: draft.listing_id }).update({
+        ...merged,
+        formatted_address: null,
+        lat: null,
+        lng: null,
+        status: 'pending',
+        updated_at: knex.fn.now(),
+      });
+      await knex('agent_listing_drafts').where({ id: draftId }).update({
+        status: 'enriching',
+        extracted_fields: JSON.stringify(merged),
+        updated_at: knex.fn.now(),
+      });
+      await enqueueGeoEnrichment({ listingId: draft.listing_id, rawAddress: merged.raw_address, draftId });
+      return { success: true, corrected: true, reGeocoded: true };
+    }
+
     await knex('listings').where({ id: draft.listing_id }).update({
       title: merged.title,
       price: merged.price,
