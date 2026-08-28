@@ -225,36 +225,45 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       }
 
       // Universal approval check: when the agent says "yes" and there's a
-      // listing already in awaiting_approval, approve it regardless of the
-      // draft's own status. This handles the case where a geo failure reset
-      // the draft to 'collecting' while the listing stayed awaiting_approval.
+      // listing linked to this draft, never treat it as new listing text.
+      // Also handles pending (still geocoding) — tell agent to wait rather
+      // than appending "yes" to accumulated_text and causing a broken loop.
       if (isApprovalReply(incomingText) && draft.listing_id) {
-        const pendingListing = await trx('listings')
-          .where({ id: draft.listing_id, status: 'awaiting_approval' })
+        const linkedListing = await trx('listings')
+          .where({ id: draft.listing_id })
+          .whereIn('status', ['awaiting_approval', 'pending'])
           .first();
 
-        if (pendingListing) {
-          await trx('agent_draft_messages').insert({
-            draft_id: draft.id,
-            direction: 'inbound',
-            body: incomingText,
-            bsp_message_id: bspMessageId || null,
-          });
+        await trx('agent_draft_messages').insert({
+          draft_id: draft.id,
+          direction: 'inbound',
+          body: incomingText,
+          bsp_message_id: bspMessageId || null,
+        });
 
-          const [updatedListing] = await trx('listings')
-            .where({ id: draft.listing_id })
-            .update({ status: 'active', updated_at: trx.fn.now() })
-            .returning(['id', 'public_slug']);
+        if (!linkedListing) return { action: 'noop' };
 
-          await trx('agent_listing_drafts')
-            .where({ id: draft.id })
-            .update({ status: 'approved', updated_at: trx.fn.now() });
-
-          const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
-          await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
-
-          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
+        if (linkedListing.status === 'pending') {
+          const waitBody = detectReplyLanguage(incomingText) === 'en'
+            ? 'Your listing is still being processed. Please wait a moment and try again.'
+            : 'Aapki listing abhi process ho rahi hai. Thoda wait karein aur dobara try karein.';
+          await logAgentOutboundMessage(trx, { draftId: draft.id, body: waitBody });
+          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: waitBody };
         }
+
+        const [updatedListing] = await trx('listings')
+          .where({ id: draft.listing_id })
+          .update({ status: 'active', updated_at: trx.fn.now() })
+          .returning(['id', 'public_slug']);
+
+        await trx('agent_listing_drafts')
+          .where({ id: draft.id })
+          .update({ status: 'approved', updated_at: trx.fn.now() });
+
+        const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
+        await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
+
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
       }
 
       if (draft.status === 'confirming_address') {
