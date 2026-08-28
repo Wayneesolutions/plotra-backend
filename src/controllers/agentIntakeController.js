@@ -281,14 +281,16 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           return { action: 'send-preview', draftId: draft.id, listingId: draft.listing_id };
         }
 
-        // Not a "yes" — treat as a corrected address. Roll back to collecting
-        // and re-run extraction over the full text so the new address
-        // replaces the one Google got wrong.
+        // Not a "yes" — treat as a corrected address. Replace accumulated_text
+        // with ONLY this correction message (don't append): the listing already
+        // exists, all other fields will be COALESCED from it in agentIntakeWorker.js,
+        // so handing GPT a clean single message avoids it picking up old failed
+        // addresses that built up in the history and confusing the re-extraction.
         await trx('agent_listing_drafts')
           .where({ id: draft.id })
           .update({
             status: 'collecting',
-            accumulated_text: trx.raw(`TRIM(accumulated_text || ' ' || ?)`, [incomingText]),
+            accumulated_text: incomingText,
             updated_at: trx.fn.now(),
           });
         return { action: 'extract', draftId: draft.id };
