@@ -224,6 +224,39 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           .returning(['id', 'status', 'listing_id']);
       }
 
+      // Universal approval check: when the agent says "yes" and there's a
+      // listing already in awaiting_approval, approve it regardless of the
+      // draft's own status. This handles the case where a geo failure reset
+      // the draft to 'collecting' while the listing stayed awaiting_approval.
+      if (isApprovalReply(incomingText) && draft.listing_id) {
+        const pendingListing = await trx('listings')
+          .where({ id: draft.listing_id, status: 'awaiting_approval' })
+          .first();
+
+        if (pendingListing) {
+          await trx('agent_draft_messages').insert({
+            draft_id: draft.id,
+            direction: 'inbound',
+            body: incomingText,
+            bsp_message_id: bspMessageId || null,
+          });
+
+          const [updatedListing] = await trx('listings')
+            .where({ id: draft.listing_id })
+            .update({ status: 'active', updated_at: trx.fn.now() })
+            .returning(['id', 'public_slug']);
+
+          await trx('agent_listing_drafts')
+            .where({ id: draft.id })
+            .update({ status: 'approved', updated_at: trx.fn.now() });
+
+          const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
+          await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
+
+          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
+        }
+      }
+
       if (draft.status === 'confirming_address') {
         await trx('agent_draft_messages').insert({
           draft_id: draft.id,
