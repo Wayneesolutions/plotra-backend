@@ -111,7 +111,25 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
   await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'extracting', updated_at: knex.fn.now() });
 
   const agentUser = await knex('users').where({ id: draft.user_id }).first();
-  const extracted = await extractListingFields(draft.accumulated_text);
+
+  // Correction path (draft.listing_id already exists) — pass the listing's
+  // CURRENT values as correction context so a short reply like "wrong
+  // information i typed ludhiana" is read as "replace raw_address with
+  // Ludhiana" instead of an unrelated fragment GPT can't place. See
+  // listingExtractionService.js's correctionContext param.
+  const existingListingForExtraction = draft.listing_id
+    ? await knex('listings').where({ id: draft.listing_id }).first()
+    : null;
+  const correctionContext = existingListingForExtraction
+    ? {
+        raw_address: existingListingForExtraction.raw_address,
+        building_name: existingListingForExtraction.building_name,
+        price: existingListingForExtraction.price,
+        property_type: existingListingForExtraction.property_type,
+      }
+    : undefined;
+
+  const extracted = await extractListingFields(draft.accumulated_text, correctionContext);
 
   if (!draft.listing_id) {
     // First-time creation path.
@@ -188,7 +206,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
   // value for it — never let a corrected re-extraction silently blank out
   // a previously-confirmed fact just because this particular message
   // didn't repeat it.
-  const existingListing = await knex('listings').where({ id: draft.listing_id }).first();
+  const existingListing = existingListingForExtraction;
 
   // Defensive validation here too, same as listingService.js's
   // createListingRecord — this correction path writes directly via

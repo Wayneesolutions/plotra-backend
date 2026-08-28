@@ -18,6 +18,34 @@ const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { generateBuilderClaims } = require('../services/groundedResearchService');
+const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { detectReplyLanguage } = require('../utils/replyLanguage');
+
+/**
+ * Research completing is silent otherwise (see file header: this worker
+ * deliberately never auto-publishes) — before this fix, NOTHING told the
+ * tenant owner a builder profile was sitting in pending_review, so it could
+ * sit there indefinitely with nobody knowing there was anything to
+ * review/publish. Best-effort: a missing/unreachable owner phone should
+ * never fail the research job itself, the research result is already
+ * safely persisted by the time this runs.
+ */
+async function notifyOwnerBuilderProfileNeedsReview(knex, { tenantId, companyName, listing }) {
+  try {
+    const owner = await knex('users').where({ tenant_id: tenantId, role: 'owner' }).first();
+    if (!owner?.phone) return; // no owner phone on file — nothing we can notify
+
+    const lang = detectReplyLanguage(listing?.raw_address || listing?.title || null);
+
+    const body = lang === 'en'
+      ? `🏗️ Builder research for "${companyName}" is done and ready for your review. Open the listing's Builder Profile in the dashboard to publish (or reject) it — it stays hidden from buyers until you do.`
+      : `🏗️ "${companyName}" ka builder research complete ho gaya hai, review ke liye ready hai. Listing ke Builder Profile mein jaake dashboard se publish (ya reject) karein — jab tak aap nahi karte, buyers ko yeh nahi dikhega.`;
+
+    await enqueueAgentWhatsappSend({ tenantId, phone: owner.phone, messageBody: body });
+  } catch (notifyErr) {
+    console.error('Failed to notify owner of completed builder research (non-fatal):', notifyErr.message);
+  }
+}
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -101,6 +129,19 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
     });
 
     console.log(`[Job ${job.id}] Builder due diligence completed for "${profile.company_name}": ${claims.length} cited claims, rating=${rating?.value ?? 'none'}, possession=${possessionRecord ? `${possessionRecord.delivered}/${possessionRecord.total}` : 'none'}.`);
+
+    // Research done + persisted above — now tell the owner there's
+    // something waiting for their review/publish decision (see file header
+    // for why this worker itself never auto-publishes).
+    const listingForNotify = listingId ? await knex('listings').where({ id: listingId }).first() : null;
+    if (listingForNotify?.tenant_id) {
+      await notifyOwnerBuilderProfileNeedsReview(knex, {
+        tenantId: listingForNotify.tenant_id,
+        companyName: profile.company_name,
+        listing: listingForNotify,
+      });
+    }
+
     return { success: true, claimCount: claims.length, hasRating: !!rating, hasPossessionRecord: !!possessionRecord };
   } catch (error) {
     console.error(`[Job ${job.id}] Builder Due Diligence research failed:`, error.message);
