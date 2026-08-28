@@ -18,6 +18,7 @@ const {
   createAdPlacement,
   updateAdPlacement,
 } = require('../controllers/adminAdsController');
+const { listAgentSignupsAdmin, approveAgentSignupAdmin, rejectAgentSignupAdmin } = require('../controllers/agentSignupController');
 // NEW — plan management (gap #3)
 const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../controllers/plansController');
 
@@ -77,6 +78,18 @@ router.patch('/tenants/:id/status', updateTenantStatus);
  * @desc    Admin-side manual plan override
  */
 router.patch('/tenants/:id/plan', updateTenantPlan);
+
+/**
+ * @route   GET /api/v1/admin/agent-signups
+ * @desc    List all pending WhatsApp "join as agent" requests across all tenants
+ * @route   POST /api/v1/admin/agent-signups/:id/approve
+ * @desc    Approve — creates agent user + sends WhatsApp notification
+ * @route   POST /api/v1/admin/agent-signups/:id/reject
+ * @desc    Reject — notifies applicant via WhatsApp
+ */
+router.get('/agent-signups', listAgentSignupsAdmin);
+router.post('/agent-signups/:id/approve', approveAgentSignupAdmin);
+router.post('/agent-signups/:id/reject', rejectAgentSignupAdmin);
 
 /**
  * @route   GET /api/v1/admin/ads

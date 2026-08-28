@@ -315,9 +315,127 @@ async function rejectAgentSignup(req, res) {
   }
 }
 
+/**
+ * GET /api/v1/admin/agent-signups
+ * Super-admin view — all pending signups across every tenant.
+ */
+async function listAgentSignupsAdmin(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  try {
+    const signups = await knex('pending_agent_signups as s')
+      .leftJoin('tenants as t', 't.id', 's.tenant_id')
+      .where({ 's.status': 'pending' })
+      .whereNotNull('s.name')
+      .whereNotNull('s.address')
+      .select(
+        's.id', 's.name', 's.phone', 's.address', 's.status', 's.created_at',
+        's.tenant_id', 't.business_name as tenant_name'
+      )
+      .orderBy('s.created_at', 'desc');
+
+    return res.status(200).json({ success: true, signups });
+  } catch (error) {
+    console.error('Failed to list agent signups (admin):', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to load agent signup requests.' } });
+  }
+}
+
+/**
+ * POST /api/v1/admin/agent-signups/:id/approve
+ * Super-admin approval — creates the agent user and sends a WhatsApp
+ * notification back to the applicant with their credentials.
+ */
+async function approveAgentSignupAdmin(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  try {
+    const signup = await knex('pending_agent_signups').where({ id }).first();
+    if (!signup) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Signup request not found.' } });
+    if (signup.status !== 'pending') {
+      return res.status(409).json({ error: { code: 'CONFLICT', message: `Request is already ${signup.status}.` } });
+    }
+
+    const normalizedPhone = normalizePhone(signup.phone);
+    const tempPassword = `Welcome${crypto.randomBytes(4).toString('hex')}!`;
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+    const placeholderEmail = `agent.${normalizedPhone.replace(/\D/g, '')}@wa-signup.plotra.internal`;
+
+    let newUser;
+    await knex.transaction(async (trx) => {
+      [newUser] = await trx('users').insert({
+        tenant_id: signup.tenant_id,
+        name: signup.name,
+        email: placeholderEmail,
+        password_hash: hashedPassword,
+        role: 'agent',
+        phone: normalizedPhone,
+      }).returning(['id', 'name', 'email', 'phone', 'role']);
+
+      await trx('pending_agent_signups').where({ id }).update({ status: 'approved', updated_at: trx.fn.now() });
+    });
+
+    // Notify agent via WhatsApp
+    const approvalMessage =
+      `✅ *Congratulations, ${signup.name}!*\n\n` +
+      `Your request to join as a Plotra agent has been *approved*.\n\n` +
+      `You can now send property details to this number to create listings.\n\n` +
+      `*Your login credentials:*\n` +
+      `📧 Email: ${placeholderEmail}\n` +
+      `🔑 Password: ${tempPassword}\n\n` +
+      `Please change your password after first login at plotraa.com`;
+
+    await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: normalizedPhone, messageBody: approvalMessage });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Agent approved — WhatsApp notification sent.',
+      user: newUser,
+      temporaryPassword: tempPassword,
+    });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered.' } });
+    }
+    console.error('Failed to approve agent signup (admin):', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to approve this signup request.' } });
+  }
+}
+
+/**
+ * POST /api/v1/admin/agent-signups/:id/reject
+ * Super-admin rejection — notifies the applicant via WhatsApp.
+ */
+async function rejectAgentSignupAdmin(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  try {
+    const signup = await knex('pending_agent_signups').where({ id }).first();
+    if (!signup) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Signup request not found.' } });
+    if (signup.status !== 'pending') {
+      return res.status(409).json({ error: { code: 'CONFLICT', message: `Request is already ${signup.status}.` } });
+    }
+
+    await knex('pending_agent_signups').where({ id }).update({ status: 'rejected', updated_at: knex.fn.now() });
+
+    const rejectionMessage =
+      `We've reviewed your request to join as a Plotra agent and are unable to approve it at this time. ` +
+      `If you have questions, please reply to this message.`;
+
+    await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: normalizePhone(signup.phone), messageBody: rejectionMessage });
+
+    return res.status(200).json({ success: true, message: 'Signup request rejected — applicant notified.' });
+  } catch (error) {
+    console.error('Failed to reject agent signup (admin):', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to reject this signup request.' } });
+  }
+}
+
 module.exports = {
   handleAgentSignupMessage,
   listAgentSignups,
   approveAgentSignup,
   rejectAgentSignup,
+  listAgentSignupsAdmin,
+  approveAgentSignupAdmin,
+  rejectAgentSignupAdmin,
 };
