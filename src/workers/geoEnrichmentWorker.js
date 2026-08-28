@@ -78,7 +78,23 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   try {
     // 1. Dispatch lookup request directly to Google Geocoding engine
     const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=${components}${boundsQueryParam}&key=${targetApiKey}`;
-    const response = await axios.get(geoUrl);
+    let response = await axios.get(geoUrl);
+
+    // If the pincode-scoped lookup returned no results, retry without it.
+    // A valid locality ("Focal Point, Chandigarh Road, Ludhiana") can get
+    // ZERO_RESULTS when the strict postal_code component filter is applied,
+    // because Google's index doesn't always associate a specific sub-locality
+    // name with the exact PIN even when the area is otherwise geocodable.
+    // Falling back to bounds bias (soft, not a hard filter) recovers these
+    // cases without widening the search to the whole country.
+    if (response.data.status !== 'OK' && listingData.pincode) {
+      const fallbackBoundsParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
+      const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
+      const fallbackResponse = await axios.get(fallbackUrl);
+      if (fallbackResponse.data.status === 'OK') {
+        response = fallbackResponse;
+      }
+    }
 
     if (response.data.status !== 'OK') {
       throw new Error(`Google Maps Platform rejected lookup parameter with status code: ${response.data.status}`);
