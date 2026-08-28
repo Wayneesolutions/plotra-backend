@@ -69,7 +69,7 @@ const redisConnection = {
 };
 const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
 
-const LIVE_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'awaiting_approval'];
+const LIVE_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'confirming_address', 'awaiting_approval'];
 
 // Short delay so a few rapid-fire agent messages collapse into one GPT
 // extraction call — a cost optimization only, NOT a correctness mechanism:
@@ -224,6 +224,34 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           .returning(['id', 'status', 'listing_id']);
       }
 
+      if (draft.status === 'confirming_address') {
+        await trx('agent_draft_messages').insert({
+          draft_id: draft.id,
+          direction: 'inbound',
+          body: incomingText,
+          bsp_message_id: bspMessageId || null,
+        });
+
+        if (isApprovalReply(incomingText)) {
+          // Agent confirmed the resolved address — queue send-preview now.
+          // sendPreviewAndAwaitApproval (agentIntakeWorker.js) will flip
+          // the draft to awaiting_approval; don't change status here.
+          return { action: 'send-preview', draftId: draft.id, listingId: draft.listing_id };
+        }
+
+        // Not a "yes" — treat as a corrected address. Roll back to collecting
+        // and re-run extraction over the full text so the new address
+        // replaces the one Google got wrong.
+        await trx('agent_listing_drafts')
+          .where({ id: draft.id })
+          .update({
+            status: 'collecting',
+            accumulated_text: trx.raw(`TRIM(accumulated_text || ' ' || ?)`, [incomingText]),
+            updated_at: trx.fn.now(),
+          });
+        return { action: 'extract', draftId: draft.id };
+      }
+
       if (draft.status === 'awaiting_approval') {
         if (isApprovalReply(incomingText)) {
           await trx('agent_draft_messages').insert({
@@ -350,6 +378,11 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody });
     } else if (result.action === 'extract') {
       await enqueueExtractJob(result.draftId);
+    } else if (result.action === 'send-preview') {
+      await agentIntakeQueue.add('send-preview', { draftId: result.draftId, listingId: result.listingId }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
     }
 
     return res.status(200).json({ success: true });
