@@ -7,7 +7,9 @@ const { getDashboardAnalytics } = require('../controllers/analyticsController');
 const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
 const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../controllers/builderProfileController');
-const { inviteTenantUser, listTenantUsers } = require('../controllers/userInviteController');
+const { inviteTenantUser, listTenantUsers, updateTenantUser } = require('../controllers/userInviteController');
+const { listAgentSignups, approveAgentSignup, rejectAgentSignup } = require('../controllers/agentSignupController');
+const { getWebChatCode, regenerateWebChatCode } = require('../controllers/webChatCodeController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
@@ -117,6 +119,40 @@ router.post('/users/invite', authGuard, tenantTransaction, inviteTenantUser);
  * @access  Protected
  */
 router.get('/users', authGuard, tenantTransaction, listTenantUsers);
+
+/**
+ * @route   PATCH /api/v1/dashboard/users/:id
+ * @desc    Add/change a team member's phone (WhatsApp listing intake) after
+ *          creation — owner only, scoped to the owner's own tenant
+ * @access  Protected (owner role)
+ */
+router.patch('/users/:id', authGuard, tenantTransaction, updateTenantUser);
+
+/**
+ * @route   GET /api/v1/dashboard/agent-signups
+ * @desc    List this tenant's pending, fully-collected "join as agent"
+ *          self-registration requests — owner only
+ * @route   POST /api/v1/dashboard/agent-signups/:id/approve
+ * @desc    Approve a request — creates the real users row (role='agent'),
+ *          immediately live for WhatsApp agent-intake
+ * @route   POST /api/v1/dashboard/agent-signups/:id/reject
+ * @desc    Reject a request
+ * @access  Protected (owner role)
+ */
+router.get('/agent-signups', authGuard, tenantTransaction, listAgentSignups);
+router.post('/agent-signups/:id/approve', authGuard, tenantTransaction, approveAgentSignup);
+router.post('/agent-signups/:id/reject', authGuard, tenantTransaction, rejectAgentSignup);
+
+/**
+ * @route   GET /api/v1/dashboard/web-chat-code
+ * @desc    This tenant's web chat widget activation code (generated on
+ *          first request if not already set) — owner only
+ * @route   POST /api/v1/dashboard/web-chat-code/regenerate
+ * @desc    Rotate the code
+ * @access  Protected (owner role)
+ */
+router.get('/web-chat-code', authGuard, tenantTransaction, getWebChatCode);
+router.post('/web-chat-code/regenerate', authGuard, tenantTransaction, regenerateWebChatCode);
 
 /**
  * @route   GET  /api/v1/dashboard/listings/:id/media

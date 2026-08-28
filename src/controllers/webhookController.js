@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
 const { handleAgentIntakeMessage, handleAgentIntakePhoto } = require('./agentIntakeController');
+const { handleAgentSignupMessage } = require('./agentSignupController');
 
 // Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
@@ -132,6 +133,23 @@ async function handleInboundWhatsApp(req, res) {
   if (!incomingText) {
     return res.status(200).json({ success: true, warning: 'Acknowledged non-text buyer event.' });
   }
+
+  // Agent self-registration: a "join as agent" message (or a follow-up in
+  // an already-started signup conversation) from a phone that ISN'T a
+  // known agent yet. Checked before the buyer/lead path so it isn't
+  // mistaken for a buyer inquiry. Claims the message (and responds) only
+  // when it's actually signup-related — otherwise the buyer path below
+  // runs completely unchanged, exactly as before this flow existed.
+  const signupHandled = await handleAgentSignupMessage({
+    knex,
+    phone,
+    leadName,
+    incomingText: incomingText.trim(),
+    receivingPhoneNumberId,
+    receivingNumber,
+    res,
+  });
+  if (signupHandled) return;
 
   try {
     const resolvedContext = await knex.transaction(async (trx) => {

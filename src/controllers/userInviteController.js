@@ -98,4 +98,57 @@ async function listTenantUsers(req, res) {
   }
 }
 
-module.exports = { inviteTenantUser, listTenantUsers };
+/**
+ * PATCH /api/v1/dashboard/users/:id
+ * Lets the owner add/change a team member's phone after creation — until
+ * now the only way to set users.phone was at invite time
+ * (inviteTenantUser above), so a mistyped or missing number was stuck
+ * forever. Scoped to `phone` only; deliberately not a general user-edit
+ * endpoint (name/email/role changes aren't asked for here).
+ */
+async function updateTenantUser(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { tenant_id, role } = req.user;
+  const { id } = req.params;
+  const { phone } = req.body;
+
+  if (role !== 'owner') {
+    return res.status(403).json({
+      error: { code: 'FORBIDDEN', message: 'Only tenant owners can edit team members.' }
+    });
+  }
+
+  if (phone === undefined) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: 'Phone is required.' }
+    });
+  }
+
+  try {
+    const targetUser = await knex('users').where({ id, tenant_id }).first();
+    if (!targetUser) {
+      return res.status(404).json({
+        error: { code: 'NOT_FOUND', message: 'Team member not found.' }
+      });
+    }
+
+    const [updatedUser] = await knex('users')
+      .where({ id, tenant_id })
+      .update({ phone: phone ? normalizePhone(phone) : null })
+      .returning(['id', 'name', 'email', 'phone', 'role']);
+
+    return res.status(200).json({ success: true, user: updatedUser });
+  } catch (error) {
+    if (error.code === '23505') { // unique_violation — phone already registered to someone else
+      return res.status(409).json({
+        error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered to another account.' }
+      });
+    }
+    console.error('Failed to update tenant user:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to update the team member.' }
+    });
+  }
+}
+
+module.exports = { inviteTenantUser, listTenantUsers, updateTenantUser };

@@ -4,6 +4,7 @@ const { isApprovalReply } = require('../utils/agentReplyIntent');
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
+const { extractListingFields } = require('../services/listingExtractionService');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -107,6 +108,48 @@ function buildConfirmationMessage(publicSlug, lang) {
     : `Live ho gaya! Yeh raha aapka link, kisi ko bhi bhej sakte ho:\n${link}`;
 }
 
+function buildStillAwaitingApprovalMessage(lang) {
+  return lang === 'en'
+    ? `Your previous listing is still awaiting approval. Reply "yes" or "approve" to publish it, or send the details you'd like to change.`
+    : `Aapki pichli listing abhi approval ka wait kar rahi hai. "haan" ya "approve" reply karke publish karein, ya jo detail badalni hai wo bhejein.`;
+}
+
+/**
+ * True if a GPT extraction pass over a single message came back with
+ * nothing at all — e.g. "Hello", a thank-you, an emoji. Used to tell a
+ * non-informative reply apart from an actual correction while a draft is
+ * awaiting_approval, so a stray "Hello" doesn't get silently glued onto
+ * accumulated_text and re-trigger extraction.
+ */
+function hasNoExtractableInfo(fields) {
+  return Object.values(fields).every((v) => v === null || v === undefined || String(v).trim() === '');
+}
+
+function normalizeAddressText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Heuristic for "this message is about a different property" vs. "this is
+ * a correction to the one already awaiting approval." Deliberately loose:
+ * treats one address as a match for another if either contains the other
+ * once normalized (so "DLF Chandigarh One" still matches "DLF Chandigarh
+ * One, Tower 3", and "Sector 45 Mohali" matches "sector-45, Mohali!!").
+ * Only called when the new message actually stated a raw_address/building
+ * name — if either side is missing, there's nothing to compare, so this
+ * assumes it's the same property rather than guessing.
+ */
+function isDifferentProperty(newAddress, existingAddress) {
+  const a = normalizeAddressText(newAddress);
+  const b = normalizeAddressText(existingAddress);
+  if (!a || !b) return false;
+  if (a === b) return false;
+  return !a.includes(b) && !b.includes(a);
+}
+
 /**
  * Entry point called from webhookController.js when an inbound WhatsApp
  * sender's phone matches a registered agent (users.phone) — the buyer/lead
@@ -123,6 +166,42 @@ function buildConfirmationMessage(publicSlug, lang) {
  */
 async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMessageId, res }) {
   try {
+    // Peek (no lock) at whether this agent currently has a draft sitting in
+    // awaiting_approval. If so, and this isn't a plain "yes", we need to
+    // know what — if anything — THIS message alone actually says before we
+    // decide whether to remind, correct, or start a fresh draft. That GPT
+    // call must happen BEFORE the row-locking transaction below: holding a
+    // DB connection + `FOR UPDATE` lock open across an external API
+    // round-trip is the anti-pattern the rest of this codebase avoids
+    // (BullMQ enqueues are deliberately kept outside the transaction for
+    // the same reason). The authoritative status check still happens
+    // inside the transaction; this is discarded if the locked read finds
+    // the status already moved on.
+    let awaitingApprovalContext = null;
+    if (!isApprovalReply(incomingText)) {
+      const draftPeek = await knex('agent_listing_drafts')
+        .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id, status: 'awaiting_approval' })
+        .first();
+
+      if (draftPeek) {
+        try {
+          const messageFields = await extractListingFields(incomingText);
+          const hasInfo = !hasNoExtractableInfo(messageFields);
+          let differentProperty = false;
+          if (hasInfo && draftPeek.listing_id) {
+            const existingListing = await knex('listings').where({ id: draftPeek.listing_id }).first();
+            differentProperty = isDifferentProperty(messageFields.raw_address, existingListing?.raw_address);
+          }
+          awaitingApprovalContext = { hasInfo, differentProperty };
+        } catch (err) {
+          console.error('Agent intake: extraction of awaiting-approval reply failed, falling back to correction:', err.message);
+          // GPT unavailable — fall back to the old safe behavior (treat as
+          // a same-property correction) rather than silently dropping it.
+          awaitingApprovalContext = { hasInfo: true, differentProperty: false };
+        }
+      }
+    }
+
     const result = await knex.transaction(async (trx) => {
       if (bspMessageId) {
         const dup = await trx('agent_draft_messages')
@@ -145,15 +224,15 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           .returning(['id', 'status', 'listing_id']);
       }
 
-      await trx('agent_draft_messages').insert({
-        draft_id: draft.id,
-        direction: 'inbound',
-        body: incomingText,
-        bsp_message_id: bspMessageId || null,
-      });
-
       if (draft.status === 'awaiting_approval') {
         if (isApprovalReply(incomingText)) {
+          await trx('agent_draft_messages').insert({
+            draft_id: draft.id,
+            direction: 'inbound',
+            body: incomingText,
+            bsp_message_id: bspMessageId || null,
+          });
+
           const [updatedListing] = await trx('listings')
             .where({ id: draft.listing_id, status: 'awaiting_approval' })
             .update({ status: 'active', updated_at: trx.fn.now() })
@@ -175,10 +254,68 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
         }
 
-        // Non-approval reply while awaiting approval — treat as a
-        // correction: fall back to collecting and re-run extraction over
-        // the full accumulated history (draft.listing_id stays set, so
-        // agentIntakeWorker.js takes the update-existing-listing branch).
+        // Re-check against the fresh, lock-guaranteed status — if the peek
+        // above raced with something that moved this draft on (or never
+        // saw it as awaiting_approval in the first place), fall through to
+        // the generic append-and-extract branch below instead of trusting
+        // stale context.
+        if (awaitingApprovalContext) {
+          if (!awaitingApprovalContext.hasInfo) {
+            // Non-informative reply ("Hello", a thank-you, etc.) — remind
+            // them the previous listing is still pending. Don't touch
+            // accumulated_text or re-run extraction.
+            await trx('agent_draft_messages').insert({
+              draft_id: draft.id,
+              direction: 'inbound',
+              body: incomingText,
+              bsp_message_id: bspMessageId || null,
+            });
+
+            const reminderBody = buildStillAwaitingApprovalMessage(detectReplyLanguage(incomingText));
+            await logAgentOutboundMessage(trx, { draftId: draft.id, body: reminderBody });
+            return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: reminderBody };
+          }
+
+          if (awaitingApprovalContext.differentProperty) {
+            // A genuinely different property, not a correction to the one
+            // awaiting approval — retire the old draft instead of merging
+            // this message's text into its accumulated_text, and start a
+            // clean one for it.
+            await trx('agent_listing_drafts')
+              .where({ id: draft.id })
+              .update({ status: 'abandoned', updated_at: trx.fn.now() });
+
+            const [newDraft] = await trx('agent_listing_drafts')
+              .insert({
+                tenant_id: agentUser.tenant_id,
+                user_id: agentUser.id,
+                status: 'collecting',
+                accumulated_text: incomingText,
+              })
+              .returning(['id']);
+
+            await trx('agent_draft_messages').insert({
+              draft_id: newDraft.id,
+              direction: 'inbound',
+              body: incomingText,
+              bsp_message_id: bspMessageId || null,
+            });
+
+            return { action: 'extract', draftId: newDraft.id };
+          }
+        }
+
+        await trx('agent_draft_messages').insert({
+          draft_id: draft.id,
+          direction: 'inbound',
+          body: incomingText,
+          bsp_message_id: bspMessageId || null,
+        });
+
+        // Same-property correction — fall back to collecting and re-run
+        // extraction over the full accumulated history (draft.listing_id
+        // stays set, so agentIntakeWorker.js takes the update-existing-
+        // listing branch).
         await trx('agent_listing_drafts')
           .where({ id: draft.id })
           .update({
@@ -188,6 +325,13 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           });
         return { action: 'extract', draftId: draft.id };
       }
+
+      await trx('agent_draft_messages').insert({
+        draft_id: draft.id,
+        direction: 'inbound',
+        body: incomingText,
+        bsp_message_id: bspMessageId || null,
+      });
 
       // collecting / extracting / creating / enriching — append and
       // (re)schedule extraction. A message arriving mid-creation/enrichment

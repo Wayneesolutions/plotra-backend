@@ -1,5 +1,15 @@
 # Plotra Web Chat — Backend Endpoint Spec
 
+> **Historical / superseded.** `POST /api/v1/chat/web` (and `/web/photo`)
+> described below are built and live exactly as specified here. The static
+> `plotra-web-chat.html` page this doc originally targeted has been
+> **retired and deleted** — the widget now lives in `plotra-frontend` as
+> `ChatWidget.jsx`, mounted at the `/widget` route (iframe-embeddable on a
+> tenant's own site). It also now requires a per-tenant activation code
+> (`POST /api/v1/chat/web/activate`, then `tenant_code` on every call) —
+> see `HANDOVER.md` §1.4/§1.5. Kept below for the original endpoint
+> contract, which hasn't changed.
+
 The web chat page (`plotra-web-chat.html`) is fully built and functional on the
 frontend. It POSTs to one endpoint that doesn't exist yet. This is the only
 backend work needed to make it live.
@@ -81,14 +91,8 @@ to log more detail server-side.
 
 ## Once deployed
 
-Update this one line in `plotra-web-chat.html`:
-
-```js
-window.PLOTRA_CONFIG = {
-  API_ENDPOINT: "https://plotra.wayneesolutions.com/api/v1/chat/web", // already correct if you use this path
-  ...
-};
-```
-
-No other frontend change should be needed — the page already POSTs to
-this exact path and renders whatever comes back.
+Superseded — see the note at the top of this doc. There's no config line
+to update anymore: `ChatWidget.jsx` (plotra-frontend, `/widget` route)
+calls `/api/v1/chat/web` via the same `apiClient` every other dashboard
+call uses (`VITE_API_BASE_URL`), and identifies the tenant via the
+activation code rather than a hardcoded endpoint override.
