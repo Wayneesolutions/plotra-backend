@@ -6,6 +6,7 @@ const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { lookupResolvedLocality, recordResolvedLocality } = require('../services/resolvedLocalityService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -76,33 +77,58 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   const boundsQueryParam = (!listingData.pincode && geoBiasBounds) ? `&bounds=${geoBiasBounds}` : '';
 
   try {
-    // 1. Dispatch lookup request directly to Google Geocoding engine
-    const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=${components}${boundsQueryParam}&key=${targetApiKey}`;
-    let response = await axios.get(geoUrl);
+    // 0. Self-learning cache check — before ever calling Google, see if a
+    // human already confirmed a location for this exact building_name or
+    // raw_address on a past listing for this tenant (see
+    // resolvedLocalityService.js / migration 20260828_04). A hit here is
+    // categorically more trustworthy than a fresh Google geocode: it's a
+    // coordinate a real person looked at a map and confirmed, not a
+    // prominence-ranked guess — and it costs zero API calls. Only the
+    // pincode/bounds-biased Google flow below is skipped on a hit; the
+    // downstream steps (persist, regenerate satellite/street images,
+    // re-queue landmarks) are identical either way.
+    const cacheHit = await lookupResolvedLocality(knex, {
+      tenantId: listingData.tenant_id,
+      buildingName: listingData.building_name,
+      rawAddress,
+    });
 
-    // If the pincode-scoped lookup returned no results, retry without it.
-    // A valid locality ("Focal Point, Chandigarh Road, Ludhiana") can get
-    // ZERO_RESULTS when the strict postal_code component filter is applied,
-    // because Google's index doesn't always associate a specific sub-locality
-    // name with the exact PIN even when the area is otherwise geocodable.
-    // Falling back to bounds bias (soft, not a hard filter) recovers these
-    // cases without widening the search to the whole country.
-    if (response.data.status !== 'OK' && listingData.pincode) {
-      const fallbackBoundsParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
-      const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
-      const fallbackResponse = await axios.get(fallbackUrl);
-      if (fallbackResponse.data.status === 'OK') {
-        response = fallbackResponse;
+    let lat, lng, formattedAddress;
+
+    if (cacheHit) {
+      console.log(`[Job ${job.id}] Resolved-locality cache HIT (${cacheHit.key_type}="${cacheHit.display_name}", confidence=${cacheHit.confidence}) — skipping Google geocode.`);
+      lat = Number(cacheHit.lat);
+      lng = Number(cacheHit.lng);
+      formattedAddress = cacheHit.formatted_address || null;
+    } else {
+      // 1. Dispatch lookup request directly to Google Geocoding engine
+      const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=${components}${boundsQueryParam}&key=${targetApiKey}`;
+      let response = await axios.get(geoUrl);
+
+      // If the pincode-scoped lookup returned no results, retry without it.
+      // A valid locality ("Focal Point, Chandigarh Road, Ludhiana") can get
+      // ZERO_RESULTS when the strict postal_code component filter is applied,
+      // because Google's index doesn't always associate a specific sub-locality
+      // name with the exact PIN even when the area is otherwise geocodable.
+      // Falling back to bounds bias (soft, not a hard filter) recovers these
+      // cases without widening the search to the whole country.
+      if (response.data.status !== 'OK' && listingData.pincode) {
+        const fallbackBoundsParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
+        const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
+        const fallbackResponse = await axios.get(fallbackUrl);
+        if (fallbackResponse.data.status === 'OK') {
+          response = fallbackResponse;
+        }
       }
-    }
 
-    if (response.data.status !== 'OK') {
-      throw new Error(`Google Maps Platform rejected lookup parameter with status code: ${response.data.status}`);
-    }
+      if (response.data.status !== 'OK') {
+        throw new Error(`Google Maps Platform rejected lookup parameter with status code: ${response.data.status}`);
+      }
 
-    const result = response.data.results[0];
-    const formattedAddress = result.formatted_address;
-    const { lat, lng } = result.geometry.location;
+      const result = response.data.results[0];
+      formattedAddress = result.formatted_address;
+      ({ lat, lng } = result.geometry.location);
+    }
 
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
     // street-view fallback images, and re-queue landmark + local-

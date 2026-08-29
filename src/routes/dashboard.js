@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authGuard = require('../middleware/auth');
 const tenantTransaction = require('../middleware/tenantTransaction');
-const { createListing, getListings, updateListing, deleteListing } = require('../controllers/listingController');
+const { createListing, getListings, updateListing, deleteListing, getResolvedLocalities } = require('../controllers/listingController');
 const { getDashboardAnalytics } = require('../controllers/analyticsController');
 const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
@@ -43,6 +43,7 @@ router.post('/listings', authGuard, tenantTransaction, createListing);
  * @access  Protected (Requires active Dealer/Agent Auth Bearer token)
  */
 router.get('/listings', authGuard, tenantTransaction, getListings);
+router.get('/resolved-localities', authGuard, tenantTransaction, getResolvedLocalities);
 
 /**
  * @route   PATCH /api/v1/dashboard/listings/:id

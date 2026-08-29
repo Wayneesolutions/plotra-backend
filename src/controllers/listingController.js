@@ -281,4 +281,35 @@ async function deleteListing(req, res) {
   }
 }
 
-module.exports = { createListing, getListings, updateListing, deleteListing };
+/**
+ * GET /api/v1/dashboard/resolved-localities
+ * Read-only visibility into the self-learning location cache (see
+ * resolvedLocalityService.js / migration 20260828_04) — lets an owner see
+ * which building/locality names this tenant's dealers have collectively
+ * "taught" the system, and how many times each one has been confirmed.
+ * Sorted by confidence desc — the entries most worth trusting float to
+ * the top, which is also the most useful order for spotting a wrong one
+ * early (a confidence-1 entry that's obviously wrong is cheap to ignore;
+ * a wrong entry with rising confidence is worth checking).
+ */
+async function getResolvedLocalities(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { tenant_id } = req.user;
+
+  try {
+    const localities = await knex('resolved_localities')
+      .where({ tenant_id })
+      .select('id', 'key_type', 'display_name', 'lat', 'lng', 'formatted_address', 'source', 'confidence', 'last_confirmed_at')
+      .orderBy('confidence', 'desc')
+      .limit(200);
+
+    return res.status(200).json({ success: true, localities });
+  } catch (error) {
+    console.error('Failed to fetch resolved localities:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to fetch resolved localities.' }
+    });
+  }
+}
+
+module.exports = { createListing, getListings, updateListing, deleteListing, getResolvedLocalities };

@@ -10,6 +10,7 @@
 const IORedis = require('ioredis');
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
 const { extractListingFields, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
+const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
 const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
@@ -272,6 +273,7 @@ async function handleWebChatMessage(req, res) {
         if (listing.status !== 'active') {
           await knex('listings').where({ id: session.listingId }).update({ status: 'active', updated_at: knex.fn.now() });
           listing = await knex('listings').where({ id: session.listingId }).first();
+          await recordImplicitApprovalIfUncorrected(knex, listing);
         }
         session.awaitingApproval = false;
         await saveSession(sessionId, session);
@@ -306,6 +308,7 @@ async function handleWebChatMessage(req, res) {
         if (extracted.plot_area) patch.plot_area = extracted.plot_area.trim();
         if (extracted.property_type) patch.property_type = extracted.property_type.trim();
         if (extracted.description) patch.description = extracted.description.trim();
+        if (extracted.building_name) patch.building_name = extracted.building_name.trim();
 
         // Neither the address nor the pincode were ever in this patch
         // before — meaning even a same-property, GPT-confirmed correction
@@ -410,6 +413,7 @@ async function handleWebChatMessage(req, res) {
       propertyType: extracted.property_type,
       description: extracted.description,
       pincode: extracted.pincode,
+      buildingName: extracted.building_name,
     });
 
     session.listingId = newListing.id;

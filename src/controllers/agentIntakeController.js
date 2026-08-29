@@ -5,6 +5,7 @@ const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage }
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
 const { extractListingFields } = require('../services/listingExtractionService');
+const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -115,6 +116,21 @@ function buildStillAwaitingApprovalMessage(lang) {
 }
 
 /**
+ * Sent instead of buildStillAwaitingApprovalMessage() when this is the
+ * SECOND (or later) consecutive non-informative reply in a row — e.g. the
+ * dealer already said "it's wrong" once and is now saying "how do I fix
+ * it" without actually giving a corrected value. Repeating the identical
+ * generic line a second time reads as the bot being stuck/broken; this
+ * version is explicit about what kind of reply actually moves things
+ * forward, with a concrete example.
+ */
+function buildNeedsCorrectionDetailMessage(lang) {
+  return lang === 'en'
+    ? `I still don't have a corrected value to change — please send the actual detail, e.g. "Ludhiana" or "price 55 lakh". Or reply "yes" to publish it as-is.`
+    : `Mujhe abhi tak sahi/corrected value nahi mili — please asli detail bhejein, jaise "Ludhiana" ya "price 55 lakh". Ya "yes" bolke isko jaisa hai waisa publish kar dein.`;
+}
+
+/**
  * True if a GPT extraction pass over a single message came back with
  * nothing at all — e.g. "Hello", a thank-you, an emoji. Used to tell a
  * non-informative reply apart from an actual correction while a draft is
@@ -185,12 +201,42 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
 
       if (draftPeek) {
         try {
-          const messageFields = await extractListingFields(incomingText);
+          // Fetch the listing's current values FIRST and feed them to
+          // extraction as correction context — without this, a short reply
+          // like "wrong information i typed ludhiana" has no way to be read
+          // as "replace raw_address with Ludhiana" (see
+          // listingExtractionService.js's correctionContext param), and GPT
+          // extracts nothing, which is what caused the identical-reminder
+          // loop dealers were hitting on a genuine correction attempt.
+          const existingListingForContext = draftPeek.listing_id
+            ? await knex('listings').where({ id: draftPeek.listing_id }).first()
+            : null;
+          const correctionContext = existingListingForContext
+            ? {
+                raw_address: existingListingForContext.raw_address,
+                building_name: existingListingForContext.building_name,
+                price: existingListingForContext.price,
+                property_type: existingListingForContext.property_type,
+              }
+            : undefined;
+
+          const messageFields = await extractListingFields(incomingText, correctionContext);
           const hasInfo = !hasNoExtractableInfo(messageFields);
+
+          // A bare correction fragment ("Ludhiana", "60 lakh") only ever
+          // populates ONE field and naturally won't textually overlap with
+          // the existing raw_address/building_name (that's the whole point
+          // — it's supplying what was MISSING). Only run the "is this a
+          // different property" text-overlap check against something that
+          // actually looks like a full, self-contained new listing
+          // description (has both an address and a property type stated) —
+          // otherwise a plain correction fragment would wrongly get flagged
+          // as "different property" and the draft would be abandoned
+          // instead of corrected.
+          const looksLikeFullNewListing = hasInfo && !!messageFields.raw_address && !!messageFields.property_type;
           let differentProperty = false;
-          if (hasInfo && draftPeek.listing_id) {
-            const existingListing = await knex('listings').where({ id: draftPeek.listing_id }).first();
-            differentProperty = isDifferentProperty(messageFields.raw_address, existingListing?.raw_address);
+          if (looksLikeFullNewListing && existingListingForContext) {
+            differentProperty = isDifferentProperty(messageFields.raw_address, existingListingForContext.raw_address);
           }
           awaitingApprovalContext = { hasInfo, differentProperty };
         } catch (err) {
@@ -254,7 +300,9 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const [updatedListing] = await trx('listings')
           .where({ id: draft.listing_id })
           .update({ status: 'active', updated_at: trx.fn.now() })
-          .returning(['id', 'public_slug']);
+          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
+
+        await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
         await trx('agent_listing_drafts')
           .where({ id: draft.id })
@@ -278,13 +326,15 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const [updatedListing] = await trx('listings')
             .where({ id: draft.listing_id, status: 'awaiting_approval' })
             .update({ status: 'active', updated_at: trx.fn.now() })
-            .returning(['id', 'public_slug']);
+            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
 
           if (!updatedListing) {
             // Already approved (or otherwise moved on) by a prior message —
             // treat as a harmless no-op ack, not an error.
             return { action: 'noop' };
           }
+
+          await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
           await trx('agent_listing_drafts')
             .where({ id: draft.id })
@@ -303,9 +353,14 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         // stale context.
         if (awaitingApprovalContext) {
           if (!awaitingApprovalContext.hasInfo) {
-            // Non-informative reply ("Hello", a thank-you, etc.) — remind
-            // them the previous listing is still pending. Don't touch
-            // accumulated_text or re-run extraction.
+            // Non-informative reply ("Hello", a thank-you, a "this is
+            // wrong" with no actual replacement value, etc.) — remind them
+            // the previous listing is still pending. Don't touch
+            // accumulated_text or re-run extraction. First time, the
+            // generic reminder is fine; from the SECOND consecutive one
+            // onward, switch to a message that spells out what kind of
+            // reply actually moves things forward — repeating the same
+            // generic line verbatim reads as the bot being stuck.
             await trx('agent_draft_messages').insert({
               draft_id: draft.id,
               direction: 'inbound',
@@ -313,7 +368,15 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
               bsp_message_id: bspMessageId || null,
             });
 
-            const reminderBody = buildStillAwaitingApprovalMessage(detectReplyLanguage(incomingText));
+            const priorCount = draft.noninformative_reply_count || 0;
+            await trx('agent_listing_drafts')
+              .where({ id: draft.id })
+              .update({ noninformative_reply_count: priorCount + 1, updated_at: trx.fn.now() });
+
+            const lang = detectReplyLanguage(incomingText);
+            const reminderBody = priorCount === 0
+              ? buildStillAwaitingApprovalMessage(lang)
+              : buildNeedsCorrectionDetailMessage(lang);
             await logAgentOutboundMessage(trx, { draftId: draft.id, body: reminderBody });
             return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: reminderBody };
           }
@@ -357,12 +420,14 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         // Same-property correction — fall back to collecting and re-run
         // extraction over the full accumulated history (draft.listing_id
         // stays set, so agentIntakeWorker.js takes the update-existing-
-        // listing branch).
+        // listing branch). Reset noninformative_reply_count — this reply
+        // DID have real, extractable info, so the streak is over.
         await trx('agent_listing_drafts')
           .where({ id: draft.id })
           .update({
             status: 'collecting',
             accumulated_text: trx.raw(`TRIM(accumulated_text || ' ' || ?)`, [incomingText]),
+            noninformative_reply_count: 0,
             updated_at: trx.fn.now(),
           });
         return { action: 'extract', draftId: draft.id };
