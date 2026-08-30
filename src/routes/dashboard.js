@@ -10,6 +10,7 @@ const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../contr
 const { inviteTenantUser, listTenantUsers, updateTenantUser } = require('../controllers/userInviteController');
 const { listAgentSignups, approveAgentSignup, rejectAgentSignup } = require('../controllers/agentSignupController');
 const { getWebChatCode, regenerateWebChatCode } = require('../controllers/webChatCodeController');
+const { listWhatsappNumbers, addWhatsappNumber, removeWhatsappNumber, setDefaultWhatsappNumber } = require('../controllers/whatsappNumberController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
@@ -154,6 +155,23 @@ router.post('/agent-signups/:id/reject', authGuard, tenantTransaction, rejectAge
  */
 router.get('/web-chat-code', authGuard, tenantTransaction, getWebChatCode);
 router.post('/web-chat-code/regenerate', authGuard, tenantTransaction, regenerateWebChatCode);
+
+/**
+ * @route   GET    /api/v1/dashboard/whatsapp-numbers
+ * @desc    List this tenant's buyer-facing WhatsApp number(s) — what the
+ *          public "Get full details on WhatsApp" CTA and automated
+ *          callback follow-up resolve to (see publicListingController.js).
+ *          Distinct from POST /auth/update-phone (a user's own intake number).
+ * @route   POST   /api/v1/dashboard/whatsapp-numbers
+ * @desc    Add a number, capped by plans.max_whatsapp_numbers — owner only
+ * @route   DELETE /api/v1/dashboard/whatsapp-numbers/:id
+ * @route   PATCH  /api/v1/dashboard/whatsapp-numbers/:id/default
+ * @access  Protected (owner role)
+ */
+router.get('/whatsapp-numbers', authGuard, tenantTransaction, listWhatsappNumbers);
+router.post('/whatsapp-numbers', authGuard, tenantTransaction, addWhatsappNumber);
+router.delete('/whatsapp-numbers/:id', authGuard, tenantTransaction, removeWhatsappNumber);
+router.patch('/whatsapp-numbers/:id/default', authGuard, tenantTransaction, setDefaultWhatsappNumber);
 
 /**
  * @route   GET  /api/v1/dashboard/listings/:id/media

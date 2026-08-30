@@ -125,7 +125,8 @@ async function getBillingStatus(req, res) {
         'tenants.plan',
         'tenants.subscription_status',
         'tenants.current_period_end',
-        'plans.multi_agent_whatsapp'
+        'plans.multi_agent_whatsapp',
+        'plans.max_whatsapp_numbers'
       )
       .where({ 'tenants.id': req.user.tenant_id })
       .first();

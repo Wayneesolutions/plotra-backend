@@ -151,16 +151,28 @@ function normalizeAddressText(text) {
 /**
  * Heuristic for "this message is about a different property" vs. "this is
  * a correction to the one already awaiting approval." Deliberately loose:
- * treats one address as a match for another if either contains the other
- * once normalized (so "DLF Chandigarh One" still matches "DLF Chandigarh
- * One, Tower 3", and "Sector 45 Mohali" matches "sector-45, Mohali!!").
- * Only called when the new message actually stated a raw_address/building
- * name — if either side is missing, there's nothing to compare, so this
+ * treats one address/building name as a match for another if either
+ * contains the other once normalized (so "DLF Chandigarh One" still
+ * matches "DLF Chandigarh One, Tower 3", and "Sector 45 Mohali" matches
+ * "sector-45, Mohali!!"). Only called when the new message actually stated
+ * a raw_address/building name — if there's nothing to compare, this
  * assumes it's the same property rather than guessing.
+ *
+ * Building name is checked first and, when both sides have one, decides
+ * the result on its own — two different buildings in the same city
+ * ("Agi Flats, Ludhiana" vs. an existing "Hero Homes, Ludhiana" draft)
+ * would otherwise both contain the shared "ludhiana" substring and be
+ * wrongly read as the same property if only raw_address were compared.
  */
-function isDifferentProperty(newAddress, existingAddress) {
-  const a = normalizeAddressText(newAddress);
-  const b = normalizeAddressText(existingAddress);
+function isDifferentProperty(newFields, existingListing) {
+  const newBuilding = normalizeAddressText(newFields.building_name);
+  const existingBuilding = normalizeAddressText(existingListing.building_name);
+  if (newBuilding && existingBuilding) {
+    return !newBuilding.includes(existingBuilding) && !existingBuilding.includes(newBuilding);
+  }
+
+  const a = normalizeAddressText(newFields.raw_address);
+  const b = normalizeAddressText(existingListing.raw_address);
   if (!a || !b) return false;
   if (a === b) return false;
   return !a.includes(b) && !b.includes(a);
@@ -224,19 +236,22 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const hasInfo = !hasNoExtractableInfo(messageFields);
 
           // A bare correction fragment ("Ludhiana", "60 lakh") only ever
-          // populates ONE field and naturally won't textually overlap with
-          // the existing raw_address/building_name (that's the whole point
-          // — it's supplying what was MISSING). Only run the "is this a
-          // different property" text-overlap check against something that
-          // actually looks like a full, self-contained new listing
-          // description (has both an address and a property type stated) —
-          // otherwise a plain correction fragment would wrongly get flagged
-          // as "different property" and the draft would be abandoned
-          // instead of corrected.
-          const looksLikeFullNewListing = hasInfo && !!messageFields.raw_address && !!messageFields.property_type;
+          // populates ONE field and is typically just a locality/city
+          // string with no property_type or building_name attached — that's
+          // the whole point, it's supplying what was MISSING, not naming a
+          // new property. Only run the "is this a different property"
+          // check against something that actually names a specific new
+          // property: either an explicit property_type, or a building/
+          // society name — a message like "agi flats ludhiana" has neither
+          // a raw_address+property_type pair nor is a bare fragment, but
+          // its building_name ("Agi Flats") is exactly the kind of concrete
+          // signal that should trigger the check even without an explicit
+          // property type.
+          const looksLikeFullNewListing = hasInfo && !!messageFields.raw_address
+            && (!!messageFields.property_type || !!messageFields.building_name);
           let differentProperty = false;
           if (looksLikeFullNewListing && existingListingForContext) {
-            differentProperty = isDifferentProperty(messageFields.raw_address, existingListingForContext.raw_address);
+            differentProperty = isDifferentProperty(messageFields, existingListingForContext);
           }
           awaitingApprovalContext = { hasInfo, differentProperty };
         } catch (err) {

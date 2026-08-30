@@ -12,6 +12,7 @@ const {
   getTenantDetail,
   updateTenantStatus,
   updateTenantPlan,
+  listAllListings,
 } = require('../controllers/adminController');
 const {
   listAdPlacements,
@@ -53,6 +54,15 @@ router.post('/requests/:id/reject', rejectRequest);
  * @desc    List all tenants with user counts
  */
 router.get('/tenants', listTenants);
+
+/**
+ * @route   GET /api/v1/admin/listings
+ * @desc    Platform-wide listings across every tenant (?q, ?status,
+ *          ?property_type, ?tenant_id, ?page, ?limit) — backs the "All
+ *          Listings" tab in AdminPanel.jsx, which previously just
+ *          redirected to the single-tenant /dashboard view.
+ */
+router.get('/listings', listAllListings);
 
 /**
  * @route   POST /api/v1/admin/tenants

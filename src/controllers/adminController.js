@@ -498,6 +498,73 @@ async function updateTenantPlan(req, res) {
   }
 }
 
+/**
+ * GET /api/v1/admin/listings
+ * Platform-wide listings view for super_admin — the "Open Full Listings
+ * Dashboard" / "Go to Listings Dashboard" buttons in AdminPanel.jsx used to
+ * just redirect to /dashboard, which is the same single-tenant view every
+ * owner/agent already sees (scoped to whichever tenant the logged-in user
+ * belongs to) — there was no cross-tenant listings query anywhere in the
+ * codebase. This is that query: every tenant's listings, joined with the
+ * owning tenant's business name so an admin can tell listings apart by
+ * dealer, with the same q/status/property_type filters the tenant-scoped
+ * GET /dashboard/listings already supports.
+ */
+async function listAllListings(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { q, status, property_type, tenant_id } = req.query;
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+
+  try {
+    const baseQuery = knex('listings')
+      .join('tenants', 'listings.tenant_id', 'tenants.id')
+      .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id');
+
+    if (q) {
+      baseQuery.where((builder) => {
+        builder.whereILike('listings.title', `%${q}%`).orWhereILike('listings.raw_address', `%${q}%`);
+      });
+    }
+    if (status) baseQuery.where('listings.status', status);
+    if (property_type) baseQuery.where('listings.property_type', property_type);
+    if (tenant_id) baseQuery.where('listings.tenant_id', tenant_id);
+
+    const totalRow = await baseQuery.clone().count('listings.id as count').first();
+    const total = Number(totalRow.count);
+
+    const listings = await baseQuery
+      .clone()
+      .select(
+        'listings.id',
+        'listings.title',
+        'listings.raw_address',
+        'listings.price',
+        'listings.property_type',
+        'listings.status',
+        'listings.public_slug',
+        'listings.created_at',
+        'tenants.id as tenant_id',
+        'tenants.business_name as tenant_business_name',
+        'assigned_agent.name as assigned_agent_name'
+      )
+      .orderBy('listings.created_at', 'desc')
+      .limit(limit)
+      .offset((page - 1) * limit);
+
+    return res.json({
+      success: true,
+      listings,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) || 1 },
+    });
+  } catch (error) {
+    console.error('Failed to fetch platform-wide listings:', error);
+    return res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Failed to fetch listings.' }
+    });
+  }
+}
+
 module.exports = {
   submitAccessRequest,
   listRequests,
@@ -508,4 +575,5 @@ module.exports = {
   getTenantDetail,
   updateTenantStatus,
   updateTenantPlan,
+  listAllListings,
 };
