@@ -6,6 +6,7 @@ const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
 const { extractListingFields } = require('../services/listingExtractionService');
 const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
+const { autoPublishIfReady } = require('./builderProfileController');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -326,7 +327,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const [updatedListing] = await trx('listings')
           .where({ id: draft.listing_id })
           .update({ status: 'active', updated_at: trx.fn.now() })
-          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
+          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id']);
 
         await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
@@ -337,7 +338,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
         await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
-        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id };
       }
 
       if (draft.status === 'awaiting_approval') {
@@ -352,7 +353,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const [updatedListing] = await trx('listings')
             .where({ id: draft.listing_id, status: 'awaiting_approval' })
             .update({ status: 'active', updated_at: trx.fn.now() })
-            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
+            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id']);
 
           if (!updatedListing) {
             // Already approved (or otherwise moved on) by a prior message —
@@ -369,7 +370,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
           await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
-          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
+          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id };
         }
 
         // Re-check against the fresh, lock-guaranteed status — if the peek
@@ -481,6 +482,20 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
 
     if (result.action === 'send') {
       await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody });
+
+      // The dealer approving their own listing counts as sign-off on its
+      // linked builder profile too — publish immediately if research
+      // already finished (see builderProfileController.js's
+      // autoPublishIfReady). If research is still running,
+      // builderDueDiligenceWorker.js publishes it the moment research
+      // completes instead, since this listing is already active by then.
+      if (result.builderProfileId) {
+        try {
+          await autoPublishIfReady(knex, { builderProfileId: result.builderProfileId });
+        } catch (err) {
+          console.error('Agent intake: auto-publish builder profile on approval failed (non-fatal):', err.message);
+        }
+      }
     } else if (result.action === 'extract') {
       await enqueueExtractJob(result.draftId);
     }

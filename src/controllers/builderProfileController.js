@@ -191,6 +191,38 @@ function buildBuilderAutoLinkNote({ isNew, companyName, lang }) {
         : `\n\n🏗️ "${companyName}" ke existing builder profile se link ho gaya — publish hone ke baad yahan rating/possession record dikhega.`);
 }
 
+/**
+ * Auto-publish path: research and listing approval race independently
+ * (research takes "a few minutes" in the background; the dealer might
+ * approve the listing before or after that finishes), so this is called
+ * from both directions — whichever happens second is what actually
+ * publishes:
+ *   1. agentIntakeController.js, right after a listing goes 'active' —
+ *      publish if research already completed by then.
+ *   2. builderDueDiligenceWorker.js, right after research completes —
+ *      publish if the listing is already 'active' by then.
+ * The dealer/owner approving their own listing — the same person who
+ * typed the company name in — counts as their sign-off, so a buyer sees
+ * the real researched info by the time the listing is live instead of a
+ * separate manual moderation step. Never resurrects a profile a human
+ * explicitly rejected (moderation_status stays whatever it is unless it's
+ * still sitting at the default 'pending_review'), and never publishes
+ * before research (with its required citations) has actually completed.
+ */
+async function autoPublishIfReady(knex, { builderProfileId }) {
+  const profile = await knex('builder_profiles').where({ id: builderProfileId }).first();
+  if (!profile || profile.moderation_status !== 'pending_review' || profile.research_status !== 'completed') {
+    return false;
+  }
+
+  await knex('builder_profiles').where({ id: builderProfileId }).update({
+    moderation_status: 'published',
+    moderated_at: knex.fn.now(),
+    updated_at: knex.fn.now(),
+  });
+  return true;
+}
+
 async function linkOrCreateBuilderProfile(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id } = req.user;
@@ -290,21 +322,12 @@ async function getPublicBuilderProfile(req, res) {
       .select(
         'id', 'company_name', 'rera_registration_ids', 'mca_cin', 'last_researched_at',
         'overall_rating', 'rating_source_url', 'rating_source_title', 'rating_basis', 'rating_is_ai_assessment',
-        'possession_delivered_count', 'possession_total_count', 'possession_source_url', 'possession_source_title',
-        'moderation_status'
+        'possession_delivered_count', 'possession_total_count', 'possession_source_url', 'possession_source_title'
       )
-      .where({ id: listing.builder_profile_id })
+      .where({ id: listing.builder_profile_id, moderation_status: 'published' })
       .first();
 
-    // Not published yet — still tell the buyer research is under way
-    // (company name only, nothing researched/AI-assessed) rather than a
-    // flat 404 that looks identical to "no builder linked at all." Never
-    // surfaces this for a rejected profile — that's a dealer/admin call
-    // that this shouldn't second-guess by implying research is ongoing.
-    if (!profile || profile.moderation_status !== 'published') {
-      if (profile && profile.moderation_status === 'pending_review') {
-        return res.status(200).json({ success: true, pending: true, companyName: profile.company_name });
-      }
+    if (!profile) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No builder profile for this listing.' } });
     }
 
@@ -340,4 +363,5 @@ module.exports = {
   BUILDER_ELIGIBLE_TYPES,
   moderateBuilderProfile,
   getPublicBuilderProfile,
+  autoPublishIfReady,
 };

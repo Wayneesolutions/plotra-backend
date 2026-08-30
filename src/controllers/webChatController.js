@@ -20,6 +20,7 @@ const {
   buildBuilderAutoLinkNote,
   BuilderProfileLinkError,
   BUILDER_ELIGIBLE_TYPES,
+  autoPublishIfReady,
 } = require('./builderProfileController');
 
 // Auto-links a chat-created listing to a builder profile when the dealer
@@ -274,6 +275,21 @@ async function handleWebChatMessage(req, res) {
           await knex('listings').where({ id: session.listingId }).update({ status: 'active', updated_at: knex.fn.now() });
           listing = await knex('listings').where({ id: session.listingId }).first();
           await recordImplicitApprovalIfUncorrected(knex, listing);
+
+          // Same as the WhatsApp approval path (agentIntakeController.js) —
+          // the dealer approving their own listing counts as sign-off on
+          // its linked builder profile too, so a buyer sees the real
+          // researched info immediately instead of an empty developer
+          // section. No-ops if research hasn't finished yet;
+          // builderDueDiligenceWorker.js publishes it the moment research
+          // completes instead, since this listing is already active by then.
+          if (listing.builder_profile_id) {
+            try {
+              await autoPublishIfReady(knex, { builderProfileId: listing.builder_profile_id });
+            } catch (err) {
+              console.error('Web chat: auto-publish builder profile on approval failed (non-fatal):', err.message);
+            }
+          }
         }
         session.awaitingApproval = false;
         await saveSession(sessionId, session);
