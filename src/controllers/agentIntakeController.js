@@ -247,8 +247,19 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           // its building_name ("Agi Flats") is exactly the kind of concrete
           // signal that should trigger the check even without an explicit
           // property type.
+          // A full, specific street address ("hno 102 lahri nagar, mundia
+          // khurd, chamdigarh road ludhiana") also counts, even with no
+          // property_type or building_name stated — a bare correction
+          // fragment ("Ludhiana", "sector 62 not 45") is short and rarely
+          // carries a house/plot number; a message with a digit in the
+          // address (a door/plot number) or five-plus words reads as a
+          // fresh, complete address for a (likely different) property, not
+          // a tweak to the one already in flight.
+          const addressWordCount = (messageFields.raw_address || '').trim().split(/\s+/).filter(Boolean).length;
+          const looksLikeCompleteAddress = !!messageFields.raw_address
+            && (/\d/.test(messageFields.raw_address) || addressWordCount >= 5);
           const looksLikeFullNewListing = hasInfo && !!messageFields.raw_address
-            && (!!messageFields.property_type || !!messageFields.building_name);
+            && (!!messageFields.property_type || !!messageFields.building_name || looksLikeCompleteAddress);
           let differentProperty = false;
           if (looksLikeFullNewListing && existingListingForContext) {
             differentProperty = isDifferentProperty(messageFields, existingListingForContext);
@@ -484,11 +495,67 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
 }
 
 /**
- * shape but for a property photo instead of text. Attaches to whichever
- * listing the agent's current live draft points at; if there's no live
- * draft with a listing yet, asks them to describe the property first
- * (same UX as the web chat's equivalent "describe the property first"
- * case for a photo sent with no listing context).
+ * Downloads + uploads a WhatsApp image to S3, then either attaches it
+ * straight to the live draft's listing (if one already exists) or stashes
+ * the URL on agent_listing_drafts.pending_photo_urls when there's no
+ * listing yet — flushed into listing_media by agentIntakeWorker.js the
+ * moment the listing is actually created. Previously a photo sent before
+ * a listing existed was rejected outright with "describe the property
+ * first" and never uploaded at all — which silently threw away a photo
+ * a dealer sent captioned with their answer to "what type of property?"
+ * (see webhookController.js's parseInboundPayload/handleInboundWhatsApp,
+ * which now reads that caption as real text and runs it through the
+ * normal extraction path, in parallel with this).
+ *
+ * Never touches `res` or sends any WhatsApp reply itself — callers own
+ * their own response/confirmation message.
+ */
+async function uploadAgentPhoto({ knex, agentUser, mediaId, mediaMimeType }) {
+  let draft = await knex('agent_listing_drafts')
+    .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
+    .whereIn('status', LIVE_STATUSES)
+    .first();
+
+  if (!draft) {
+    [draft] = await knex('agent_listing_drafts')
+      .insert({ tenant_id: agentUser.tenant_id, user_id: agentUser.id, status: 'collecting' })
+      .returning(['id', 'status', 'listing_id', 'pending_photo_urls']);
+  }
+
+  const existingPhotos = draft.listing_id
+    ? (await knex('listing_media').where({ listing_id: draft.listing_id }).first())?.photo_urls || []
+    : draft.pending_photo_urls || [];
+
+  if (existingPhotos.length >= MAX_PHOTOS_WHATSAPP) {
+    return { draftId: draft.id, status: 'limit_reached', count: existingPhotos.length };
+  }
+
+  const buffer = await downloadWhatsAppMedia(mediaId);
+  const extension = mediaMimeType?.includes('png') ? 'png' : mediaMimeType?.includes('webp') ? 'webp' : 'jpg';
+  const url = await uploadToS3(buffer, `whatsapp-${mediaId}.${extension}`, mediaMimeType || 'image/jpeg');
+  const updatedPhotos = [...existingPhotos, url];
+
+  if (draft.listing_id) {
+    const mediaRow = await knex('listing_media').where({ listing_id: draft.listing_id }).first();
+    if (mediaRow) {
+      await knex('listing_media').where({ listing_id: draft.listing_id }).update({ photo_urls: JSON.stringify(updatedPhotos) });
+    } else {
+      await knex('listing_media').insert({ listing_id: draft.listing_id, photo_urls: JSON.stringify(updatedPhotos) });
+    }
+    return { draftId: draft.id, status: 'attached', count: updatedPhotos.length };
+  }
+
+  await knex('agent_listing_drafts')
+    .where({ id: draft.id })
+    .update({ pending_photo_urls: JSON.stringify(updatedPhotos), updated_at: knex.fn.now() });
+  return { draftId: draft.id, status: 'stashed', count: updatedPhotos.length };
+}
+
+/**
+ * Entry point for a bare photo message (no caption) — webhookController.js
+ * routes a photo WITH caption text through handleAgentIntakeMessage instead
+ * (see there), since the caption itself needs to reach extraction; this
+ * path only ever needs to acknowledge the photo itself.
  *
  * Deliberately skips the bsp_message_id duplicate-delivery check
  * handleAgentIntakeMessage does — a duplicate webhook delivery here in
@@ -499,46 +566,21 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
  */
 async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType, bspMessageId, res }) {
   try {
-    const draft = await knex('agent_listing_drafts')
-      .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
-      .whereIn('status', LIVE_STATUSES)
-      .first();
+    const result = await uploadAgentPhoto({ knex, agentUser, mediaId, mediaMimeType });
+    const lang = await detectDraftLanguage(knex, result.draftId);
 
-    const lang = await detectDraftLanguage(knex, draft?.id);
+    const body = result.status === 'limit_reached'
+      ? `Maximum ${MAX_PHOTOS_WHATSAPP} photos allowed per listing.`
+      : result.status === 'stashed'
+        ? (lang === 'en'
+            ? `📷 Photo saved (${result.count}/${MAX_PHOTOS_WHATSAPP}) — describe the property (address, price, type) and I'll attach it once your listing is created.`
+            : `📷 Photo save ho gayi (${result.count}/${MAX_PHOTOS_WHATSAPP}) — property describe kar dijiye (address, price, type), listing banate hi photo attach ho jayegi.`)
+        : `📷 ${lang === 'en' ? 'Photo added' : 'Photo add ho gayi'} (${result.count}/${MAX_PHOTOS_WHATSAPP}).`;
 
-    if (!draft || !draft.listing_id) {
-      const body = lang === 'en'
-        ? 'Describe the property first (address, price, type) — then you can send photos.'
-        : 'Pehle property describe kar dijiye (address, price, type) — phir photo bhej sakte ho.';
-      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
-      return res.status(200).json({ success: true });
-    }
-
-    const mediaRow = await knex('listing_media').where({ listing_id: draft.listing_id }).first();
-    const currentPhotos = mediaRow?.photo_urls || [];
-
-    if (currentPhotos.length >= MAX_PHOTOS_WHATSAPP) {
-      const body = `Maximum ${MAX_PHOTOS_WHATSAPP} photos allowed per listing.`;
-      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
-      return res.status(200).json({ success: true });
-    }
-
-    const buffer = await downloadWhatsAppMedia(mediaId);
-    const extension = mediaMimeType?.includes('png') ? 'png' : mediaMimeType?.includes('webp') ? 'webp' : 'jpg';
-    const url = await uploadToS3(buffer, `whatsapp-${mediaId}.${extension}`, mediaMimeType || 'image/jpeg');
-
-    const updatedPhotos = [...currentPhotos, url];
-    if (mediaRow) {
-      await knex('listing_media').where({ listing_id: draft.listing_id }).update({ photo_urls: JSON.stringify(updatedPhotos) });
-    } else {
-      await knex('listing_media').insert({ listing_id: draft.listing_id, photo_urls: JSON.stringify(updatedPhotos) });
-    }
-
-    const confirmBody = `📷 ${lang === 'en' ? 'Photo added' : 'Photo add ho gayi'} (${updatedPhotos.length}/${MAX_PHOTOS_WHATSAPP}).`;
     await knex.transaction(async (trx) => {
-      await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmBody });
+      await logAgentOutboundMessage(trx, { draftId: result.draftId, body });
     });
-    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
+    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
 
     return res.status(200).json({ success: true });
   } catch (error) {
@@ -549,4 +591,4 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
   }
 }
 
-module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto };
+module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto };

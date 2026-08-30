@@ -290,12 +290,21 @@ async function getPublicBuilderProfile(req, res) {
       .select(
         'id', 'company_name', 'rera_registration_ids', 'mca_cin', 'last_researched_at',
         'overall_rating', 'rating_source_url', 'rating_source_title', 'rating_basis', 'rating_is_ai_assessment',
-        'possession_delivered_count', 'possession_total_count', 'possession_source_url', 'possession_source_title'
+        'possession_delivered_count', 'possession_total_count', 'possession_source_url', 'possession_source_title',
+        'moderation_status'
       )
-      .where({ id: listing.builder_profile_id, moderation_status: 'published' })
+      .where({ id: listing.builder_profile_id })
       .first();
 
-    if (!profile) {
+    // Not published yet — still tell the buyer research is under way
+    // (company name only, nothing researched/AI-assessed) rather than a
+    // flat 404 that looks identical to "no builder linked at all." Never
+    // surfaces this for a rejected profile — that's a dealer/admin call
+    // that this shouldn't second-guess by implying research is ongoing.
+    if (!profile || profile.moderation_status !== 'published') {
+      if (profile && profile.moderation_status === 'pending_review') {
+        return res.status(200).json({ success: true, pending: true, companyName: profile.company_name });
+      }
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No builder profile for this listing.' } });
     }
 
