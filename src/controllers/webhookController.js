@@ -3,6 +3,7 @@ const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
 const { handleAgentIntakeMessage, handleAgentIntakePhoto } = require('./agentIntakeController');
 const { handleAgentSignupMessage } = require('./agentSignupController');
+const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 
 // Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
@@ -172,23 +173,17 @@ async function handleInboundWhatsApp(req, res) {
           // Resolve tenant by whichever identifier this BSP sent — Meta
           // Cloud API sends phone_number_id (opaque, stable per WhatsApp
           // Business number); other BSPs (Gupshup/Interakt) send a raw "to"
-          // number. Falls back to the shared-number path (oldest active
-          // tenant) only when NEITHER is present, which means it arrived on
-          // the platform's shared number where the inferredSlug-based
-          // lookup below further narrows it down.
-          let defaultTenant = null;
-
-          if (receivingPhoneNumberId) {
-            defaultTenant = await trx('tenants')
-              .where({ phone_number_id: receivingPhoneNumberId, status: 'active' })
-              .first();
-          }
-
-          if (!defaultTenant && receivingNumber) {
-            defaultTenant = await trx('tenants')
-              .where({ whatsapp_number: receivingNumber, status: 'active' })
-              .first();
-          }
+          // number. Checks every number a tenant has registered (see
+          // tenantWhatsappNumberService.js — a Tier 2/3 tenant can have up
+          // to 3/5), not just one. Falls back to the shared-number path
+          // (oldest active tenant) only when NEITHER identifier resolves
+          // to any tenant's number, which means it arrived on the
+          // platform's shared number where the inferredSlug-based lookup
+          // below further narrows it down.
+          let defaultTenant = await resolveTenantByReceivingNumber(trx, {
+            phoneNumberId: receivingPhoneNumberId,
+            whatsappNumber: receivingNumber,
+          });
 
           if (!defaultTenant) {
             // Shared-number fallback: safe only when one tenant uses the
