@@ -1,10 +1,46 @@
 # Plotra — Handover Document
 
-**Date:** 2026-08-27
+**Date:** 2026-08-31 (latest work below; original doc from 2026-08-27 follows starting at §1, kept for history)
 **Repos:** `Wayneesolutions/plotra-frontend` (React/Vite) + `Wayneesolutions/plotra-backend` (Node/Express)
-**Status:** Everything in §1 below is pushed to branch **`claude/plotra-code-fixes-eboqnb`** on **both** repos — it is **NOT merged to `main`** and **no PR has been opened**. Whoever picks this up needs to review the branch and open/merge a PR on each repo before any of it reaches production. Everything from the previous session (§7) is still merged into `main` and unaffected.
+**Status:** See "§0. Latest" immediately below for the newest work. Everything from §1 onward describes an older session and its own status line — by now most of that work has already merged to `main` on both repos; treat §1's own "not merged yet" language as stale and check GitHub directly if it matters.
 
-This doc is for whoever deploys this next. §1 covers what changed in this session, §2–§6 are the up-to-date reference (architecture, env vars, deploy checklist, smoke tests) reflecting `main` + this branch combined, and §7 is the previous session's handover, kept for history.
+This doc is for whoever deploys this next. §0 covers the most recent session's work, §1 covers an earlier session's work, §2–§6 are architecture/env/deploy/smoke-test reference (may not reflect everything merged since), and §7 is an even earlier session's handover, kept for history.
+
+---
+
+## §0. Latest — iOS map fullscreen toggle button fix (2026-08-31)
+
+**Status: PR open, not yet merged.** [`Wayneesolutions/plotra-frontend#17`](https://github.com/Wayneesolutions/plotra-frontend/pull/17), branch `claude/fullscreen-toggle-apple-xcgv3b`.
+
+### Background
+`plotra-frontend` PR #16 (merged 2026-08-31, same day) added a custom expand/collapse (⤢/✕) button on the satellite and street-view maps in `PropertyMapMedia.jsx`, replacing Google Maps' native `fullscreenControl` — iOS Safari silently omits that native control on arbitrary elements (only `<video>` supports the real Fullscreen API there), which is why dealers on iPhone/iPad had no way to zoom in on the ~260px-tall satellite embed for precise pin placement. PR #16's fix used a plain CSS "fake fullscreen" overlay (`position: fixed`, full viewport) instead of the real Fullscreen API.
+
+**The button was reported still not working on Apple devices after PR #16 shipped.** Root-caused by code review (two unrelated bugs, both specific to iOS Safari):
+
+1. **`overflow-x: clip` on `<body>`** in `src/styles.css` (added earlier by the unrelated design-system PR #13, `@layer base` reset for `html`/`body`). iOS Safari has a long-standing WebKit bug where `position: fixed` descendants stop tracking the true viewport — becoming mispositioned or untappable — once `<body>` itself has non-`visible` overflow. That's exactly the CSS PR #16's fullscreen overlay depends on. **Fix:** moved the clip from `html`/`body` onto `#root` instead (`#root` isn't the page's native scrolling element, so the same horizontal-overflow prevention applies without tripping the bug).
+2. **No isolated stacking context** on the map's wrap `<div>`. Google Maps injects its own internal panes (tile layer, overlay, float pane for controls, etc.) as descendants of the map container, and its float pane in particular ships with a z-index in the hundreds of thousands. Without `isolation: isolate` on the wrap, that pane's z-index gets compared against the button's z-index (5) in whichever ancestor stacking context is nearest — which the button loses, letting an invisible Maps pane sit on top of it and silently eat taps. **Fix:** added `isolation: isolate` to both the collapsed and expanded wrap styles in `PropertyMapMedia.jsx`.
+
+### Files changed (PR #17)
+- `src/components/PropertyMapMedia.jsx` — `isolation: isolate` on both wrap styles
+- `src/styles.css` — moved `overflow-x: clip` from `html`/`body` to `#root`
+
+### Verified
+- `npm run build` succeeds (Vite, no errors)
+
+### NOT verified — needs a real device
+No iPhone/iPad/real iOS Safari was available in this session to confirm the button now actually works end-to-end. **Before merging PR #17**, on an actual iPhone or iPad in Safari:
+- [ ] Open a pending listing's public page, tap the expand icon (⤢) on the satellite view — confirm the map goes fullscreen and the button visibly responds
+- [ ] Tap ✕ (or the icon again) to exit — confirm it returns to the normal embedded size, not stuck fullscreen or blank
+- [ ] While expanded, drag the pin (if `canAdjustLocation`) and confirm the "New location set — save it?" banner is visible and tappable, not hidden behind the map (this was the thing PR #16 already fixed — regression-check it)
+- [ ] Repeat for the street-view panel
+- [ ] Spot-check 2–3 other pages (landing page, dashboard) for a new horizontal scrollbar or clipped content — the `overflow-x: clip` move from `body` to `#root` should be behaviorally identical, but wasn't visually verified
+
+### What's needed next
+1. Someone with an actual Apple device runs the checklist above.
+2. If it passes, merge PR #17.
+3. If the button is *still* dead after this, the next thing to check is whether the deployed frontend's CDN/build cache is actually serving the new bundle (hard-refresh / cache-bust before assuming the code fix itself failed) — this session couldn't verify against a live deployment, only a local `vite build`.
+
+`plotra-backend` was **not** touched for this fix — the bug and the fix are entirely in `plotra-frontend`; the backend has no fullscreen/UI code at all.
 
 ---
 
