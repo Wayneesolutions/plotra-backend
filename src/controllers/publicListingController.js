@@ -29,6 +29,10 @@ async function getPublicListing(req, res) {
       // member's number instead of the tenant's shared default. See
       // migration 20260821_04 and listingService.js's validateAssignedAgent.
       .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
+      // Fallback: for listings created before assigned_agent_id was auto-populated
+      // by the intake worker, the creator (listings.created_by) is the agent who
+      // texted the listing in — their phone is the correct buyer-facing contact.
+      .leftJoin('users as creator', 'listings.created_by', 'creator.id')
       // Bug 5 fix: tenant's dedicated buyer-facing number from whatsapp_numbers
       // table (migration 20260830_01) takes priority over tenants.whatsapp_number
       // (the legacy column that was often NULL because the Settings UI 404'd
@@ -56,7 +60,8 @@ async function getPublicListing(req, res) {
         'tenants.whatsapp_number as dealer_whatsapp_number',
         'tenant_wa.whatsapp_number as dedicated_whatsapp_number',
         'assigned_agent.phone as assigned_agent_phone',
-        'assigned_agent.name as assigned_agent_name'
+        'assigned_agent.name as assigned_agent_name',
+        'creator.phone as creator_phone'
       )
       // 'awaiting_approval' included alongside 'active' so the agent who
       // just texted this listing in via WhatsApp can view the exact same
@@ -109,7 +114,7 @@ async function getPublicListing(req, res) {
     //    unlimited plans) takes priority if set, then the tenant's own
     //    dedicated number (Ch.12.3), else the shared platform number from env.
     const dealerWhatsappDigits = toWaMeDigits(
-      listing.assigned_agent_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
+      listing.assigned_agent_phone || listing.creator_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
     );
 
     // 5. Structure data matching the verified success protocol
@@ -226,6 +231,7 @@ async function capturePublicLead(req, res) {
     const listing = await knex('listings')
       .join('tenants', 'listings.tenant_id', 'tenants.id')
       .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
+      .leftJoin('users as creator', 'listings.created_by', 'creator.id')
       .leftJoin('whatsapp_numbers as tenant_wa', function () {
         this.on('tenant_wa.tenant_id', '=', 'listings.tenant_id')
             .andOnVal('tenant_wa.is_default', '=', true);
@@ -239,7 +245,8 @@ async function capturePublicLead(req, res) {
         'tenants.whatsapp_number as dealer_whatsapp_number',
         'tenant_wa.whatsapp_number as dedicated_whatsapp_number',
         'assigned_agent.phone as assigned_agent_phone',
-        'assigned_agent.name as assigned_agent_name'
+        'assigned_agent.name as assigned_agent_name',
+        'creator.phone as creator_phone'
       )
       .where({ 'listings.public_slug': slug, 'listings.status': 'active' })
       .first();
@@ -252,7 +259,7 @@ async function capturePublicLead(req, res) {
 
     const { id: listingId, tenant_id: tenantId } = listing;
     const attributedAgentName = listing.assigned_agent_name || null;
-    const attributedAgentPhone = normalizePhone(listing.assigned_agent_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || '') || null;
+    const attributedAgentPhone = normalizePhone(listing.assigned_agent_phone || listing.creator_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || '') || null;
 
     // 1. Dedupe by tenant + phone (Ch.11.6) — one lead record per person per tenant,
     //    not per listing, so repeat interest across listings rolls up correctly.

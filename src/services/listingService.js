@@ -108,7 +108,13 @@ async function createListingRecord(knex, {
     }
   }
 
-  const validatedAgentId = await validateAssignedAgent(knex, { tenantId, plan, assignedAgentId });
+  // WhatsApp-created listings always attribute to their creator — the agent
+  // who texted the listing in IS the assigned agent, no plan gate required
+  // (the plan gate in validateAssignedAgent is for manual dashboard
+  // reassignment, not intake attribution).
+  const validatedAgentId = source === 'whatsapp'
+    ? createdBy
+    : await validateAssignedAgent(knex, { tenantId, plan, assignedAgentId });
 
   const publicSlug = crypto.randomBytes(16).toString('hex');
 
