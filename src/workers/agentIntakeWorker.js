@@ -70,9 +70,18 @@ async function sendPreviewAndAwaitApproval({ draftId, listingId }) {
     const draft = await trx('agent_listing_drafts').where({ id: draftId }).first();
     if (!listing || !draft) return null;
 
-    const previewBody = lang === 'en'
-      ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\nOpen the link — check the map pin is on the right spot. If it's off, drag it to the exact location and tap *Save*. Reply *"yes"* when you're ready to publish.`
-      : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nLink kholo — map pin sahi jagah hai kya check karo. Agar thoda hatna hai, pin ko drag karke sahi jagah pe laao aur *Save* dabao. Publish karna ho to *"haan"* reply karo.`;
+    // geoEnrichmentWorker.js couldn't get a confident, house-level geocode
+    // for this address — the pin is a best-effort guess and may be off by
+    // a street or more. Say so explicitly instead of the routine "check
+    // it's on the right spot" line, so a dealer doesn't rubber-stamp
+    // approve a pin that's actually just wrong.
+    const previewBody = listing.location_low_confidence
+      ? (lang === 'en'
+          ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\n⚠️ We couldn't pin this address precisely — the map pin is a rough guess and may be off. Please open the link and drag it to the exact location before tapping *Save*. Reply *"yes"* once you've confirmed it.`
+          : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\n⚠️ Yeh address sahi se locate nahi ho paya — map pin sirf ek andaza hai aur galat ho sakta hai. Please link kholke pin ko sahi jagah pe drag karo, phir *Save* dabao. Confirm karne ke baad *"haan"* reply karo.`)
+      : (lang === 'en'
+          ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\nOpen the link — check the map pin is on the right spot. If it's off, drag it to the exact location and tap *Save*. Reply *"yes"* when you're ready to publish.`
+          : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nLink kholo — map pin sahi jagah hai kya check karo. Agar thoda hatna hai, pin ko drag karke sahi jagah pe laao aur *Save* dabao. Publish karna ho to *"haan"* reply karo.`);
 
     await logAgentOutboundMessage(trx, { draftId, body: previewBody });
     await trx('agent_listing_drafts')

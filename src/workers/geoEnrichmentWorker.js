@@ -23,6 +23,54 @@ const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisCo
 
 console.log(`[Worker Engine] Initializing Geo-Enrichment Task Consumer...`);
 
+// Precise-enough for a house-level pin — the two lower Geocoding API
+// precision tiers (GEOMETRIC_CENTER: centroid of a wider area like a
+// street or neighborhood; APPROXIMATE: an even coarser guess) are exactly
+// what produces a pin that's a street, or a kilometer or two, off from
+// the actual house — see tryPlacesTextSearch below for why.
+const HIGH_PRECISION_LOCATION_TYPES = ['ROOFTOP', 'RANGE_INTERPOLATED'];
+
+/**
+ * Google's Geocoding API does strict, structured-address-component
+ * parsing — built for a clean, complete postal address. A WhatsApp-typed
+ * address ("hno 102 lahri nagar, mundia khurd, chamdigarh road ludhiana")
+ * often doesn't parse to house-number precision there; Google doesn't
+ * error when that happens, it silently returns a coarser match
+ * (location_type GEOMETRIC_CENTER/APPROXIMATE, sometimes with
+ * partial_match:true) with nothing in the response shouting "this wasn't
+ * confident" unless something actually checks those two fields — which
+ * nothing here did before this fix.
+ *
+ * The Google Maps app's own search box doesn't use raw geocoding for
+ * free-text input like this — it uses Places-style fuzzy matching against
+ * real indexed places (autocomplete, POIs, house-level results), which is
+ * exactly why typing the same address there lands on the exact house
+ * while a plain geocode call misses by a kilometer or two. This calls the
+ * same family of API (Places "Find Place From Text") as a second attempt
+ * whenever the primary geocode comes back low-precision, and the caller
+ * prefers its result if it succeeds. Never throws — a failure here (key
+ * doesn't have Places enabled, quota, network) just means falling back to
+ * whatever the Geocoding API already found, exactly like before this fix.
+ */
+async function tryPlacesTextSearch(rawAddress, apiKey, geoBiasBounds) {
+  try {
+    const locationBias = geoBiasBounds ? `&locationbias=rectangle:${geoBiasBounds}` : '';
+    const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(rawAddress)}&inputtype=textquery&fields=geometry,formatted_address&region=in${locationBias}&key=${apiKey}`;
+    const response = await axios.get(url, { timeout: 8000 });
+    const candidate = response.data.status === 'OK' ? response.data.candidates?.[0] : null;
+    if (!candidate?.geometry?.location) return null;
+
+    return {
+      lat: candidate.geometry.location.lat,
+      lng: candidate.geometry.location.lng,
+      formattedAddress: candidate.formatted_address || null,
+    };
+  } catch (err) {
+    console.error('Places text-search fallback failed (non-fatal, keeping Geocoding API result):', err.message);
+    return null;
+  }
+}
+
 const geoWorker = new Worker('geo-enrichment', async (job) => {
   const { listingId, rawAddress, draftId } = job.data;
 
@@ -93,7 +141,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       rawAddress,
     });
 
-    let lat, lng, formattedAddress;
+    let lat, lng, formattedAddress, lowConfidence = false;
 
     if (cacheHit) {
       console.log(`[Job ${job.id}] Resolved-locality cache HIT (${cacheHit.key_type}="${cacheHit.display_name}", confidence=${cacheHit.confidence}) — skipping Google geocode.`);
@@ -128,6 +176,24 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       const result = response.data.results[0];
       formattedAddress = result.formatted_address;
       ({ lat, lng } = result.geometry.location);
+
+      // Not a house-level match — this is the actual cause of "typing the
+      // same house number into Google Maps finds it exactly, but Plotra
+      // is off by a kilometer or two": a coarse geocode that Google never
+      // flags as an error. Try Places' fuzzy real-place matching before
+      // accepting it; only fall back to the coarse geocode if Places also
+      // comes up empty.
+      const isHighPrecision = HIGH_PRECISION_LOCATION_TYPES.includes(result.geometry.location_type) && !result.partial_match;
+      if (!isHighPrecision) {
+        console.log(`[Job ${job.id}] Geocode came back low-precision (location_type=${result.geometry.location_type}, partial_match=${!!result.partial_match}) — trying Places text search.`);
+        const placesResult = await tryPlacesTextSearch(rawAddress, targetApiKey, geoBiasBounds);
+        if (placesResult) {
+          ({ lat, lng, formattedAddress } = placesResult);
+          console.log(`[Job ${job.id}] Places text search found a match, using it instead of the low-precision geocode.`);
+        } else {
+          lowConfidence = true;
+        }
+      }
     }
 
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
@@ -151,6 +217,13 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       propertyType: listingData.property_type,
       extraListingUpdates: {
         status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
+        // Neither the Geocoding API nor a Places fallback found a
+        // confident, house-level match — the pin is a best-effort guess.
+        // agentIntakeWorker.js's preview message uses this to add an
+        // extra nudge to actually check/drag the pin, not just approve
+        // on faith. Cleared automatically the next time this listing is
+        // (re-)geocoded from a corrected address.
+        location_low_confidence: lowConfidence,
       },
     });
 

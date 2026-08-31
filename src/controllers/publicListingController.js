@@ -455,7 +455,10 @@ async function updateListingLocation(req, res) {
       formattedAddress,
       targetApiKey,
       propertyType: listing.property_type,
-      extraListingUpdates: { pin_manually_corrected: true },
+      // A human just placed this pin by hand — no longer "low confidence"
+      // regardless of what the original AI geocode was (see
+      // geoEnrichmentWorker.js's location_low_confidence).
+      extraListingUpdates: { pin_manually_corrected: true, location_low_confidence: false },
     });
 
     // Self-learning cache: a dealer just explicitly confirmed this is the
