@@ -29,6 +29,15 @@ async function getPublicListing(req, res) {
       // member's number instead of the tenant's shared default. See
       // migration 20260821_04 and listingService.js's validateAssignedAgent.
       .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
+      // Bug 5 fix: tenant's dedicated buyer-facing number from whatsapp_numbers
+      // table (migration 20260830_01) takes priority over tenants.whatsapp_number
+      // (the legacy column that was often NULL because the Settings UI 404'd
+      // before this table existed). Falls back to tenants.whatsapp_number for
+      // tenants who never used the new Settings UI but had the old column set.
+      .leftJoin('whatsapp_numbers as tenant_wa', function () {
+        this.on('tenant_wa.tenant_id', '=', 'listings.tenant_id')
+            .andOnVal('tenant_wa.is_default', '=', true);
+      })
       .select(
         'listings.id',
         'listings.tenant_id',
@@ -45,6 +54,7 @@ async function getPublicListing(req, res) {
         'listings.public_slug',
         'tenants.business_name as dealer_business_name',
         'tenants.whatsapp_number as dealer_whatsapp_number',
+        'tenant_wa.whatsapp_number as dedicated_whatsapp_number',
         'assigned_agent.phone as assigned_agent_phone',
         'assigned_agent.name as assigned_agent_name'
       )
@@ -99,7 +109,7 @@ async function getPublicListing(req, res) {
     //    unlimited plans) takes priority if set, then the tenant's own
     //    dedicated number (Ch.12.3), else the shared platform number from env.
     const dealerWhatsappDigits = toWaMeDigits(
-      listing.assigned_agent_phone || listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
+      listing.assigned_agent_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
     );
 
     // 5. Structure data matching the verified success protocol
@@ -216,6 +226,10 @@ async function capturePublicLead(req, res) {
     const listing = await knex('listings')
       .join('tenants', 'listings.tenant_id', 'tenants.id')
       .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
+      .leftJoin('whatsapp_numbers as tenant_wa', function () {
+        this.on('tenant_wa.tenant_id', '=', 'listings.tenant_id')
+            .andOnVal('tenant_wa.is_default', '=', true);
+      })
       .select(
         'listings.id',
         'listings.tenant_id',
@@ -223,6 +237,7 @@ async function capturePublicLead(req, res) {
         'listings.price',
         'listings.public_slug',
         'tenants.whatsapp_number as dealer_whatsapp_number',
+        'tenant_wa.whatsapp_number as dedicated_whatsapp_number',
         'assigned_agent.phone as assigned_agent_phone',
         'assigned_agent.name as assigned_agent_name'
       )
@@ -237,7 +252,7 @@ async function capturePublicLead(req, res) {
 
     const { id: listingId, tenant_id: tenantId } = listing;
     const attributedAgentName = listing.assigned_agent_name || null;
-    const attributedAgentPhone = normalizePhone(listing.assigned_agent_phone || listing.dealer_whatsapp_number || '') || null;
+    const attributedAgentPhone = normalizePhone(listing.assigned_agent_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || '') || null;
 
     // 1. Dedupe by tenant + phone (Ch.11.6) — one lead record per person per tenant,
     //    not per listing, so repeat interest across listings rolls up correctly.
