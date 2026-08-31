@@ -208,9 +208,25 @@ async function capturePublicLead(req, res) {
   const normalizedPhone = normalizePhone(phone);
 
   try {
+    // Same join/priority as getPublicListing (above) — this listing's
+    // assigned agent (per-listing attribution, growth/unlimited plans)
+    // takes priority over the tenant's own number for WHO the automated
+    // first-touch message should be attributed to, exactly like the
+    // "Get full details on WhatsApp" CTA already resolves it.
     const listing = await knex('listings')
-      .select('id', 'tenant_id', 'title', 'price', 'public_slug')
-      .where({ public_slug: slug, status: 'active' })
+      .join('tenants', 'listings.tenant_id', 'tenants.id')
+      .leftJoin('users as assigned_agent', 'listings.assigned_agent_id', 'assigned_agent.id')
+      .select(
+        'listings.id',
+        'listings.tenant_id',
+        'listings.title',
+        'listings.price',
+        'listings.public_slug',
+        'tenants.whatsapp_number as dealer_whatsapp_number',
+        'assigned_agent.phone as assigned_agent_phone',
+        'assigned_agent.name as assigned_agent_name'
+      )
+      .where({ 'listings.public_slug': slug, 'listings.status': 'active' })
       .first();
 
     if (!listing) {
@@ -220,6 +236,8 @@ async function capturePublicLead(req, res) {
     }
 
     const { id: listingId, tenant_id: tenantId } = listing;
+    const attributedAgentName = listing.assigned_agent_name || null;
+    const attributedAgentPhone = normalizePhone(listing.assigned_agent_phone || listing.dealer_whatsapp_number || '') || null;
 
     // 1. Dedupe by tenant + phone (Ch.11.6) — one lead record per person per tenant,
     //    not per listing, so repeat interest across listings rolls up correctly.
@@ -282,13 +300,24 @@ async function capturePublicLead(req, res) {
         }).format(listing.price)
       : null;
 
+    // Attribute the follow-up to the same agent/dealer "Get full details on
+    // WhatsApp" already resolves (assigned_agent_phone || dealer_whatsapp_
+    // number), so the buyer knows who to expect and can reach them directly
+    // — the Meta Cloud API send itself always goes out via this platform's
+    // one connected number (see whatsappOutboundWorker.js), so the ONLY way
+    // this message can be attributed to the right person is by naming them
+    // and giving their direct number in the body.
+    const followUpFrom = attributedAgentName
+      ? `${attributedAgentName}${attributedAgentPhone ? ` (${attributedAgentPhone})` : ''}`
+      : (attributedAgentPhone || null);
+
     const firstTouchMessage = formattedPrice
       ? `Hi${lead.name ? ' ' + lead.name : ''}! Thanks for your interest in "${listing.title}" ` +
-        `(${formattedPrice}). Our team will follow up shortly with more details — feel free to ask ` +
-        `anything about the property here on WhatsApp in the meantime.`
+        `(${formattedPrice}). ${followUpFrom ? `${followUpFrom} will` : 'Our team will'} follow up shortly ` +
+        `with more details — feel free to ask anything about the property here on WhatsApp in the meantime.`
       : `Hi${lead.name ? ' ' + lead.name : ''}! Thanks for your interest in "${listing.title}". ` +
-        `Our team will follow up shortly with more details, including pricing — feel free to ask ` +
-        `anything about the property here on WhatsApp in the meantime.`;
+        `${followUpFrom ? `${followUpFrom} will` : 'Our team will'} follow up shortly with more details, ` +
+        `including pricing — feel free to ask anything about the property here on WhatsApp in the meantime.`;
 
     await whatsappOutboundQueue.add('send-first-touch', {
       tenantId,
@@ -297,7 +326,9 @@ async function capturePublicLead(req, res) {
       phone: normalizedPhone,
       leadName: lead.name || 'Customer',
       propertyTitle: listing.title,
-      messageBody: firstTouchMessage
+      messageBody: firstTouchMessage,
+      attributedAgentName,
+      attributedAgentPhone
     }, {
       attempts: 3,
       backoff: { type: 'exponential', delay: 2000 }

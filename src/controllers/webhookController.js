@@ -1,9 +1,12 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
-const { handleAgentIntakeMessage, handleAgentIntakePhoto } = require('./agentIntakeController');
+const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto } = require('./agentIntakeController');
 const { handleAgentSignupMessage } = require('./agentSignupController');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
+const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+
+const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
 // Same fail-fast rationale as listingService.js's geoEnrichmentQueue —
 // this is a producer (called from an inbound webhook request), not the
@@ -32,7 +35,13 @@ function parseInboundPayload(body) {
   return {
     phone: value.contacts?.[0]?.wa_id || body.from_phone || body.sender?.phone,
     leadName: value.contacts?.[0]?.profile?.name || body.from_name || body.sender?.name || 'Visitor',
-    incomingText: value.messages?.[0]?.text?.body || body.message_text || body.text,
+    // An image message's caption (Meta Cloud API) lives at
+    // messages[0].image.caption, NOT .text.body — this used to only check
+    // .text.body, so a photo sent WITH a caption (e.g. answering "what
+    // type of property?" with a photo captioned "commercial property")
+    // had that caption silently discarded. See handleInboundWhatsApp's
+    // agent-intake routing below for how a caption is now used.
+    incomingText: value.messages?.[0]?.text?.body || value.messages?.[0]?.image?.caption || body.message_text || body.text,
     // Image message (Meta Cloud API shape) — messages[0].type === 'image'
     // when present, with the actual bytes retrievable via a separate
     // media-id lookup (see agentIntakeController.js's downloadWhatsAppMedia).
@@ -101,12 +110,36 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
-    // A bare photo (no caption text) — route to the photo handler instead
-    // of the text one. A photo WITH caption text still only triggers the
-    // photo path here (the caption itself isn't separately fed into
-    // extraction) — a dealer sending a photo+caption together is
-    // uncommon enough that requiring the address/price as a separate
-    // message is an acceptable tradeoff for now.
+    if (mediaId && incomingText && incomingText.trim()) {
+      // Photo WITH caption text (e.g. answering "what type of property?"
+      // with a photo captioned "commercial property") — upload/stash the
+      // photo first (best-effort: a failure here shouldn't block progress
+      // on the caption's info, which is the more valuable half), then run
+      // the caption through the exact same text path a plain message
+      // would take. That text path owns the actual reply (missing-fields
+      // question, preview link, etc.); the dealer gets a separate short
+      // photo-saved confirmation alongside it.
+      try {
+        const photoResult = await uploadAgentPhoto({ knex, agentUser, mediaId, mediaMimeType });
+        if (photoResult.status !== 'limit_reached') {
+          const confirmBody = photoResult.status === 'attached'
+            ? `📷 Photo added (${photoResult.count}/${MAX_PHOTOS_WHATSAPP}).`
+            : `📷 Photo saved (${photoResult.count}/${MAX_PHOTOS_WHATSAPP}) — will attach it once your listing is created.`;
+          await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
+        }
+      } catch (photoErr) {
+        console.error('Agent intake: photo+caption upload failed (continuing with caption text):', photoErr.message);
+      }
+
+      return handleAgentIntakeMessage({
+        knex,
+        agentUser,
+        incomingText: incomingText.trim(),
+        bspMessageId: bspThreadRef,
+        res,
+      });
+    }
+
     if (mediaId) {
       return handleAgentIntakePhoto({
         knex,

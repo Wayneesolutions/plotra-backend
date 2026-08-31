@@ -20,6 +20,7 @@ const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { generateBuilderClaims } = require('../services/groundedResearchService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { autoPublishIfReady } = require('../controllers/builderProfileController');
 
 /**
  * Research completing is silent otherwise (see file header: this worker
@@ -130,11 +131,18 @@ const builderDueDiligenceWorker = new Worker('builder-due-diligence', async (job
 
     console.log(`[Job ${job.id}] Builder due diligence completed for "${profile.company_name}": ${claims.length} cited claims, rating=${rating?.value ?? 'none'}, possession=${possessionRecord ? `${possessionRecord.delivered}/${possessionRecord.total}` : 'none'}.`);
 
-    // Research done + persisted above — now tell the owner there's
-    // something waiting for their review/publish decision (see file header
-    // for why this worker itself never auto-publishes).
+    // Research and listing approval race independently — the dealer may
+    // already have approved this listing by the time research finishes.
+    // If so, publish immediately (see builderProfileController.js's
+    // autoPublishIfReady) so the buyer sees real researched info right
+    // away instead of the listing being live with an empty developer
+    // section. Otherwise (still awaiting approval), fall back to the
+    // existing owner-review notification — agentIntakeController.js's
+    // approval path publishes it the moment the dealer does say yes.
     const listingForNotify = listingId ? await knex('listings').where({ id: listingId }).first() : null;
-    if (listingForNotify?.tenant_id) {
+    if (listingForNotify?.status === 'active') {
+      await autoPublishIfReady(knex, { builderProfileId });
+    } else if (listingForNotify?.tenant_id) {
       await notifyOwnerBuilderProfileNeedsReview(knex, {
         tenantId: listingForNotify.tenant_id,
         companyName: profile.company_name,

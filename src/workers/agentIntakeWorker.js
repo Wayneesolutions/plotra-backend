@@ -176,8 +176,21 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         status: 'enriching', // geo-enrichment is now running in the background (geoEnrichmentWorker.js)
         extracted_fields: JSON.stringify(extracted),
         missing_fields: null,
+        pending_photo_urls: '[]',
         updated_at: knex.fn.now(),
       });
+
+      // Flush any photos the dealer sent BEFORE this listing existed (e.g.
+      // a photo captioned with their answer to "what type of property?" —
+      // see agentIntakeController.js's uploadAgentPhoto/webhookController.js)
+      // into listing_media now that there's finally a listing to attach
+      // them to. Never dropped, just held until this moment.
+      if (draft.pending_photo_urls && draft.pending_photo_urls.length > 0) {
+        await knex('listing_media').insert({
+          listing_id: newListing.id,
+          photo_urls: JSON.stringify(draft.pending_photo_urls),
+        }).onConflict('listing_id').merge();
+      }
 
       // "flat available in DLF Chandigarh One" / "retail space in Elante
       // Mall" — a named building/mall auto-links a builder profile right

@@ -6,6 +6,7 @@ const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
 const { extractListingFields } = require('../services/listingExtractionService');
 const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
+const { autoPublishIfReady } = require('./builderProfileController');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -151,16 +152,28 @@ function normalizeAddressText(text) {
 /**
  * Heuristic for "this message is about a different property" vs. "this is
  * a correction to the one already awaiting approval." Deliberately loose:
- * treats one address as a match for another if either contains the other
- * once normalized (so "DLF Chandigarh One" still matches "DLF Chandigarh
- * One, Tower 3", and "Sector 45 Mohali" matches "sector-45, Mohali!!").
- * Only called when the new message actually stated a raw_address/building
- * name — if either side is missing, there's nothing to compare, so this
+ * treats one address/building name as a match for another if either
+ * contains the other once normalized (so "DLF Chandigarh One" still
+ * matches "DLF Chandigarh One, Tower 3", and "Sector 45 Mohali" matches
+ * "sector-45, Mohali!!"). Only called when the new message actually stated
+ * a raw_address/building name — if there's nothing to compare, this
  * assumes it's the same property rather than guessing.
+ *
+ * Building name is checked first and, when both sides have one, decides
+ * the result on its own — two different buildings in the same city
+ * ("Agi Flats, Ludhiana" vs. an existing "Hero Homes, Ludhiana" draft)
+ * would otherwise both contain the shared "ludhiana" substring and be
+ * wrongly read as the same property if only raw_address were compared.
  */
-function isDifferentProperty(newAddress, existingAddress) {
-  const a = normalizeAddressText(newAddress);
-  const b = normalizeAddressText(existingAddress);
+function isDifferentProperty(newFields, existingListing) {
+  const newBuilding = normalizeAddressText(newFields.building_name);
+  const existingBuilding = normalizeAddressText(existingListing.building_name);
+  if (newBuilding && existingBuilding) {
+    return !newBuilding.includes(existingBuilding) && !existingBuilding.includes(newBuilding);
+  }
+
+  const a = normalizeAddressText(newFields.raw_address);
+  const b = normalizeAddressText(existingListing.raw_address);
   if (!a || !b) return false;
   if (a === b) return false;
   return !a.includes(b) && !b.includes(a);
@@ -224,19 +237,33 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const hasInfo = !hasNoExtractableInfo(messageFields);
 
           // A bare correction fragment ("Ludhiana", "60 lakh") only ever
-          // populates ONE field and naturally won't textually overlap with
-          // the existing raw_address/building_name (that's the whole point
-          // — it's supplying what was MISSING). Only run the "is this a
-          // different property" text-overlap check against something that
-          // actually looks like a full, self-contained new listing
-          // description (has both an address and a property type stated) —
-          // otherwise a plain correction fragment would wrongly get flagged
-          // as "different property" and the draft would be abandoned
-          // instead of corrected.
-          const looksLikeFullNewListing = hasInfo && !!messageFields.raw_address && !!messageFields.property_type;
+          // populates ONE field and is typically just a locality/city
+          // string with no property_type or building_name attached — that's
+          // the whole point, it's supplying what was MISSING, not naming a
+          // new property. Only run the "is this a different property"
+          // check against something that actually names a specific new
+          // property: either an explicit property_type, or a building/
+          // society name — a message like "agi flats ludhiana" has neither
+          // a raw_address+property_type pair nor is a bare fragment, but
+          // its building_name ("Agi Flats") is exactly the kind of concrete
+          // signal that should trigger the check even without an explicit
+          // property type.
+          // A full, specific street address ("hno 102 lahri nagar, mundia
+          // khurd, chamdigarh road ludhiana") also counts, even with no
+          // property_type or building_name stated — a bare correction
+          // fragment ("Ludhiana", "sector 62 not 45") is short and rarely
+          // carries a house/plot number; a message with a digit in the
+          // address (a door/plot number) or five-plus words reads as a
+          // fresh, complete address for a (likely different) property, not
+          // a tweak to the one already in flight.
+          const addressWordCount = (messageFields.raw_address || '').trim().split(/\s+/).filter(Boolean).length;
+          const looksLikeCompleteAddress = !!messageFields.raw_address
+            && (/\d/.test(messageFields.raw_address) || addressWordCount >= 5);
+          const looksLikeFullNewListing = hasInfo && !!messageFields.raw_address
+            && (!!messageFields.property_type || !!messageFields.building_name || looksLikeCompleteAddress);
           let differentProperty = false;
           if (looksLikeFullNewListing && existingListingForContext) {
-            differentProperty = isDifferentProperty(messageFields.raw_address, existingListingForContext.raw_address);
+            differentProperty = isDifferentProperty(messageFields, existingListingForContext);
           }
           awaitingApprovalContext = { hasInfo, differentProperty };
         } catch (err) {
@@ -300,7 +327,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const [updatedListing] = await trx('listings')
           .where({ id: draft.listing_id })
           .update({ status: 'active', updated_at: trx.fn.now() })
-          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
+          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id']);
 
         await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
@@ -311,7 +338,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
         await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
-        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id };
       }
 
       if (draft.status === 'awaiting_approval') {
@@ -326,7 +353,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const [updatedListing] = await trx('listings')
             .where({ id: draft.listing_id, status: 'awaiting_approval' })
             .update({ status: 'active', updated_at: trx.fn.now() })
-            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected']);
+            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id']);
 
           if (!updatedListing) {
             // Already approved (or otherwise moved on) by a prior message —
@@ -343,7 +370,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
           await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
-          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody };
+          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id };
         }
 
         // Re-check against the fresh, lock-guaranteed status — if the peek
@@ -455,6 +482,20 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
 
     if (result.action === 'send') {
       await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody });
+
+      // The dealer approving their own listing counts as sign-off on its
+      // linked builder profile too — publish immediately if research
+      // already finished (see builderProfileController.js's
+      // autoPublishIfReady). If research is still running,
+      // builderDueDiligenceWorker.js publishes it the moment research
+      // completes instead, since this listing is already active by then.
+      if (result.builderProfileId) {
+        try {
+          await autoPublishIfReady(knex, { builderProfileId: result.builderProfileId });
+        } catch (err) {
+          console.error('Agent intake: auto-publish builder profile on approval failed (non-fatal):', err.message);
+        }
+      }
     } else if (result.action === 'extract') {
       await enqueueExtractJob(result.draftId);
     }
@@ -469,11 +510,67 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
 }
 
 /**
- * shape but for a property photo instead of text. Attaches to whichever
- * listing the agent's current live draft points at; if there's no live
- * draft with a listing yet, asks them to describe the property first
- * (same UX as the web chat's equivalent "describe the property first"
- * case for a photo sent with no listing context).
+ * Downloads + uploads a WhatsApp image to S3, then either attaches it
+ * straight to the live draft's listing (if one already exists) or stashes
+ * the URL on agent_listing_drafts.pending_photo_urls when there's no
+ * listing yet — flushed into listing_media by agentIntakeWorker.js the
+ * moment the listing is actually created. Previously a photo sent before
+ * a listing existed was rejected outright with "describe the property
+ * first" and never uploaded at all — which silently threw away a photo
+ * a dealer sent captioned with their answer to "what type of property?"
+ * (see webhookController.js's parseInboundPayload/handleInboundWhatsApp,
+ * which now reads that caption as real text and runs it through the
+ * normal extraction path, in parallel with this).
+ *
+ * Never touches `res` or sends any WhatsApp reply itself — callers own
+ * their own response/confirmation message.
+ */
+async function uploadAgentPhoto({ knex, agentUser, mediaId, mediaMimeType }) {
+  let draft = await knex('agent_listing_drafts')
+    .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
+    .whereIn('status', LIVE_STATUSES)
+    .first();
+
+  if (!draft) {
+    [draft] = await knex('agent_listing_drafts')
+      .insert({ tenant_id: agentUser.tenant_id, user_id: agentUser.id, status: 'collecting' })
+      .returning(['id', 'status', 'listing_id', 'pending_photo_urls']);
+  }
+
+  const existingPhotos = draft.listing_id
+    ? (await knex('listing_media').where({ listing_id: draft.listing_id }).first())?.photo_urls || []
+    : draft.pending_photo_urls || [];
+
+  if (existingPhotos.length >= MAX_PHOTOS_WHATSAPP) {
+    return { draftId: draft.id, status: 'limit_reached', count: existingPhotos.length };
+  }
+
+  const buffer = await downloadWhatsAppMedia(mediaId);
+  const extension = mediaMimeType?.includes('png') ? 'png' : mediaMimeType?.includes('webp') ? 'webp' : 'jpg';
+  const url = await uploadToS3(buffer, `whatsapp-${mediaId}.${extension}`, mediaMimeType || 'image/jpeg');
+  const updatedPhotos = [...existingPhotos, url];
+
+  if (draft.listing_id) {
+    const mediaRow = await knex('listing_media').where({ listing_id: draft.listing_id }).first();
+    if (mediaRow) {
+      await knex('listing_media').where({ listing_id: draft.listing_id }).update({ photo_urls: JSON.stringify(updatedPhotos) });
+    } else {
+      await knex('listing_media').insert({ listing_id: draft.listing_id, photo_urls: JSON.stringify(updatedPhotos) });
+    }
+    return { draftId: draft.id, status: 'attached', count: updatedPhotos.length };
+  }
+
+  await knex('agent_listing_drafts')
+    .where({ id: draft.id })
+    .update({ pending_photo_urls: JSON.stringify(updatedPhotos), updated_at: knex.fn.now() });
+  return { draftId: draft.id, status: 'stashed', count: updatedPhotos.length };
+}
+
+/**
+ * Entry point for a bare photo message (no caption) — webhookController.js
+ * routes a photo WITH caption text through handleAgentIntakeMessage instead
+ * (see there), since the caption itself needs to reach extraction; this
+ * path only ever needs to acknowledge the photo itself.
  *
  * Deliberately skips the bsp_message_id duplicate-delivery check
  * handleAgentIntakeMessage does — a duplicate webhook delivery here in
@@ -484,46 +581,21 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
  */
 async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType, bspMessageId, res }) {
   try {
-    const draft = await knex('agent_listing_drafts')
-      .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
-      .whereIn('status', LIVE_STATUSES)
-      .first();
+    const result = await uploadAgentPhoto({ knex, agentUser, mediaId, mediaMimeType });
+    const lang = await detectDraftLanguage(knex, result.draftId);
 
-    const lang = await detectDraftLanguage(knex, draft?.id);
+    const body = result.status === 'limit_reached'
+      ? `Maximum ${MAX_PHOTOS_WHATSAPP} photos allowed per listing.`
+      : result.status === 'stashed'
+        ? (lang === 'en'
+            ? `📷 Photo saved (${result.count}/${MAX_PHOTOS_WHATSAPP}) — describe the property (address, price, type) and I'll attach it once your listing is created.`
+            : `📷 Photo save ho gayi (${result.count}/${MAX_PHOTOS_WHATSAPP}) — property describe kar dijiye (address, price, type), listing banate hi photo attach ho jayegi.`)
+        : `📷 ${lang === 'en' ? 'Photo added' : 'Photo add ho gayi'} (${result.count}/${MAX_PHOTOS_WHATSAPP}).`;
 
-    if (!draft || !draft.listing_id) {
-      const body = lang === 'en'
-        ? 'Describe the property first (address, price, type) — then you can send photos.'
-        : 'Pehle property describe kar dijiye (address, price, type) — phir photo bhej sakte ho.';
-      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
-      return res.status(200).json({ success: true });
-    }
-
-    const mediaRow = await knex('listing_media').where({ listing_id: draft.listing_id }).first();
-    const currentPhotos = mediaRow?.photo_urls || [];
-
-    if (currentPhotos.length >= MAX_PHOTOS_WHATSAPP) {
-      const body = `Maximum ${MAX_PHOTOS_WHATSAPP} photos allowed per listing.`;
-      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
-      return res.status(200).json({ success: true });
-    }
-
-    const buffer = await downloadWhatsAppMedia(mediaId);
-    const extension = mediaMimeType?.includes('png') ? 'png' : mediaMimeType?.includes('webp') ? 'webp' : 'jpg';
-    const url = await uploadToS3(buffer, `whatsapp-${mediaId}.${extension}`, mediaMimeType || 'image/jpeg');
-
-    const updatedPhotos = [...currentPhotos, url];
-    if (mediaRow) {
-      await knex('listing_media').where({ listing_id: draft.listing_id }).update({ photo_urls: JSON.stringify(updatedPhotos) });
-    } else {
-      await knex('listing_media').insert({ listing_id: draft.listing_id, photo_urls: JSON.stringify(updatedPhotos) });
-    }
-
-    const confirmBody = `📷 ${lang === 'en' ? 'Photo added' : 'Photo add ho gayi'} (${updatedPhotos.length}/${MAX_PHOTOS_WHATSAPP}).`;
     await knex.transaction(async (trx) => {
-      await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmBody });
+      await logAgentOutboundMessage(trx, { draftId: result.draftId, body });
     });
-    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
+    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
 
     return res.status(200).json({ success: true });
   } catch (error) {
@@ -534,4 +606,4 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
   }
 }
 
-module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto };
+module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto };
