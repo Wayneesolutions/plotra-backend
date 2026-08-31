@@ -24,7 +24,6 @@ function requireOwner(req, res) {
  */
 async function listWhatsappNumbers(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  if (!requireOwner(req, res)) return;
 
   try {
     const numbers = await knex('whatsapp_numbers')
