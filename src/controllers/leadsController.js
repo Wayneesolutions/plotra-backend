@@ -17,14 +17,29 @@ const ALLOWED_STATUSES = ['new', 'contacted', 'qualified', 'closed', 'lost'];
  */
 async function getLeads(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id } = req.user;
+  const { tenant_id, role, id: userId } = req.user;
   const { status } = req.query;
 
   try {
     let query = knex('leads')
-      .select('id', 'name', 'phone', 'email', 'source', 'status', 'created_at')
-      .where({ tenant_id })
-      .orderBy('created_at', 'desc');
+      .where('leads.tenant_id', tenant_id)
+      .orderBy('leads.created_at', 'desc');
+
+    if (role === 'agent') {
+      // Agents see only leads that came from listings assigned to them —
+      // a buyer who tapped "callback" on another agent's listing doesn't
+      // belong in this agent's inbox. Owner sees everything (no filter).
+      query = query
+        .join('listing_visits', 'listing_visits.lead_id', 'leads.id')
+        .join('listings', 'listings.id', 'listing_visits.listing_id')
+        .where('listings.assigned_agent_id', userId)
+        .distinct(
+          'leads.id', 'leads.name', 'leads.phone', 'leads.email',
+          'leads.source', 'leads.status', 'leads.created_at'
+        );
+    } else {
+      query = query.select('leads.id', 'leads.name', 'leads.phone', 'leads.email', 'leads.source', 'leads.status', 'leads.created_at');
+    }
 
     if (status && status !== 'all') {
       if (!ALLOWED_STATUSES.includes(status)) {
@@ -32,7 +47,7 @@ async function getLeads(req, res) {
           error: { code: 'VALIDATION_ERROR', message: `Invalid status filter. Use one of: ${ALLOWED_STATUSES.join(', ')}.` }
         });
       }
-      query = query.andWhere({ status });
+      query = query.andWhere('leads.status', status);
     }
 
     const leads = await query;
