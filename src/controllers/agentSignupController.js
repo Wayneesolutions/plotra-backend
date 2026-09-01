@@ -43,8 +43,24 @@ const agentSignupQueue = new Queue('agent-signup-intake', { connection: redisCon
 // signup's current accumulated_text at execution time.
 const EXTRACT_DEBOUNCE_MS = 7000;
 
-// "join as agent" / "join as an agent" — case-insensitive trigger phrase.
-const SIGNUP_KEYWORD_RE = /\bjoin\s+as\s+(?:an?\s+)?agent\b/i;
+// Trigger phrases that start the agent self-registration flow. Substring-
+// matched against the incoming message (same pattern as isNewListingIntent
+// in agentReplyIntent.js). Kept deliberately conservative — false positives
+// here would intercept genuine buyer messages. Extend the list as real-world
+// missed phrases come in from support.
+const SIGNUP_TRIGGER_PATTERNS = [
+  /\bjoin\s+as\s+(?:an?\s+)?agent\b/i,
+  /\bjoin\s+as\s+(?:an?\s+)?dealer\b/i,
+  /\bbecome\s+(?:an?\s+)?agent\b/i,
+  /\bbecome\s+(?:an?\s+)?dealer\b/i,
+  /\bsign\s*(?:me\s*)?up\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bnaya\s+agent\b/i,
+  /\bnayi\s+agent\b/i,
+  /\bagent\s+banna\b/i,
+  /\bdealer\s+banna\b/i,
+  /\bi\s+want\s+to\s+(?:be|become)\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bregister\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+];
 
 async function enqueueSignupExtractJob(signupId) {
   const jobId = `signup-extract-${signupId}`;
@@ -103,7 +119,7 @@ function buildStillPendingMessage(lang) {
  * sending the HTTP response) and returns true.
  */
 async function handleAgentSignupMessage({ knex, phone, leadName, incomingText, receivingPhoneNumberId, receivingNumber, res }) {
-  const isTrigger = SIGNUP_KEYWORD_RE.test(incomingText);
+  const isTrigger = SIGNUP_TRIGGER_PATTERNS.some((re) => re.test(incomingText));
   const normalizedPhone = normalizePhone(phone);
 
   const tenant = await resolveTenantForSignup(knex, { receivingPhoneNumberId, receivingNumber });
