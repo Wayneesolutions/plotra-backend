@@ -124,6 +124,38 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     : 'country:IN';
   const boundsQueryParam = (!listingData.pincode && geoBiasBounds) ? `&bounds=${geoBiasBounds}` : '';
 
+  // Google Plus Code (Open Location Code) detection — e.g. "VVQC+JCQ" or
+  // "7RGH7QCQ+JCQ". When the agent includes one in their address, it
+  // encodes an exact GPS location that Google decodes to ROOFTOP
+  // precision, making this categorically more accurate than any text-
+  // address geocode. Short codes (≤6 chars before +) need a locality
+  // anchor to resolve — extract the first place-name segment from the
+  // rest of the address. When a Plus Code is present, skip the
+  // postal_code filter and bounds bias: both are redundant when the
+  // query is already an exact GPS reference, and the postal filter can
+  // reject a valid ROOFTOP result if Google's index maps that coordinate
+  // to a slightly different postal area.
+  const PLUS_CODE_RE = /\b([23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3})\b/i;
+  const plusCodeMatch = rawAddress.match(PLUS_CODE_RE);
+  let geocodeAddress = rawAddress;
+  if (plusCodeMatch) {
+    const code = plusCodeMatch[1];
+    const prefixLen = code.indexOf('+');
+    if (prefixLen <= 6) {
+      // Short code — needs a locality. Strip the code, then pick the
+      // first comma-segment that has no digits (a place name, not a
+      // street number or pincode).
+      const rest = rawAddress.replace(PLUS_CODE_RE, '').replace(/^[,\s]+|[,\s]+$/g, '');
+      const locality = rest.split(',').map(s => s.trim()).find(s => s.length > 0 && !/\d/.test(s)) || rest;
+      geocodeAddress = `${code} ${locality}`;
+    } else {
+      geocodeAddress = code; // full code is self-anchoring
+    }
+    console.log(`[Job ${job.id}] Plus Code detected — geocoding via "${geocodeAddress}" for ROOFTOP precision.`);
+  }
+  const effectiveComponents = plusCodeMatch ? 'country:IN' : components;
+  const effectiveBoundsParam = plusCodeMatch ? '' : boundsQueryParam;
+
   try {
     // 0. Self-learning cache check — before ever calling Google, see if a
     // human already confirmed a location for this exact building_name or
@@ -150,7 +182,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       formattedAddress = cacheHit.formatted_address || null;
     } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
-      const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=${components}${boundsQueryParam}&key=${targetApiKey}`;
+      const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=${effectiveComponents}${effectiveBoundsParam}&key=${targetApiKey}`;
       let response = await axios.get(geoUrl);
 
       // If the pincode-scoped lookup returned no results, retry without it.
@@ -162,7 +194,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       // cases without widening the search to the whole country.
       if (response.data.status !== 'OK' && listingData.pincode) {
         const fallbackBoundsParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
-        const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(rawAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
+        const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
         const fallbackResponse = await axios.get(fallbackUrl);
         if (fallbackResponse.data.status === 'OK') {
           response = fallbackResponse;
