@@ -1,6 +1,6 @@
 const { Queue } = require('bullmq');
 const axios = require('axios');
-const { isApprovalReply } = require('../utils/agentReplyIntent');
+const { isApprovalReply, isNewListingIntent } = require('../utils/agentReplyIntent');
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
@@ -213,7 +213,13 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         .first();
 
       if (draftPeek) {
-        try {
+        // Short-circuit before GPT if the agent is clearly asking to start
+        // a new listing — no property details to extract, no point calling
+        // the extraction API. isNewListingIntent uses substring matching on
+        // phrases like "new listing", "naya property", "list something new".
+        if (isNewListingIntent(incomingText)) {
+          awaitingApprovalContext = { hasInfo: false, differentProperty: false, isNewListingIntent: true };
+        } else try {
           // Fetch the listing's current values FIRST and feed them to
           // extraction as correction context — without this, a short reply
           // like "wrong information i typed ludhiana" has no way to be read
@@ -379,6 +385,33 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         // the generic append-and-extract branch below instead of trusting
         // stale context.
         if (awaitingApprovalContext) {
+          if (awaitingApprovalContext.isNewListingIntent) {
+            // Agent explicitly wants to start a brand-new listing — abandon
+            // the pending one and open a clean draft. Don't extract from this
+            // message (it has no property details), just prompt for them.
+            await trx('agent_listing_drafts')
+              .where({ id: draft.id })
+              .update({ status: 'abandoned', updated_at: trx.fn.now() });
+
+            const [newDraft] = await trx('agent_listing_drafts')
+              .insert({ tenant_id: agentUser.tenant_id, user_id: agentUser.id, status: 'collecting', accumulated_text: '' })
+              .returning(['id']);
+
+            await trx('agent_draft_messages').insert({
+              draft_id: newDraft.id,
+              direction: 'inbound',
+              body: incomingText,
+              bsp_message_id: bspMessageId || null,
+            });
+
+            const lang = detectReplyLanguage(incomingText);
+            const promptBody = lang === 'en'
+              ? 'Starting fresh! Send me the details for the new property — address, type (plot/flat/commercial), and price if you have it.'
+              : 'Naya listing shuru karte hain! Naye property ki details bhejein — address, type (plot/flat/commercial), aur price agar pata ho.';
+            await logAgentOutboundMessage(trx, { draftId: newDraft.id, body: promptBody });
+            return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: promptBody };
+          }
+
           if (!awaitingApprovalContext.hasInfo) {
             // Non-informative reply ("Hello", a thank-you, a "this is
             // wrong" with no actual replacement value, etc.) — remind them
