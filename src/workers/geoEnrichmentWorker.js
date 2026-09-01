@@ -215,7 +215,20 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       // flags as an error. Try Places' fuzzy real-place matching before
       // accepting it; only fall back to the coarse geocode if Places also
       // comes up empty.
-      const isHighPrecision = HIGH_PRECISION_LOCATION_TYPES.includes(result.geometry.location_type) && !result.partial_match;
+      //
+      // ROOFTOP is always trusted regardless of partial_match — ROOFTOP
+      // means Google resolved the query to an exact building/house rooftop
+      // coordinate. partial_match=true on a ROOFTOP result only means the
+      // address components were partially ambiguous during parsing, not
+      // that the coordinate itself is coarse. Replacing a ROOFTOP result
+      // with a Places "Find Place" result (a named-POI centroid) would
+      // actively degrade precision, as seen in logs where ROOFTOP jobs
+      // were sent to Places and came back as neighborhood centroids.
+      // RANGE_INTERPOLATED is also kept without partial_match — it's an
+      // interpolated street-range result that is still address-level, and
+      // partial_match there does signal genuine ambiguity.
+      const isHighPrecision = result.geometry.location_type === 'ROOFTOP'
+        || (result.geometry.location_type === 'RANGE_INTERPOLATED' && !result.partial_match);
       if (!isHighPrecision) {
         console.log(`[Job ${job.id}] Geocode came back low-precision (location_type=${result.geometry.location_type}, partial_match=${!!result.partial_match}) — trying Places text search.`);
         const placesResult = await tryPlacesTextSearch(rawAddress, targetApiKey, geoBiasBounds);
