@@ -271,10 +271,13 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         // with just the colony + area + city — less precise (200-500 m)
         // but reliably in the right neighbourhood rather than 10 km off.
         // For all other addresses, query Places with the cleaned full address.
-        const AMBIGUOUS_STREET_RE = /^(street\s+(number|no\.?)\s*\d+|gali\s+(number|no\.?)?\s*\d+)[,\s]*/i;
+        const AMBIGUOUS_STREET_RE = /,?\s*(street\s+(number|no\.?)\s*\d+|gali\s+(number|no\.?)?\s*\d+)\s*/i;
         const hasAmbiguousStreet = !plusCodeMatch && AMBIGUOUS_STREET_RE.test(geocodeAddress);
         const localityQuery = hasAmbiguousStreet
-          ? geocodeAddress.replace(AMBIGUOUS_STREET_RE, '').replace(/^[,\s]+/, '')
+          ? geocodeAddress
+              .replace(AMBIGUOUS_STREET_RE, ', ')
+              .replace(/^[,\s]+|[,\s]+$/g, '')
+              .replace(/,\s*,/g, ',')
           : null;
 
         // Use the geocoding result's own coordinates as a tight circle
