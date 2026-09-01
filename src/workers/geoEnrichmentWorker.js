@@ -52,9 +52,26 @@ const HIGH_PRECISION_LOCATION_TYPES = ['ROOFTOP', 'RANGE_INTERPOLATED'];
  * doesn't have Places enabled, quota, network) just means falling back to
  * whatever the Geocoding API already found, exactly like before this fix.
  */
-async function tryPlacesTextSearch(rawAddress, apiKey, geoBiasBounds) {
+/**
+ * @param {string} address
+ * @param {string} apiKey
+ * @param {string|null} geoBiasBounds  — broad tenant-level rectangle fallback
+ * @param {{lat:number,lng:number,radius:number}|null} circleBias
+ *   When provided, overrides geoBiasBounds with a tight circle centered on
+ *   the Geocoding API's own (low-precision) result. Keeps Places from
+ *   returning any "Street Number 4" in all of Ludhiana — it can only
+ *   return results within radius metres of where the geocoder already
+ *   landed, which is usually the right neighbourhood even when not
+ *   house-level.
+ */
+async function tryPlacesTextSearch(rawAddress, apiKey, geoBiasBounds, circleBias = null) {
   try {
-    const locationBias = geoBiasBounds ? `&locationbias=rectangle:${geoBiasBounds}` : '';
+    let locationBias = '';
+    if (circleBias) {
+      locationBias = `&locationbias=circle:${circleBias.radius}@${circleBias.lat},${circleBias.lng}`;
+    } else if (geoBiasBounds) {
+      locationBias = `&locationbias=rectangle:${geoBiasBounds}`;
+    }
     const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(rawAddress)}&inputtype=textquery&fields=geometry,formatted_address&region=in${locationBias}&key=${apiKey}`;
     const response = await axios.get(url, { timeout: 8000 });
     const candidate = response.data.status === 'OK' ? response.data.candidates?.[0] : null;
@@ -260,13 +277,21 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
           ? geocodeAddress.replace(AMBIGUOUS_STREET_RE, '').replace(/^[,\s]+/, '')
           : null;
 
+        // Use the geocoding result's own coordinates as a tight circle
+        // bias for Places instead of the broad tenant-level rectangle.
+        // Even a low-precision geocode (GEOMETRIC_CENTER) usually lands
+        // in the right neighbourhood; constraining Places to a 4 km
+        // radius around it prevents returning any "Street Number 4" in
+        // the whole city when the agent meant a specific colony's street.
+        const circleBias = { lat, lng, radius: 4000 };
+
         let placesResult = null;
         if (localityQuery) {
           console.log(`[Job ${job.id}] Ambiguous street-number address — querying Places with locality-only: "${localityQuery}"`);
-          placesResult = await tryPlacesTextSearch(localityQuery, targetApiKey, geoBiasBounds);
+          placesResult = await tryPlacesTextSearch(localityQuery, targetApiKey, geoBiasBounds, circleBias);
         }
         if (!placesResult) {
-          placesResult = await tryPlacesTextSearch(geocodeAddress, targetApiKey, geoBiasBounds);
+          placesResult = await tryPlacesTextSearch(geocodeAddress, targetApiKey, geoBiasBounds, circleBias);
         }
 
         if (placesResult) {
