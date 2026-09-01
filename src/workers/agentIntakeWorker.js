@@ -162,6 +162,42 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       return { success: true, missing };
     }
 
+    // Before creating the listing, check if the address is too vague to
+    // geocode precisely. An address with no plot/door/unit number, no named
+    // building, and no pincode will at best return a neighbourhood centroid —
+    // exactly what causes the "pin is always a few meters off" problem.
+    // Ask once for a more specific address; on the next extraction pass,
+    // alreadyAskedPrecision = true and we proceed regardless of their reply
+    // (they may not have a number — don't block indefinitely).
+    const missingFields = (() => {
+      try {
+        const mf = draft.missing_fields;
+        if (!mf) return [];
+        return Array.isArray(mf) ? mf : JSON.parse(mf);
+      } catch { return []; }
+    })();
+    const alreadyAskedPrecision = missingFields.includes('address_precision_asked');
+    const addressHasNumber = /\d/.test(extracted.raw_address || '');
+    const needsPrecision = !alreadyAskedPrecision && !addressHasNumber && !extracted.building_name && !extracted.pincode;
+
+    if (needsPrecision) {
+      await knex('agent_listing_drafts').where({ id: draftId }).update({
+        status: 'collecting',
+        extracted_fields: JSON.stringify(extracted),
+        missing_fields: JSON.stringify(['address_precision_asked']),
+        updated_at: knex.fn.now(),
+      });
+      const lang = await detectDraftLanguage(knex, draftId);
+      const precisionBody = lang === 'en'
+        ? `For an accurate map pin, please add a plot or door number to your address.\n\nE.g. *"Plot No. 142-B, Ranjit Avenue, Amritsar"* or *"H.No. 74, Guru Nanak Nagar, Ludhiana"*\n\nIf you don't have one, reply *"no number"* and we'll continue with the current address.`
+        : `Map pin bilkul sahi jagah lagane ke liye, plot ya door number add karein.\n\nJaise: *"Plot No. 142-B, Ranjit Avenue, Amritsar"* ya *"H.No. 74, Guru Nanak Nagar, Ludhiana"*\n\nAgar number nahi pata, to *"number nahi"* reply karein aur hum aage badhenge.`;
+      await knex.transaction(async (trx) => {
+        await logAgentOutboundMessage(trx, { draftId, body: precisionBody });
+      });
+      await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: precisionBody });
+      return { success: true, awaitingPrecision: true };
+    }
+
     await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'creating', updated_at: knex.fn.now() });
 
     try {

@@ -71,7 +71,7 @@ function detectReplyLanguage(text) {
 // so agentIntakeWorker.js (WhatsApp) can use the exact same English text
 // instead of a second, potentially-drifting copy.
 const FIELD_QUESTIONS_EN = {
-  raw_address: "What's the location/address? (e.g. 'Sector 45, Mohali')",
+  raw_address: "What's the property address? (e.g. 'Plot No. 142-B, Ranjit Avenue, Amritsar' or 'SCO 145, Sector 34-A, Chandigarh')",
   price: "What's the price? (e.g. 55 lakh)",
   property_type: 'What type of property — Plot, Villa, or Commercial?',
   title: 'Give me a short title for this listing.',

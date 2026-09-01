@@ -6,7 +6,7 @@ const axios = require('axios');
 
 const REQUIRED_FIELDS = ['title', 'raw_address', 'property_type'];
 const FIELD_QUESTIONS = {
-  raw_address: "Location/address kya hai? (e.g. 'sector 45 mohali', ya building/mall ka naam)",
+  raw_address: "Property ka address kya hai? (e.g. 'Plot No. 142-B, Ranjit Avenue, Amritsar' ya 'SCO 145, Sector 34-A, Chandigarh')",
   price: 'Price kitni hai? (e.g. 55 lakh)',
   property_type: 'Property type kya hai — Plot, Flat, Villa, Commercial?',
   title: 'Ek chhota sa title de dijiye is listing ke liye.',
