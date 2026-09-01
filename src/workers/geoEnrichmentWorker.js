@@ -156,6 +156,18 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   const effectiveComponents = plusCodeMatch ? 'country:IN' : components;
   const effectiveBoundsParam = plusCodeMatch ? '' : boundsQueryParam;
 
+  // Strip leading proximity/relative words before geocoding — "near
+  // Street Number 4" tells the Geocoding API the street is an
+  // approximate reference, causing it to match ANY "Street Number 4"
+  // in the city instead of the one in the named colony that follows.
+  // Stripping just the prefix preserves the colony/area/city context
+  // that actually disambiguates. Not applied to Plus Code queries.
+  if (!plusCodeMatch) {
+    geocodeAddress = geocodeAddress.replace(
+      /^(near|opp\.?|opposite|behind|adj\.?|adjacent|beside|next\s+to|in\s+front\s+of)\s+/i, ''
+    );
+  }
+
   try {
     // 0. Self-learning cache check — before ever calling Google, see if a
     // human already confirmed a location for this exact building_name or
@@ -231,7 +243,32 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         || (result.geometry.location_type === 'RANGE_INTERPOLATED' && !result.partial_match);
       if (!isHighPrecision) {
         console.log(`[Job ${job.id}] Geocode came back low-precision (location_type=${result.geometry.location_type}, partial_match=${!!result.partial_match}) — trying Places text search.`);
-        const placesResult = await tryPlacesTextSearch(rawAddress, targetApiKey, geoBiasBounds);
+
+        // "Street Number X" and "Gali X" naming is used in dozens of
+        // colonies across every Punjab city — passing the full address
+        // to Places causes it to return the most prominent match for
+        // that street number, which is often the wrong colony entirely
+        // (as seen: "Street Number 4, Parbhat Nagar, Dholewal Chowk,
+        // Ludhiana" geocoded to Gobind Nagar, 10 km away). For these
+        // ambiguous patterns, strip the street number and query Places
+        // with just the colony + area + city — less precise (200-500 m)
+        // but reliably in the right neighbourhood rather than 10 km off.
+        // For all other addresses, query Places with the cleaned full address.
+        const AMBIGUOUS_STREET_RE = /^(street\s+(number|no\.?)\s*\d+|gali\s+(number|no\.?)?\s*\d+)[,\s]*/i;
+        const hasAmbiguousStreet = !plusCodeMatch && AMBIGUOUS_STREET_RE.test(geocodeAddress);
+        const localityQuery = hasAmbiguousStreet
+          ? geocodeAddress.replace(AMBIGUOUS_STREET_RE, '').replace(/^[,\s]+/, '')
+          : null;
+
+        let placesResult = null;
+        if (localityQuery) {
+          console.log(`[Job ${job.id}] Ambiguous street-number address — querying Places with locality-only: "${localityQuery}"`);
+          placesResult = await tryPlacesTextSearch(localityQuery, targetApiKey, geoBiasBounds);
+        }
+        if (!placesResult) {
+          placesResult = await tryPlacesTextSearch(geocodeAddress, targetApiKey, geoBiasBounds);
+        }
+
         if (placesResult) {
           ({ lat, lng, formattedAddress } = placesResult);
           console.log(`[Job ${job.id}] Places text search found a match, using it instead of the low-precision geocode.`);
