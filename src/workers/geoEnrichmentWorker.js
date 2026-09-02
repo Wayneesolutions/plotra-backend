@@ -57,7 +57,22 @@ const HIGH_PRECISION_LOCATION_TYPES = ['ROOFTOP', 'RANGE_INTERPOLATED'];
  *   landed, which is usually the right neighbourhood even when not
  *   house-level.
  */
-async function tryPlacesTextSearch(rawAddress, apiKey, geoBiasBounds, circleBias = null) {
+function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; // Earth's radius in meters
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a = Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+            Math.cos(phi1) * Math.cos(phi2) *
+            Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c; // Returns absolute value in meters
+}
+
+async function tryPlacesTextSearch(rawAddress, apiKey, geoBiasBounds, circleBias = null, geocodeLat = null, geocodeLng = null) {
   try {
     let locationBias = '';
     if (circleBias) {
@@ -65,15 +80,35 @@ async function tryPlacesTextSearch(rawAddress, apiKey, geoBiasBounds, circleBias
     } else if (geoBiasBounds) {
       locationBias = `&locationbias=rectangle:${geoBiasBounds}`;
     }
-    const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(rawAddress)}&inputtype=textquery&fields=geometry,formatted_address&region=in${locationBias}&key=${apiKey}`;
+    const url = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(rawAddress)}&inputtype=textquery&fields=geometry,formatted_address,place_id&region=in${locationBias}&key=${apiKey}`;
     const response = await axios.get(url, { timeout: 8000 });
     const candidate = response.data.status === 'OK' ? response.data.candidates?.[0] : null;
     if (!candidate?.geometry?.location) return null;
+
+    // Places' "most prominent match" for the query text can be a real,
+    // correctly-indexed place that's simply nowhere near where we're
+    // actually looking  a same-named colony in the wrong part of town, or
+    // (without geoBiasBounds/circleBias) anywhere in India. Google never
+    // flags this as an error since the place itself is genuine. Sanity-check
+    // against the geocoder's own estimate before trusting it; a match this
+    // far off is worse than the low-precision geocode it was meant to fix.
+    const MAX_CANDIDATE_DRIFT_METERS = 3000;
+    if (geocodeLat != null && geocodeLng != null) {
+      const driftMeters = calculateHaversineDistance(
+        geocodeLat, geocodeLng,
+        candidate.geometry.location.lat, candidate.geometry.location.lng
+      );
+      if (driftMeters > MAX_CANDIDATE_DRIFT_METERS) {
+        console.log(`Places candidate rejected: ${Math.round(driftMeters)}m from geocode estimate (max ${MAX_CANDIDATE_DRIFT_METERS}m).`);
+        return null;
+      }
+    }
 
     return {
       lat: candidate.geometry.location.lat,
       lng: candidate.geometry.location.lng,
       formattedAddress: candidate.formatted_address || null,
+      placeId: candidate.place_id || null,
     };
   } catch (err) {
     console.error('Places text-search fallback failed (non-fatal, keeping Geocoding API result):', err.message);
@@ -291,10 +326,10 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         let placesResult = null;
         if (localityQuery) {
           console.log(`[Job ${job.id}] Ambiguous street-number address — querying Places with locality-only: "${localityQuery}"`);
-          placesResult = await tryPlacesTextSearch(localityQuery, targetApiKey, geoBiasBounds, circleBias);
+          placesResult = await tryPlacesTextSearch(localityQuery, targetApiKey, geoBiasBounds, circleBias, lat, lng);
         }
         if (!placesResult) {
-          placesResult = await tryPlacesTextSearch(geocodeAddress, targetApiKey, geoBiasBounds, circleBias);
+          placesResult = await tryPlacesTextSearch(geocodeAddress, targetApiKey, geoBiasBounds, circleBias, lat, lng);
         }
 
         if (placesResult) {
