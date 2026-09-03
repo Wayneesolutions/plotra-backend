@@ -22,6 +22,8 @@ const {
 const { listAgentSignupsAdmin, approveAgentSignupAdmin, rejectAgentSignupAdmin } = require('../controllers/agentSignupController');
 // NEW — plan management (gap #3)
 const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../controllers/plansController');
+// NEW — super-admin geo review queue for WhatsApp agent-intake listings
+const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGeoReviewController');
 
 // Every admin route requires a valid JWT (authGuard), super_admin role
 // (adminGuard), AND now serviceContext — these routes legitimately read/
@@ -142,5 +144,21 @@ router.patch('/plans/:key', updatePlan);
  * @desc    Delete a plan — blocked if any tenants are currently on it
  */
 router.delete('/plans/:key', deletePlan);
+
+/**
+ * @route   GET /api/v1/admin/listings/geo-review
+ * @desc    WhatsApp agent-intake listings paused at status='pending_geo_review',
+ *          waiting for a super-admin to correct/confirm the pin before the
+ *          agent gets a preview link. See adminGeoReviewController.js and
+ *          geoEnrichmentWorker.js for why this queue exists.
+ */
+router.get('/listings/geo-review', listGeoReviewQueue);
+
+/**
+ * @route   PATCH /api/v1/admin/listings/:id/geo-review
+ * @desc    Approve a listing out of the geo-review queue — optionally with
+ *          a corrected {lat, lng} — which releases the agent's preview link.
+ */
+router.patch('/listings/:id/geo-review', approveGeoReview);
 
 module.exports = router;
