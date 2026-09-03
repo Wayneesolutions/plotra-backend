@@ -17,6 +17,40 @@ const landmarkQueue = new Queue('landmark-extraction', { connection: redisConnec
 const localIntelligenceQueue = new Queue('local-intelligence', { connection: redisConnection });
 
 /**
+ * Derives a locality-level area string ("Ferozepur Road, Ludhiana") from a
+ * Geocoding API result — no house/plot number, no street address, safe to
+ * show a buyer before they've contacted the dealer. Shared by
+ * geoEnrichmentWorker.js (new listings) and adminGeoReviewController.js
+ * (manual pin correction) so both populate listings.general_area the same
+ * way — see the marketplace search flow in webhookController.js /
+ * buyerSearchService.js for how it's used.
+ *
+ * Prefers Google's own address_components (accurate, structured) when
+ * available. Falls back to trimming the raw formatted_address string when
+ * components aren't available (e.g. geoEnrichmentWorker.js's
+ * resolved-locality cache-hit path, which skips the fresh geocode call
+ * entirely) — good enough for a locality-level label, not relied on for
+ * anything precision-sensitive.
+ */
+function extractGeneralArea(addressComponents, formattedAddress) {
+  if (Array.isArray(addressComponents) && addressComponents.length) {
+    const findByType = (type) => addressComponents.find((c) => c.types.includes(type))?.long_name;
+    const areaPart = findByType('sublocality_level_1') || findByType('sublocality') || findByType('neighborhood') || findByType('route');
+    const cityPart = findByType('locality') || findByType('administrative_area_level_2');
+    const parts = [areaPart, cityPart].filter(Boolean);
+    if (parts.length) return parts.join(', ');
+  }
+
+  if (formattedAddress) {
+    const segments = formattedAddress.split(',').map((s) => s.trim()).filter(Boolean);
+    if (segments.length > 1) return segments.slice(1, 4).join(', ');
+    return segments[0] || null;
+  }
+
+  return null;
+}
+
+/**
  * Persists resolved lat/lng (+ optionally formatted_address and any other
  * listing fields via extraListingUpdates) for a listing, regenerates the
  * static satellite/street-view fallback images (used for WhatsApp/OG
@@ -77,4 +111,4 @@ async function applyResolvedLocation(knex, {
   }
 }
 
-module.exports = { applyResolvedLocation };
+module.exports = { applyResolvedLocation, extractGeneralArea };

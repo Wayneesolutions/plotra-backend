@@ -62,6 +62,7 @@ async function servePropertyPreview(req, res, next) {
         'listings.title',
         'listings.formatted_address',
         'listings.raw_address',
+        'listings.general_area',
         'listings.price',
         'listings.property_type',
         'listings.plot_area',
@@ -80,7 +81,10 @@ async function servePropertyPreview(req, res, next) {
       return res.status(404).send('Not found');
     }
 
-    const address = listing.formatted_address || listing.raw_address;
+    // Same masking as PropertyView.jsx — general_area (locality-level) for
+    // any listing that has one (new listings only; see the migration),
+    // exact address unchanged for everything geocoded before this feature.
+    const address = listing.general_area || listing.formatted_address || listing.raw_address;
     const priceFormatted = listing.price != null
       ? new Intl.NumberFormat('en-IN', {
           style: 'currency',

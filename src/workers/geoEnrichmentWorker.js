@@ -5,7 +5,7 @@ const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
-const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 const { lookupResolvedLocality, recordResolvedLocality } = require('../services/resolvedLocalityService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
@@ -196,12 +196,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     let lat, lng, formattedAddress, lowConfidence = false;
+    let generalArea = null;
 
     if (cacheHit) {
       console.log(`[Job ${job.id}] Resolved-locality cache HIT (${cacheHit.key_type}="${cacheHit.display_name}", confidence=${cacheHit.confidence}) — skipping Google geocode.`);
       lat = Number(cacheHit.lat);
       lng = Number(cacheHit.lng);
       formattedAddress = cacheHit.formatted_address || null;
+      generalArea = extractGeneralArea(null, formattedAddress); // no address_components on a cache hit — text-heuristic fallback
     } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
       const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=${effectiveComponents}${effectiveBoundsParam}&key=${targetApiKey}`;
@@ -230,6 +232,11 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       const result = response.data.results[0];
       formattedAddress = result.formatted_address;
       ({ lat, lng } = result.geometry.location);
+      // Distance-tolerant even if Places overrides lat/lng/formattedAddress
+      // below — the Places locationbias circle already keeps that
+      // correction within the same neighbourhood as this geocode, so the
+      // locality-level area is still accurate enough either way.
+      generalArea = extractGeneralArea(result.address_components, formattedAddress);
 
       // Not a house-level match — this is the actual cause of "typing the
       // same house number into Google Maps finds it exactly, but Plotra
@@ -341,6 +348,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         // the next time this listing is (re-)geocoded from a corrected
         // address.
         location_low_confidence: lowConfidence,
+        // Locality-level, no house/plot number — safe to show a buyer
+        // before they've contacted the dealer. NULL for any listing this
+        // worker doesn't (re-)geocode, i.e. every listing that existed
+        // before this feature — PropertyView.jsx falls back to
+        // formatted_address for those, so already-shared links are
+        // unaffected. See extractGeneralArea above and the marketplace
+        // search flow in webhookController.js / buyerSearchService.js.
+        general_area: generalArea,
       },
     });
 
