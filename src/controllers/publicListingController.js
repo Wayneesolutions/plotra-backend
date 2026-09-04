@@ -48,6 +48,7 @@ async function getPublicListing(req, res) {
         'listings.title',
         'listings.raw_address',
         'listings.formatted_address',
+        'listings.general_area',
         'listings.lat',
         'listings.lng',
         'listings.price',

@@ -20,7 +20,7 @@
 // longer to arrive.
 const { Queue } = require('bullmq');
 const axios = require('axios');
-const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 
 const redisConnection = {
   host: process.env.REDIS_HOST || '127.0.0.1',
@@ -162,11 +162,13 @@ async function approveGeoReview(req, res) {
       const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
       const targetApiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
       if (targetApiKey) {
+        let generalArea = null;
         try {
           const reverseUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${nLat},${nLng}&key=${targetApiKey}`;
           const reverseResponse = await axios.get(reverseUrl, { timeout: 8000 });
           if (reverseResponse.data.status === 'OK' && reverseResponse.data.results.length) {
             formattedAddress = reverseResponse.data.results[0].formatted_address;
+            generalArea = extractGeneralArea(reverseResponse.data.results[0].address_components, formattedAddress);
           }
         } catch (reverseErr) {
           console.error('Reverse geocode for admin geo-review correction failed (non-fatal):', reverseErr.message);
@@ -183,6 +185,7 @@ async function approveGeoReview(req, res) {
             status: 'awaiting_approval',
             location_low_confidence: false,
             pin_manually_corrected: true,
+            general_area: generalArea,
           },
         });
       } else {

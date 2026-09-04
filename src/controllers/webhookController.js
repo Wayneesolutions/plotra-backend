@@ -5,6 +5,7 @@ const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto } = r
 const { handleAgentSignupMessage } = require('./agentSignupController');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { handleBuyerSearch } = require('../services/buyerSearchService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -184,6 +185,50 @@ async function handleInboundWhatsApp(req, res) {
     res,
   });
   if (signupHandled) return;
+
+  // Marketplace search (shared platform number ONLY): a brand-new
+  // conversation — no existing thread for this bsp_thread_ref, no existing
+  // lead for this phone, and no inferredSlug (i.e. the buyer didn't arrive
+  // via a specific listing's own link) — that lands on a receiving
+  // number NO dealer has registered (resolveTenantByReceivingNumber
+  // returns null) is treated as an open-ended cross-tenant property
+  // search instead of being silently attributed to "the oldest active
+  // tenant's newest listing" (the old, unrelated-to-what-was-typed
+  // fallback below).
+  //
+  // Deliberately checked with plain `knex`, before the transaction below
+  // even opens — this path never creates a lead/thread/listing
+  // association (see buyerSearchService.js: it's a stateless search+
+  // reply), so it doesn't need transactional isolation, and checking here
+  // means the entire transaction below — the existing dealer-number /
+  // specific-listing flow — is completely untouched by this feature: if
+  // handleBuyerSearch returns null (not a confident search, or this
+  // wasn't even eligible), execution falls straight through to the
+  // existing code exactly as it ran before this feature existed.
+  const existingThreadForSearch = bspThreadRef
+    ? await knex('whatsapp_threads').where({ bsp_thread_ref: bspThreadRef }).first()
+    : null;
+  const existingLeadForSearch = !existingThreadForSearch
+    ? await knex('leads').where({ phone }).first()
+    : null;
+
+  if (!existingThreadForSearch && !existingLeadForSearch && !inferredSlug) {
+    const receivingDealer = await resolveTenantByReceivingNumber(knex, {
+      phoneNumberId: receivingPhoneNumberId,
+      whatsappNumber: receivingNumber,
+    });
+
+    if (!receivingDealer) {
+      const searchResult = await handleBuyerSearch(knex, { incomingText: incomingText.trim(), buyerPhone: phone });
+      if (searchResult) {
+        await enqueueAgentWhatsappSend({ tenantId: null, phone, messageBody: searchResult.replyText });
+        return res.status(200).json({ success: true, marketplaceSearch: true, matchCount: searchResult.matchCount });
+      }
+      // searchResult null: model wasn't confident this was a property
+      // search (greeting, unrelated message, etc.) — fall through to the
+      // existing transaction below, same as before this feature existed.
+    }
+  }
 
   try {
     const resolvedContext = await knex.transaction(async (trx) => {

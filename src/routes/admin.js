@@ -24,6 +24,8 @@ const { listAgentSignupsAdmin, approveAgentSignupAdmin, rejectAgentSignupAdmin }
 const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../controllers/plansController');
 // NEW — super-admin geo review queue for WhatsApp agent-intake listings
 const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGeoReviewController');
+// NEW — marketplace buyer search lead-delivery tracking (Phase 1, no billing)
+const { getMarketplaceLeadsSummary } = require('../controllers/adminMarketplaceLeadsController');
 
 // Every admin route requires a valid JWT (authGuard), super_admin role
 // (adminGuard), AND now serviceContext — these routes legitimately read/
@@ -160,5 +162,13 @@ router.get('/listings/geo-review', listGeoReviewQueue);
  *          a corrected {lat, lng} — which releases the agent's preview link.
  */
 router.patch('/listings/:id/geo-review', approveGeoReview);
+
+/**
+ * @route   GET /api/v1/admin/marketplace-leads
+ * @desc    Per-dealer counts + recent rows from marketplace_lead_deliveries
+ *          (shared-platform-number buyer search — see buyerSearchService.js).
+ *          Tracking only — Phase 1, no billing wired up yet.
+ */
+router.get('/marketplace-leads', getMarketplaceLeadsSummary);
 
 module.exports = router;
