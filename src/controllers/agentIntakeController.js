@@ -7,6 +7,7 @@ const { uploadToS3 } = require('../services/s3Service');
 const { extractListingFields } = require('../services/listingExtractionService');
 const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
 const { autoPublishIfReady } = require('./builderProfileController');
+const { provideValidationFeedback } = require('../services/addressValidation');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -333,7 +334,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const [updatedListing] = await trx('listings')
           .where({ id: draft.listing_id })
           .update({ status: 'active', updated_at: trx.fn.now() })
-          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id']);
+          .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id', 'geo_validation_response_id']);
 
         await recordImplicitApprovalIfUncorrected(trx, updatedListing);
 
@@ -344,7 +345,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
         await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
-        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id };
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id, geoValidationResponseId: updatedListing.geo_validation_response_id, pinManuallyCorrected: updatedListing.pin_manually_corrected };
       }
 
       if (draft.status === 'awaiting_approval') {
@@ -359,7 +360,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const [updatedListing] = await trx('listings')
             .where({ id: draft.listing_id, status: 'awaiting_approval' })
             .update({ status: 'active', updated_at: trx.fn.now() })
-            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id']);
+            .returning(['id', 'public_slug', 'tenant_id', 'building_name', 'raw_address', 'lat', 'lng', 'formatted_address', 'pin_manually_corrected', 'builder_profile_id', 'geo_validation_response_id']);
 
           if (!updatedListing) {
             // Already approved (or otherwise moved on) by a prior message —
@@ -376,7 +377,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           const confirmationBody = buildConfirmationMessage(updatedListing.public_slug, detectReplyLanguage(incomingText));
           await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmationBody });
 
-          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id };
+          return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmationBody, builderProfileId: updatedListing.builder_profile_id, geoValidationResponseId: updatedListing.geo_validation_response_id, pinManuallyCorrected: updatedListing.pin_manually_corrected };
         }
 
         // Re-check against the fresh, lock-guaranteed status — if the peek
@@ -515,6 +516,18 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
 
     if (result.action === 'send') {
       await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody });
+
+      // Agent approved without manually correcting the pin — tell Google the
+      // validated address was used as-is. Skipped when the dealer dragged the
+      // pin before approving (pin_manually_corrected=true), because
+      // publicListingController.js already sent USER_VERSION_USED at drag time.
+      if (result.geoValidationResponseId && !result.pinManuallyCorrected) {
+        await provideValidationFeedback({
+          responseId: result.geoValidationResponseId,
+          conclusion: 'VALIDATED_VERSION_USED',
+          apiKey: process.env.GOOGLE_MAPS_API_KEY,
+        });
+      }
 
       // The dealer approving their own listing counts as sign-off on its
       // linked builder profile too — publish immediately if research

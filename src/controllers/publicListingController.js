@@ -3,6 +3,7 @@ const axios = require('axios');
 const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
+const { provideValidationFeedback } = require('../services/addressValidation');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -475,6 +476,19 @@ async function updateListingLocation(req, res) {
       formattedAddress,
       source: 'manual_pin_drag',
     });
+
+    // Let Google know the dealer overrode the validated location — improves
+    // their model for this address over time. Non-fatal if it fails (see
+    // addressValidation.js). Only fires when this listing was validated via
+    // Address Validation API (geo_validation_response_id is null for listings
+    // geocoded via the old Geocoding API path).
+    if (listing.geo_validation_response_id) {
+      await provideValidationFeedback({
+        responseId: listing.geo_validation_response_id,
+        conclusion: 'USER_VERSION_USED',
+        apiKey: targetApiKey,
+      });
+    }
 
     return res.status(200).json({
       success: true,

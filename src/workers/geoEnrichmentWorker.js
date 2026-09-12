@@ -7,6 +7,7 @@ const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 const { lookupResolvedLocality, recordResolvedLocality } = require('../services/resolvedLocalityService');
+const { validateAddress } = require('../services/addressValidation');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -230,7 +231,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       rawAddress,
     });
 
-    let lat, lng, formattedAddress, lowConfidence = false;
+    let lat, lng, formattedAddress, lowConfidence = false, geoValidationResponseId = null;
     let generalArea = null;
 
     if (cacheHit) {
@@ -240,6 +241,32 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       formattedAddress = cacheHit.formatted_address || null;
       generalArea = extractGeneralArea(null, formattedAddress); // no address_components on a cache hit — text-heuristic fallback
     } else {
+      const useAddressValidation = process.env.USE_ADDRESS_VALIDATION_API === 'true';
+
+      if (useAddressValidation) {
+        // Address Validation API path — replaces Geocoding + Places fallback.
+        // Returns per-component confidence so we can programmatically detect
+        // bad pins rather than relying on Google's silent coarse-match behaviour.
+        const { result, responseId } = await validateAddress({
+          addressLines: [geocodeAddress],
+          apiKey: targetApiKey,
+        });
+
+        lat = result.geocode.location.latitude;
+        lng = result.geocode.location.longitude;
+        formattedAddress = result.address?.formattedAddress || null;
+        geoValidationResponseId = responseId || null;
+        generalArea = extractGeneralArea(null, formattedAddress);
+
+        const hasSuspiciousComponent = result.address?.addressComponents?.some(
+          c => c.confirmationLevel === 'UNCONFIRMED_AND_SUSPICIOUS'
+        );
+        lowConfidence = !result.verdict?.addressComplete || !!hasSuspiciousComponent;
+
+        if (lowConfidence) {
+          console.log(`[Job ${job.id}] Address Validation: low-confidence result (addressComplete=${result.verdict?.addressComplete}, suspiciousComponent=${hasSuspiciousComponent}).`);
+        }
+      } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
       const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=${effectiveComponents}${effectiveBoundsParam}&key=${targetApiKey}`;
       let response = await axios.get(geoUrl);
@@ -339,6 +366,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
           lowConfidence = true;
         }
       }
+      } // end useAddressValidation else (geocoding + places path)
     }
 
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
@@ -391,6 +419,10 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         // unaffected. See extractGeneralArea above and the marketplace
         // search flow in webhookController.js / buyerSearchService.js.
         general_area: generalArea,
+        // Stored so publicListingController.js / agentIntakeController.js can
+        // send provideValidationFeedback after a dealer confirms or corrects.
+        // NULL when the old Geocoding API path was used.
+        geo_validation_response_id: geoValidationResponseId,
       },
     });
 
