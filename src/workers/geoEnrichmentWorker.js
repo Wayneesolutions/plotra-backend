@@ -1,5 +1,5 @@
 // src/workers/geoEnrichmentWorker.js
-const { Worker } = require('bullmq');
+const { Worker, Queue } = require('bullmq');
 const axios = require('axios');
 const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
@@ -14,6 +14,8 @@ const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
 // Connect to dedicated background Redis event broker
 const redisConnection = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRetriesPerRequest: null }); // required by BullMQ Worker (blocking commands) — omitting this throws on boot
+
+const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
 
 console.log(`[Worker Engine] Initializing Geo-Enrichment Task Consumer...`);
 
@@ -389,27 +391,13 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       targetApiKey,
       propertyType: listingData.property_type,
       extraListingUpdates: {
-        // WhatsApp agent-intake listings (draftId present) now pause here
-        // for a mandatory super-admin geo review instead of going straight
-        // to 'awaiting_approval' — agents were approving preview links
-        // without actually checking/dragging the pin, so this Places
-        // fallback alone wasn't catching every mismatch. An admin
-        // corrects/confirms the pin in the "Geo Review" admin tab first;
-        // approving from there (adminGeoReviewController.js) is what
-        // flips the listing to 'awaiting_approval' and enqueues
-        // 'send-preview' — this worker no longer does that automatically
-        // for the WhatsApp path (see below). Web-chat and dashboard
-        // listings are untouched.
-        status: draftId
-          ? 'pending_geo_review'
-          : (['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active'),
+        status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
         // Neither the Geocoding API nor a Places fallback found a
         // confident, house-level match — the pin is a best-effort guess.
-        // Surfaced to the admin in the geo-review queue, and still used by
-        // agentIntakeWorker.js's preview message as an extra nudge in case
-        // an admin approves without adjusting it. Cleared automatically
-        // the next time this listing is (re-)geocoded from a corrected
-        // address.
+        // agentIntakeWorker.js's preview message uses this to add an
+        // extra nudge to actually check/drag the pin, not just approve
+        // on faith. Cleared automatically the next time this listing is
+        // (re-)geocoded from a corrected address.
         location_low_confidence: lowConfidence,
         // Locality-level, no house/plot number — safe to show a buyer
         // before they've contacted the dealer. NULL for any listing this
@@ -428,12 +416,16 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
 
-    // WhatsApp agent-intake listings now wait in the super-admin geo-review
-    // queue (status='pending_geo_review' set above) instead of getting
-    // their preview link sent immediately — adminGeoReviewController.js's
-    // approve endpoint enqueues 'send-preview' once an admin has
-    // corrected/confirmed the pin. Nothing to enqueue here for that path
-    // anymore.
+    // WhatsApp agent-intake listings: send the preview link directly.
+    // The listing preview page shows a satellite map with a draggable pin —
+    // the agent can visually verify the location, drag the pin to fix it if
+    // needed, and click Save, then reply "yes" to publish.
+    if (draftId) {
+      await agentIntakeQueue.add('send-preview', { draftId, listingId }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
+    }
 
     console.log(`[Job ${job.id}] Successfully completed Geocoding & media initialization mapping for ${listingId}.`);
     return { success: true, coordinates: { lat, lng } };
