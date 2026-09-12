@@ -33,7 +33,7 @@ const redisConnection = {
   host: process.env.REDIS_HOST || '127.0.0.1',
   port: process.env.REDIS_PORT || 6379,
   maxRetriesPerRequest: 1,
-  retryStrategy: () => null,
+  retryStrategy: (times) => Math.min(times * 200, 5000),
   connectTimeout: 3000,
 };
 const agentSignupQueue = new Queue('agent-signup-intake', { connection: redisConnection });

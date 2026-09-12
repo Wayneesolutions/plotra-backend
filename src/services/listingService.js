@@ -10,7 +10,7 @@ const geoEnrichmentQueue = new Queue('geo-enrichment', {
     host: process.env.REDIS_HOST || '127.0.0.1',
     port: 6379,
     maxRetriesPerRequest: 1,
-    retryStrategy: () => null,
+    retryStrategy: (times) => Math.min(times * 200, 5000),
     connectTimeout: 3000,
   }
 });

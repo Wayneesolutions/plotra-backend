@@ -31,7 +31,7 @@ const IORedis = require('ioredis');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
-const redis = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRetriesPerRequest: 1, retryStrategy: () => null, connectTimeout: 3000 });
+const redis = new IORedis({ host: REDIS_HOST, port: REDIS_PORT, maxRetriesPerRequest: 1, retryStrategy: (times) => Math.min(times * 200, 5000), connectTimeout: 3000 });
 
 const JWT_CACHE_KEY = 'wayneRing:jwt';
 const BASE_URL = process.env.WAYNERING_BASE_URL; // e.g. https://api.wayneesolutions-aivoice.example
