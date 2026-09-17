@@ -386,7 +386,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // trustworthy than a fresh cross-check against either provider.
     let mapplsAudit = null;
     let geoResolutionSource = cacheHit ? 'cache' : null;
-    if (!cacheHit && process.env.MAPPLS_GEO_CONSENSUS_ENABLED === 'true') {
+    if (!cacheHit && !plusCodeMatch && process.env.MAPPLS_GEO_CONSENSUS_ENABLED === 'true') {
       const consensus = await resolveWithConsensus(
         { lat, lng, isHighPrecision: googleIsHighPrecision, lowConfidence },
         geocodeAddress,
