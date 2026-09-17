@@ -24,7 +24,6 @@ const axios = require('axios');
 
 const MAPPLS_TOKEN_URL = 'https://outpost.mappls.com/api/security/oauth/token';
 const MAPPLS_GEOCODE_URL = 'https://atlas.mappls.com/api/places/geocode';
-const MAPPLS_PLACE_DETAILS_URL = 'https://atlas.mappls.com/api/places/place-details/json';
 
 // OAuth2 token cache — only used when MAPPLS_REST_KEY is not set.
 let cachedToken = null;
@@ -108,21 +107,25 @@ async function mapplsGeocode(address, pincode = null) {
     let lng = Number(top.longitude ?? top.lng);
 
     // Some Mappls account plans omit lat/lng from the geocode response and
-    // return only an eLoc (Mappls place ID). Fetch coordinates via the Place
-    // Details API using the eLoc as a fallback.
+    // return only an eLoc (Mappls place ID). Re-query the geocode endpoint
+    // with just the eLoc — this variant of the same endpoint does return
+    // coordinates on plans that suppress them from the address-query response.
     if ((!Number.isFinite(lat) || !Number.isFinite(lng)) && top.eLoc) {
-      const eLocParams = restKey
-        ? { eLoc: top.eLoc, rest_key: restKey }
-        : { eLoc: top.eLoc };
-      const eLocResp = await axios.get(MAPPLS_PLACE_DETAILS_URL, {
+      const eLocParams = { eLoc: top.eLoc };
+      if (restKey) eLocParams.rest_key = restKey;
+      const eLocResp = await axios.get(MAPPLS_GEOCODE_URL, {
         params: eLocParams,
         headers: authHeaders,
         timeout: 8000,
       });
-      const place = eLocResp.data?.suggestedLocations?.[0] || eLocResp.data?.place;
-      if (place) {
-        lat = Number(place.latitude ?? place.lat);
-        lng = Number(place.longitude ?? place.lng);
+      const eLocTop = eLocResp.data?.copResults?.[0]
+        || (eLocResp.data?.copResults && !Array.isArray(eLocResp.data.copResults) ? eLocResp.data.copResults : null)
+        || eLocResp.data?.suggestedLocations?.[0]
+        || eLocResp.data?.results?.[0];
+      if (eLocTop) {
+        lat = Number(eLocTop.latitude ?? eLocTop.lat);
+        lng = Number(eLocTop.longitude ?? eLocTop.lng);
+        console.log('[Mappls eLoc lookup] keys:', Object.keys(eLocTop), 'lat:', eLocTop.latitude, 'lng:', eLocTop.longitude);
       }
     }
 
