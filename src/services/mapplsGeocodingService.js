@@ -7,24 +7,23 @@
 // Google's ROOFTOP coverage is thin. Google remains the source of truth
 // for locality/area-level resolution (general_area, tenant geo-bias) —
 // this module is only ever consulted for the house-level cross-check.
+//
+// Auth: supports two modes depending on which env vars are set —
+//   Static key (MAPPLS_REST_KEY): simplest, use the key directly as a
+//     query param. This is the key visible in the Mappls console under
+//     Applications → Credentials → Static Key.
+//   OAuth2 (MAPPLS_CLIENT_ID + MAPPLS_CLIENT_SECRET): bearer-token flow,
+//     used when Client ID/Secret are available instead of a static key.
+//   Static key takes precedence if both are set.
 const axios = require('axios');
 
 const MAPPLS_TOKEN_URL = 'https://outpost.mappls.com/api/security/oauth/token';
 const MAPPLS_GEOCODE_URL = 'https://atlas.mappls.com/api/places/geocode';
 
-// Module-level in-memory cache — one access token per process, refreshed
-// ~2 min before actual expiry so an in-flight request never races an
-// expired token. Deliberately NOT persisted anywhere (Redis, DB): losing
-// it on a worker restart just costs one extra token call, which is cheap
-// and avoids a second source of stale-credential bugs.
+// OAuth2 token cache — only used when MAPPLS_REST_KEY is not set.
 let cachedToken = null;
 let cachedTokenExpiresAt = 0;
 
-/**
- * Client-credentials OAuth2 flow — same shape Mappls' own SDKs use.
- * MAPPLS_CLIENT_ID / MAPPLS_CLIENT_SECRET come from the Mappls API
- * Console (separate from any consumer Mappls app credentials).
- */
 async function getMapplsAccessToken() {
   const now = Date.now();
   if (cachedToken && now < cachedTokenExpiresAt) {
@@ -53,7 +52,6 @@ async function getMapplsAccessToken() {
   }
 
   cachedToken = access_token;
-  // expires_in is seconds; refresh 2 minutes early.
   cachedTokenExpiresAt = now + (Math.max(Number(expires_in) || 0, 300) - 120) * 1000;
   return cachedToken;
 }
@@ -63,29 +61,31 @@ async function getMapplsAccessToken() {
  * (or null if no usable result) rather than the raw Mappls response, so
  * geoConsensusService.js doesn't need to know Mappls' response format.
  *
- * `isHouseLevel` mirrors what Google's `location_type: ROOFTOP` tells us —
- * true when Mappls' own result carries a resolved house/premise number,
- * i.e. this candidate is precise enough to prefer over a locality-level
- * Google pin. NOTE: field names below (houseNumber/type) are per Mappls'
- * public Geocoding API docs as of integration time — confirm against a
- * live response with the production key before relying on this in prod;
- * a raw-response sample is logged on every call for the first rollout
- * week specifically so this can be calibrated (see geoConsensusService.js).
- *
  * @param {string} address   free-text address (same string sent to Google)
  * @param {string|null} pincode  dealer-provided PIN, passed as itemCount filter hint
  */
 async function mapplsGeocode(address, pincode = null) {
   try {
-    const token = await getMapplsAccessToken();
+    const restKey = process.env.MAPPLS_REST_KEY;
     const params = { address, region: 'IND', itemCount: 5 };
     if (pincode) params.pincode = pincode;
 
-    const resp = await axios.get(MAPPLS_GEOCODE_URL, {
-      params,
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: 8000,
-    });
+    let requestConfig;
+    if (restKey) {
+      // Static key auth — key goes directly as query param
+      params.rest_key = restKey;
+      requestConfig = { params, timeout: 8000 };
+    } else {
+      // OAuth2 bearer token auth
+      const token = await getMapplsAccessToken();
+      requestConfig = {
+        params,
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 8000,
+      };
+    }
+
+    const resp = await axios.get(MAPPLS_GEOCODE_URL, requestConfig);
 
     const results = resp.data?.copResults || resp.data?.results;
     if (!Array.isArray(results) || !results.length) return null;
@@ -106,12 +106,10 @@ async function mapplsGeocode(address, pincode = null) {
       eLoc: top.eLoc || null,
       isHouseLevel,
       rawType: top.type || null,
-      raw: top, // kept for the calibration log in geoConsensusService.js; never persisted to the DB
+      raw: top,
     };
   } catch (err) {
-    // Never throws — Mappls is a cross-check, not a hard dependency. A
-    // failure here (quota, key not provisioned yet, network) must fall
-    // back to Google-only behavior exactly like before this integration.
+    // Never throws — Mappls is a cross-check, not a hard dependency.
     console.error('Mappls geocode failed (non-fatal, continuing with Google-only result):', err.message);
     return null;
   }
