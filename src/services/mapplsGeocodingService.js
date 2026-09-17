@@ -72,9 +72,17 @@ async function mapplsGeocode(address, pincode = null) {
 
     let requestConfig;
     if (restKey) {
-      // Static key auth — key goes directly as query param
+      // Static key auth — key as query param + Origin header so Mappls'
+      // "Web" app domain whitelist accepts the server-side request.
       params.rest_key = restKey;
-      requestConfig = { params, timeout: 8000 };
+      requestConfig = {
+        params,
+        timeout: 8000,
+        headers: {
+          Origin: process.env.PUBLIC_APP_URL || 'https://plotraa.com',
+          Referer: process.env.PUBLIC_APP_URL || 'https://plotraa.com',
+        },
+      };
     } else {
       // OAuth2 bearer token auth
       const token = await getMapplsAccessToken();
