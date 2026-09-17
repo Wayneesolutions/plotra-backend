@@ -460,7 +460,10 @@ async function updateListingLocation(req, res) {
       // A human just placed this pin by hand — no longer "low confidence"
       // regardless of what the original AI geocode was (see
       // geoEnrichmentWorker.js's location_low_confidence).
-      extraListingUpdates: { pin_manually_corrected: true, location_low_confidence: false },
+      // geo_resolution_source: overrides whatever the geocode consensus
+      // step (geoConsensusService.js) had set, same reasoning as
+      // location_low_confidence above — keeps the audit trail meaningful.
+      extraListingUpdates: { pin_manually_corrected: true, location_low_confidence: false, geo_resolution_source: 'manual_pin_drag' },
     });
 
     // Self-learning cache: a dealer just explicitly confirmed this is the

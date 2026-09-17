@@ -8,6 +8,7 @@ const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../servic
 const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 const { lookupResolvedLocality, recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { validateAddress } = require('../services/addressValidation');
+const { resolveWithConsensus } = require('../services/geoConsensusService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -235,6 +236,11 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 
     let lat, lng, formattedAddress, lowConfidence = false, geoValidationResponseId = null;
     let generalArea = null;
+    // Tracked across both the Address Validation and legacy Geocoding
+    // branches below so the Mappls consensus step (after this if/else) has
+    // one consistent signal for "did Google itself already reach
+    // house-level precision" regardless of which path produced it.
+    let googleIsHighPrecision = false;
 
     if (cacheHit) {
       console.log(`[Job ${job.id}] Resolved-locality cache HIT (${cacheHit.key_type}="${cacheHit.display_name}", confidence=${cacheHit.confidence}) — skipping Google geocode.`);
@@ -264,6 +270,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
           c => c.confirmationLevel === 'UNCONFIRMED_AND_SUSPICIOUS'
         );
         lowConfidence = !result.verdict?.addressComplete || !!hasSuspiciousComponent;
+        googleIsHighPrecision = !lowConfidence;
 
         if (lowConfidence) {
           console.log(`[Job ${job.id}] Address Validation: low-confidence result (addressComplete=${result.verdict?.addressComplete}, suspiciousComponent=${hasSuspiciousComponent}).`);
@@ -322,6 +329,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       // partial_match there does signal genuine ambiguity.
       const isHighPrecision = result.geometry.location_type === 'ROOFTOP'
         || (result.geometry.location_type === 'RANGE_INTERPOLATED' && !result.partial_match);
+      googleIsHighPrecision = isHighPrecision;
       if (!isHighPrecision) {
         console.log(`[Job ${job.id}] Geocode came back low-precision (location_type=${result.geometry.location_type}, partial_match=${!!result.partial_match}) — trying Places text search.`);
 
@@ -371,6 +379,31 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       } // end useAddressValidation else (geocoding + places path)
     }
 
+    // 1b. Mappls cross-check — automatic, no human step (see
+    // geoConsensusService.js for the full decision rules). Skipped on a
+    // resolved-locality cache hit: that coordinate was already confirmed
+    // by a person on an earlier listing, which is categorically more
+    // trustworthy than a fresh cross-check against either provider.
+    let mapplsAudit = null;
+    let geoResolutionSource = cacheHit ? 'cache' : null;
+    if (!cacheHit && process.env.MAPPLS_GEO_CONSENSUS_ENABLED === 'true') {
+      const consensus = await resolveWithConsensus(
+        { lat, lng, isHighPrecision: googleIsHighPrecision, lowConfidence },
+        geocodeAddress,
+        listingData.pincode
+      );
+      lat = consensus.lat;
+      lng = consensus.lng;
+      lowConfidence = consensus.lowConfidence;
+      geoResolutionSource = consensus.geoResolutionSource;
+      mapplsAudit = consensus.mappls;
+      if (mapplsAudit) {
+        console.log(`[Job ${job.id}] Mappls cross-check: agreement=${mapplsAudit.agreementMeters}m, houseLevel=${mapplsAudit.isHouseLevel}, source=${geoResolutionSource}`);
+      }
+    } else if (!cacheHit) {
+      geoResolutionSource = 'google_only_no_mappls';
+    }
+
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
     // street-view fallback images, and re-queue landmark + local-
     // intelligence enrichment — shared with the manual pin-correction
@@ -411,6 +444,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         // send provideValidationFeedback after a dealer confirms or corrects.
         // NULL when the old Geocoding API path was used.
         geo_validation_response_id: geoValidationResponseId,
+        // Mappls cross-check audit trail — see geoConsensusService.js.
+        // mappls_lat/lng are Mappls' own candidate, independent of whether
+        // it ended up being used for lat/lng above. All null/'cache' or
+        // 'google_only_no_mappls' when the consensus check didn't run.
+        mappls_lat: mapplsAudit?.lat ?? null,
+        mappls_lng: mapplsAudit?.lng ?? null,
+        geo_provider_agreement_meters: mapplsAudit?.agreementMeters ?? null,
+        geo_resolution_source: geoResolutionSource,
       },
     });
 
