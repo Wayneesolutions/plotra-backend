@@ -15,10 +15,16 @@
 //   OAuth2 (MAPPLS_CLIENT_ID + MAPPLS_CLIENT_SECRET): bearer-token flow,
 //     used when Client ID/Secret are available instead of a static key.
 //   Static key takes precedence if both are set.
+//
+// Coordinate retrieval: some Mappls account plans return latitude/longitude
+// directly in the geocode response; others omit them and return only an
+// eLoc (Mappls place ID). When lat/lng are absent, this module makes a
+// second call to the Place Details API using the eLoc to fetch coordinates.
 const axios = require('axios');
 
 const MAPPLS_TOKEN_URL = 'https://outpost.mappls.com/api/security/oauth/token';
 const MAPPLS_GEOCODE_URL = 'https://atlas.mappls.com/api/places/geocode';
+const MAPPLS_PLACE_DETAILS_URL = 'https://atlas.mappls.com/api/places/place-details/json';
 
 // OAuth2 token cache — only used when MAPPLS_REST_KEY is not set.
 let cachedToken = null;
@@ -70,33 +76,26 @@ async function mapplsGeocode(address, pincode = null) {
     const params = { address, region: 'IND', itemCount: 5 };
     if (pincode) params.pincode = pincode;
 
-    let requestConfig;
+    let authHeaders;
     if (restKey) {
       // Static key auth — key as query param + Origin header so Mappls'
       // "Web" app domain whitelist accepts the server-side request.
       params.rest_key = restKey;
-      requestConfig = {
-        params,
-        timeout: 8000,
-        headers: {
-          Origin: process.env.PUBLIC_APP_URL || 'https://plotraa.com',
-          Referer: process.env.PUBLIC_APP_URL || 'https://plotraa.com',
-        },
+      authHeaders = {
+        Origin: process.env.PUBLIC_APP_URL || 'https://plotraa.com',
+        Referer: process.env.PUBLIC_APP_URL || 'https://plotraa.com',
       };
     } else {
       // OAuth2 bearer token auth
       const token = await getMapplsAccessToken();
-      requestConfig = {
-        params,
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 8000,
-      };
+      authHeaders = { Authorization: `Bearer ${token}` };
     }
 
-    const resp = await axios.get(MAPPLS_GEOCODE_URL, requestConfig);
-
-    const _top = (Array.isArray(resp.data?.copResults) ? resp.data.copResults[0] : resp.data?.copResults) || resp.data?.results?.[0];
-    console.log('[Mappls Debug] status:', resp.status, 'top keys:', Object.keys(_top || {}), 'lat:', _top?.latitude, _top?.lat, 'lng:', _top?.longitude, _top?.lng);
+    const resp = await axios.get(MAPPLS_GEOCODE_URL, {
+      params,
+      headers: authHeaders,
+      timeout: 8000,
+    });
 
     // Mappls returns copResults as either an array (multiple results) or a
     // plain object (single result) depending on the endpoint/plan. Normalise.
@@ -105,12 +104,37 @@ async function mapplsGeocode(address, pincode = null) {
     if (!Array.isArray(results) || !results.length) return null;
 
     const top = results[0];
-    const lat = Number(top.latitude ?? top.lat);
-    const lng = Number(top.longitude ?? top.lng);
+    let lat = Number(top.latitude ?? top.lat);
+    let lng = Number(top.longitude ?? top.lng);
+
+    // Some Mappls account plans omit lat/lng from the geocode response and
+    // return only an eLoc (Mappls place ID). Fetch coordinates via the Place
+    // Details API using the eLoc as a fallback.
+    if ((!Number.isFinite(lat) || !Number.isFinite(lng)) && top.eLoc) {
+      const eLocParams = restKey
+        ? { eLoc: top.eLoc, rest_key: restKey }
+        : { eLoc: top.eLoc };
+      const eLocResp = await axios.get(MAPPLS_PLACE_DETAILS_URL, {
+        params: eLocParams,
+        headers: authHeaders,
+        timeout: 8000,
+      });
+      const place = eLocResp.data?.suggestedLocations?.[0] || eLocResp.data?.place;
+      if (place) {
+        lat = Number(place.latitude ?? place.lat);
+        lng = Number(place.longitude ?? place.lng);
+      }
+    }
+
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 
     const houseLevelType = new Set(['PREMISE', 'POI', 'SUBSUBLOCALITY', 'STREET']);
     const isHouseLevel = Boolean(top.houseNumber) || houseLevelType.has(String(top.type || '').toUpperCase());
+
+    // 'geocodeLevel' is a Mappls-specific field present on OAuth2/plan responses
+    // ('houseNumber', 'street', 'locality', etc.) — treat it as house-level too.
+    const mapplsHouseLevels = new Set(['houseNumber', 'poi', 'building', 'premise']);
+    const isHouseLevelByGeoLevel = mapplsHouseLevels.has(String(top.geocodeLevel || '').toLowerCase());
 
     return {
       lat,
@@ -118,8 +142,8 @@ async function mapplsGeocode(address, pincode = null) {
       formattedAddress: top.formatted_address || top.formattedAddress || null,
       pincode: top.pincode || null,
       eLoc: top.eLoc || null,
-      isHouseLevel,
-      rawType: top.type || null,
+      isHouseLevel: isHouseLevel || isHouseLevelByGeoLevel,
+      rawType: top.type || top.geocodeLevel || null,
       raw: top,
     };
   } catch (err) {
