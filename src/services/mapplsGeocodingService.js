@@ -95,7 +95,8 @@ async function mapplsGeocode(address, pincode = null) {
 
     const resp = await axios.get(MAPPLS_GEOCODE_URL, requestConfig);
 
-    console.log('[Mappls Debug] status:', resp.status, 'data keys:', Object.keys(resp.data || {}), 'raw:', JSON.stringify(resp.data).slice(0, 600));
+    const _top = (Array.isArray(resp.data?.copResults) ? resp.data.copResults[0] : resp.data?.copResults) || resp.data?.results?.[0];
+    console.log('[Mappls Debug] status:', resp.status, 'top keys:', Object.keys(_top || {}), 'lat:', _top?.latitude, _top?.lat, 'lng:', _top?.longitude, _top?.lng);
 
     // Mappls returns copResults as either an array (multiple results) or a
     // plain object (single result) depending on the endpoint/plan. Normalise.
