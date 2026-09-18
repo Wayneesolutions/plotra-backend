@@ -56,15 +56,17 @@ async function resolveWithConsensus(googleResult, rawAddress, pincode) {
 
   const mapplsResult = await mapplsGeocode(rawAddress, pincode);
 
-  if (!mapplsResult) {
-    // Mappls unavailable/failed/no match — Google-only behavior, byte-for-
-    // byte what geoEnrichmentWorker.js did before this integration.
+  if (!mapplsResult || mapplsResult.coordsUnavailable) {
+    // Mappls unavailable/failed/no match, or returned metadata without
+    // coordinates (eLoc-only plan response) — Google-only behavior.
     return {
       lat: gLat,
       lng: gLng,
       lowConfidence: googleLowConfidence,
-      geoResolutionSource: 'google_only_no_mappls',
-      mappls: null,
+      geoResolutionSource: mapplsResult?.coordsUnavailable
+        ? 'google_only_mappls_no_coords'
+        : 'google_only_no_mappls',
+      mappls: mapplsResult ? { eLoc: mapplsResult.eLoc, coordsUnavailable: true } : null,
     };
   }
 

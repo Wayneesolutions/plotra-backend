@@ -107,29 +107,53 @@ async function mapplsGeocode(address, pincode = null) {
     let lng = Number(top.longitude ?? top.lng);
 
     // Some Mappls account plans omit lat/lng from the geocode response and
-    // return only an eLoc (Mappls place ID). Re-query the geocode endpoint
-    // with just the eLoc — this variant of the same endpoint does return
-    // coordinates on plans that suppress them from the address-query response.
+    // return only an eLoc. Isolated try/catch so a 400 from this second call
+    // does not discard the valid first-call result (address, pincode, eLoc).
     if ((!Number.isFinite(lat) || !Number.isFinite(lng)) && top.eLoc) {
-      const eLocParams = { eLoc: top.eLoc };
-      if (restKey) eLocParams.rest_key = restKey;
-      const eLocResp = await axios.get(MAPPLS_GEOCODE_URL, {
-        params: eLocParams,
-        headers: authHeaders,
-        timeout: 8000,
-      });
-      const eLocTop = eLocResp.data?.copResults?.[0]
-        || (eLocResp.data?.copResults && !Array.isArray(eLocResp.data.copResults) ? eLocResp.data.copResults : null)
-        || eLocResp.data?.suggestedLocations?.[0]
-        || eLocResp.data?.results?.[0];
-      if (eLocTop) {
-        lat = Number(eLocTop.latitude ?? eLocTop.lat);
-        lng = Number(eLocTop.longitude ?? eLocTop.lng);
-        console.log('[Mappls eLoc lookup] keys:', Object.keys(eLocTop), 'lat:', eLocTop.latitude, 'lng:', eLocTop.longitude);
+      try {
+        const eLocParams = { eLoc: top.eLoc };
+        if (restKey) eLocParams.rest_key = restKey;
+        const eLocResp = await axios.get(MAPPLS_GEOCODE_URL, {
+          params: eLocParams,
+          headers: authHeaders,
+          timeout: 8000,
+        });
+        const eLocTop = eLocResp.data?.copResults?.[0]
+          || (eLocResp.data?.copResults && !Array.isArray(eLocResp.data.copResults) ? eLocResp.data.copResults : null)
+          || eLocResp.data?.suggestedLocations?.[0]
+          || eLocResp.data?.results?.[0];
+        if (eLocTop) {
+          lat = Number(eLocTop.latitude ?? eLocTop.lat);
+          lng = Number(eLocTop.longitude ?? eLocTop.lng);
+          console.log('[Mappls eLoc lookup] keys:', Object.keys(eLocTop), 'lat:', eLocTop.latitude, 'lng:', eLocTop.longitude);
+        }
+      } catch (eLocErr) {
+        // Geocode endpoint doesn't accept eLoc-only queries on all plans —
+        // log specifically so we know it's the eLoc step that failed, not the
+        // first call. Coordinates will remain unavailable for this result.
+        console.warn('[Mappls eLoc lookup] Failed (non-fatal):', eLocErr.message);
       }
     }
 
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      // Coordinates unavailable but first call returned useful metadata
+      // (eLoc, pincode, formatted address). Return partial result so callers
+      // can save what's known rather than discarding everything.
+      if (top.eLoc) {
+        return {
+          lat: null,
+          lng: null,
+          formattedAddress: top.formatted_address || top.formattedAddress || null,
+          pincode: top.pincode || null,
+          eLoc: top.eLoc,
+          isHouseLevel: false,
+          rawType: top.type || top.geocodeLevel || null,
+          raw: top,
+          coordsUnavailable: true,
+        };
+      }
+      return null;
+    }
 
     const houseLevelType = new Set(['PREMISE', 'POI', 'SUBSUBLOCALITY', 'STREET']);
     const isHouseLevel = Boolean(top.houseNumber) || houseLevelType.has(String(top.type || '').toUpperCase());
