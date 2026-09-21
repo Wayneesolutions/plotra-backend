@@ -282,11 +282,18 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         const isHouseLevelGranularity = HIGH_PRECISION_VALIDATION_GRANULARITIES.includes(
           result.verdict?.validationGranularity
         );
-        lowConfidence = !result.verdict?.addressComplete || !!hasSuspiciousComponent || !isHouseLevelGranularity;
+        // possibleNextAction, not addressComplete — Google OMITS addressComplete
+        // entirely (not addressComplete:false) whenever possibleNextAction isn't
+        // ACCEPT, so `!result.verdict?.addressComplete` only worked before by
+        // accident (undefined is falsy too). possibleNextAction is always
+        // present in the response, ACCEPT or otherwise, so it's the actual
+        // explicit signal Google intends callers to check.
+        const isAcceptVerdict = result.verdict?.possibleNextAction === 'ACCEPT';
+        lowConfidence = !isAcceptVerdict || !!hasSuspiciousComponent || !isHouseLevelGranularity;
         googleIsHighPrecision = !lowConfidence;
 
         if (lowConfidence) {
-          console.log(`[Job ${job.id}] Address Validation: low-confidence result (addressComplete=${result.verdict?.addressComplete}, suspiciousComponent=${hasSuspiciousComponent}, validationGranularity=${result.verdict?.validationGranularity}).`);
+          console.log(`[Job ${job.id}] Address Validation: low-confidence result (possibleNextAction=${result.verdict?.possibleNextAction ?? 'MISSING'}, suspiciousComponent=${hasSuspiciousComponent}, validationGranularity=${result.verdict?.validationGranularity}).`);
         }
       } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
