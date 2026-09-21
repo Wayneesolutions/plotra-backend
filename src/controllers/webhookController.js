@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
-const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto } = require('./agentIntakeController');
+const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin } = require('./agentIntakeController');
 const { handleAgentSignupMessage } = require('./agentSignupController');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
@@ -86,6 +86,11 @@ function parseInboundPayload(body) {
     // property photo, out of scope for now.
     mediaId: value.messages?.[0]?.image?.id || null,
     mediaMimeType: value.messages?.[0]?.image?.mime_type || null,
+    // Meta Cloud API location-message shape: messages[0].type === 'location',
+    // coordinates directly on messages[0].location — no media-id lookup
+    // needed (unlike an image), the lat/lng are inline in the payload.
+    locationLat: value.messages?.[0]?.location?.latitude ?? null,
+    locationLng: value.messages?.[0]?.location?.longitude ?? null,
     bspThreadRef: value.messages?.[0]?.id || body.conversation_id || body.msg_id,
     inferredSlug: value.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
     receivingNumber: value.metadata?.display_phone_number || body.to || body.to_phone || null,
@@ -128,11 +133,13 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, locationLat, locationLng } = parseInboundPayload(req.body);
 
-  console.log('[Webhook] parsed phone=%s text=%s media=%s', phone || 'null', incomingText || 'null', mediaId || 'null');
+  const hasLocation = locationLat != null && locationLng != null;
 
-  if (!phone || (!incomingText && !mediaId)) {
+  console.log('[Webhook] parsed phone=%s text=%s media=%s location=%s', phone || 'null', incomingText || 'null', mediaId || 'null', hasLocation ? `${locationLat},${locationLng}` : 'null');
+
+  if (!phone || (!incomingText && !mediaId && !hasLocation)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
   }
@@ -147,6 +154,24 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
+    // WhatsApp "share location" — the agent sending their in-app pin drop
+    // for the property, not their own current location (there's no way to
+    // distinguish those at the protocol level; the reply text asking for
+    // this explicitly says "drop a pin on the property"). Checked before
+    // the media/text branches below since a location message carries
+    // neither mediaId nor incomingText. See agentIntakeController.js's
+    // handleAgentLocationPin for what happens with the coordinates.
+    if (hasLocation) {
+      return handleAgentLocationPin({
+        knex,
+        agentUser,
+        lat: locationLat,
+        lng: locationLng,
+        bspMessageId: bspThreadRef,
+        res,
+      });
+    }
+
     if (mediaId && incomingText && incomingText.trim()) {
       // Photo WITH caption text (e.g. answering "what type of property?"
       // with a photo captioned "commercial property") — upload/stash the
