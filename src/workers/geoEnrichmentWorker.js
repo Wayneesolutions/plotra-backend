@@ -27,6 +27,16 @@ console.log(`[Worker Engine] Initializing Geo-Enrichment Task Consumer...`);
 // the actual house — see tryPlacesTextSearch below for why.
 const HIGH_PRECISION_LOCATION_TYPES = ['ROOFTOP', 'RANGE_INTERPOLATED'];
 
+// Address Validation API equivalent of the above — verdict.validationGranularity
+// values below PREMISE/SUB_PREMISE (ROUTE, BLOCK, PREMISE_PROXIMITY, OTHER)
+// mean the same "resolved to a street/area, not a specific house" gap that
+// HIGH_PRECISION_LOCATION_TYPES exists to catch on the legacy Geocoding path.
+// verdict.addressComplete alone does NOT imply this — a road-only input like
+// "Ferozepur Road, Ludhiana" comes back addressComplete:true with
+// validationGranularity:"ROUTE", which is exactly the coarse-pin case this
+// is meant to catch, not confidence that it didn't happen.
+const HIGH_PRECISION_VALIDATION_GRANULARITIES = ['PREMISE', 'SUB_PREMISE'];
+
 /**
  * Google's Geocoding API does strict, structured-address-component
  * parsing — built for a clean, complete postal address. A WhatsApp-typed
@@ -269,11 +279,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         const hasSuspiciousComponent = result.address?.addressComponents?.some(
           c => c.confirmationLevel === 'UNCONFIRMED_AND_SUSPICIOUS'
         );
-        lowConfidence = !result.verdict?.addressComplete || !!hasSuspiciousComponent;
+        const isHouseLevelGranularity = HIGH_PRECISION_VALIDATION_GRANULARITIES.includes(
+          result.verdict?.validationGranularity
+        );
+        lowConfidence = !result.verdict?.addressComplete || !!hasSuspiciousComponent || !isHouseLevelGranularity;
         googleIsHighPrecision = !lowConfidence;
 
         if (lowConfidence) {
-          console.log(`[Job ${job.id}] Address Validation: low-confidence result (addressComplete=${result.verdict?.addressComplete}, suspiciousComponent=${hasSuspiciousComponent}).`);
+          console.log(`[Job ${job.id}] Address Validation: low-confidence result (addressComplete=${result.verdict?.addressComplete}, suspiciousComponent=${hasSuspiciousComponent}, validationGranularity=${result.verdict?.validationGranularity}).`);
         }
       } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
