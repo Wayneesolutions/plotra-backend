@@ -25,6 +25,7 @@ const crypto = require('crypto');
 const { normalizePhone } = require('../utils/phone');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { sendPackageSelectionPrompt } = require('../services/agentPaymentService');
 
 // Same fail-fast producer config used throughout (webhookController.js,
 // agentIntakeController.js) — called from an inbound webhook request, not
@@ -49,17 +50,28 @@ const EXTRACT_DEBOUNCE_MS = 7000;
 // here would intercept genuine buyer messages. Extend the list as real-world
 // missed phrases come in from support.
 const SIGNUP_TRIGGER_PATTERNS = [
-  /\bjoin\s+as\s+(?:an?\s+)?agent\b/i,
-  /\bjoin\s+as\s+(?:an?\s+)?dealer\b/i,
-  /\bbecome\s+(?:an?\s+)?agent\b/i,
-  /\bbecome\s+(?:an?\s+)?dealer\b/i,
+  // English — join / become / sign up
+  /\bjoin\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bbecome\s+(?:an?\s+)?(?:agent|dealer)\b/i,
   /\bsign\s*(?:me\s*)?up\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bi\s+want\s+to\s+(?:be|become)\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  // English — add me / add as
+  /\badd\s+me\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\badd\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\badd\s+(?:me\s+)?(?:as\s+)?(?:an?\s+)?agent\b/i,
+  // English — register
+  /\bregister\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bregister\s+(?:me\s+)?(?:as\s+)?(?:an?\s+)?agent\b/i,
+  // Hindi / Hinglish
   /\bnaya\s+agent\b/i,
   /\bnayi\s+agent\b/i,
   /\bagent\s+banna\b/i,
   /\bdealer\s+banna\b/i,
-  /\bi\s+want\s+to\s+(?:be|become)\s+(?:an?\s+)?(?:agent|dealer)\b/i,
-  /\bregister\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bagent\s+banana\b/i,
+  /\bmujhe\s+agent\b/i,
+  /\bagent\s+(?:mein|me)\s+add\b/i,
+  /\bagent\s+ban\s+(?:na\s+)?chahta\b/i,
+  /\bagent\s+ban\s+(?:na\s+)?chahti\b/i,
 ];
 
 async function enqueueSignupExtractJob(signupId) {
@@ -274,6 +286,18 @@ async function approveAgentSignup(req, res) {
         .update({ status: 'approved', updated_at: trx.fn.now() });
     });
 
+    // Payment system onboarding step — sends the package menu over
+    // WhatsApp so the agent can pick one whenever they're ready. Best-effort:
+    // this path doesn't send any other WhatsApp notification today (see
+    // the function docstring), so a failure here shouldn't fail the
+    // approval itself, same non-fatal pattern used everywhere else a
+    // WhatsApp send follows a DB write in this codebase.
+    try {
+      await sendPackageSelectionPrompt(knex, { tenantId: tenant_id, phone: normalizedPhone });
+    } catch (err) {
+      console.error('Failed to send package selection prompt (non-fatal):', err.message);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Agent approved — their WhatsApp number is now live for listing intake.',
@@ -401,6 +425,14 @@ async function approveAgentSignupAdmin(req, res) {
       `Please change your password after first login at plotraa.com`;
 
     await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: normalizedPhone, messageBody: approvalMessage });
+
+    // Payment system onboarding step — see the tenant-owner approval path
+    // above for the same call; non-fatal for the same reason.
+    try {
+      await sendPackageSelectionPrompt(knex, { tenantId: signup.tenant_id, phone: normalizedPhone });
+    } catch (err) {
+      console.error('Failed to send package selection prompt (non-fatal):', err.message);
+    }
 
     return res.status(200).json({
       success: true,

@@ -26,6 +26,16 @@ const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../contr
 const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGeoReviewController');
 // NEW — marketplace buyer search lead-delivery tracking (Phase 1, no billing)
 const { getMarketplaceLeadsSummary } = require('../controllers/adminMarketplaceLeadsController');
+// NEW — agent payment/subscription system
+const {
+  listPaymentSubmissions,
+  approvePaymentSubmission,
+  rejectPaymentSubmission,
+  listAgentsPaymentStatus,
+  listPackagesAdmin,
+  createPackage,
+  updatePackage,
+} = require('../controllers/agentPaymentController');
 
 // Every admin route requires a valid JWT (authGuard), super_admin role
 // (adminGuard), AND now serviceContext — these routes legitimately read/
@@ -170,5 +180,35 @@ router.patch('/listings/:id/geo-review', approveGeoReview);
  *          Tracking only — Phase 1, no billing wired up yet.
  */
 router.get('/marketplace-leads', getMarketplaceLeadsSummary);
+
+/**
+ * @route   GET /api/v1/admin/payment-submissions
+ * @desc    Receipt submissions across every tenant, ?status=pending|approved|rejected
+ * @route   PATCH /api/v1/admin/payment-submissions/:id/approve
+ * @desc    Approve — agent's payment_status -> paid, can_add_listing -> true, cycle resets
+ * @route   PATCH /api/v1/admin/payment-submissions/:id/reject
+ * @desc    Reject — notifies agent to resubmit, doesn't touch can_add_listing
+ */
+router.get('/payment-submissions', listPaymentSubmissions);
+router.patch('/payment-submissions/:id/approve', approvePaymentSubmission);
+router.patch('/payment-submissions/:id/reject', rejectPaymentSubmission);
+
+/**
+ * @route   GET /api/v1/admin/agents-payments
+ * @desc    Every agent, platform-wide, with package/payment_status/last
+ *          payment date/next due date — backs the "All agents" admin table.
+ */
+router.get('/agents-payments', listAgentsPaymentStatus);
+
+/**
+ * @route   GET /api/v1/admin/packages
+ * @route   POST /api/v1/admin/packages
+ * @route   PATCH /api/v1/admin/packages/:id
+ * @desc    Manage the platform-wide agent package catalog (name, amount,
+ *          QR code URL) — same admin-managed-catalog pattern as /plans above.
+ */
+router.get('/packages', listPackagesAdmin);
+router.post('/packages', createPackage);
+router.patch('/packages/:id', updatePackage);
 
 module.exports = router;
