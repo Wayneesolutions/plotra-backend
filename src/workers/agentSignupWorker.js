@@ -91,10 +91,17 @@ agentSignupWorker.on('failed', async (job, err) => {
       const signup = await knex('pending_agent_signups').where({ id: signupId }).first();
       if (!signup || signup.status !== 'pending') return;
 
+      // Extraction failed — ask for whichever fields are still missing rather
+      // than sending a confusing "Sorry" that makes the user think they did
+      // something wrong. If both name and address are already on the record
+      // (seeded from WhatsApp profile or a prior successful extraction),
+      // nothing more is needed from them.
+      const missing = REQUIRED_FIELDS.filter((f) => !signup[f]);
+      if (missing.length === 0) return; // already complete despite extraction error
+
       const lang = detectReplyLanguage(signup.accumulated_text);
-      const body = lang === 'en'
-        ? "Sorry, I couldn't understand that — please try again with your name and the area you work in."
-        : "Samajh nahi paya, please dobara try karein — apna naam aur area/city zaroor batayein.";
+      const questions = fieldQuestionsFor(lang);
+      const body = missing.map((f) => questions[f]).join(' ');
       await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: signup.phone, messageBody: body });
     } catch (notifyErr) {
       console.error(`[Job ${job?.id}] Failed to notify prospective agent of extraction failure:`, notifyErr.message);

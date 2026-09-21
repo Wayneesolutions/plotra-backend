@@ -27,6 +27,41 @@ const vocallmChatQueue = new Queue('vocallm-chat-processor', { connection: redis
  * helper when swapping between Chat Mitra, Getgabs, or Meta Cloud API —
  * nothing else in this file should need to change.
  */
+/**
+ * Searches a dealer's active listings for keywords extracted from a buyer's
+ * message. Returns a formatted WhatsApp reply with listing links, or null if
+ * no relevant listings found or the message isn't a property search.
+ */
+async function searchDealerListings(knex, tenantId, incomingText) {
+  const text = incomingText.toLowerCase();
+
+  // Quick intent check — must look like a property query, not a greeting.
+  const propertyKeywords = [
+    'plot', 'plots', 'property', 'properties', 'house', 'flat', 'kothi',
+    'villa', 'commercial', 'shop', 'land', 'zameen', 'makaan', 'ghar',
+    'show', 'list', 'available', 'hai kya', 'milega', 'chahiye', 'want',
+    'buy', 'rent', 'sale', 'sell', 'looking', 'search', 'find',
+  ];
+  const isPropertyQuery = propertyKeywords.some((kw) => text.includes(kw));
+  if (!isPropertyQuery) return null;
+
+  const listings = await knex('listings')
+    .where({ tenant_id: tenantId, status: 'active' })
+    .orderBy('created_at', 'desc')
+    .limit(5)
+    .select('id', 'title', 'property_type', 'plot_area', 'price', 'public_slug', 'raw_address');
+
+  if (!listings.length) return null;
+
+  const appUrl = process.env.PUBLIC_APP_URL || 'https://plotraa.com';
+  const lines = listings.map((l) => {
+    const price = l.price != null ? `₹${Number(l.price).toLocaleString('en-IN')}` : 'Price on request';
+    return `🏷 *${l.title}*\n   ${l.property_type} | ${l.plot_area || '-'} | ${price}\n   ${appUrl}/p/${l.public_slug}`;
+  });
+
+  return `Here are the available properties:\n\n${lines.join('\n\n')}\n\nTap any link to view full details, satellite view, and nearby landmarks. 📍`;
+}
+
 function parseInboundPayload(body) {
   // Meta Cloud API wraps the actual message data inside entry[0].changes[0].value.
   // Other BSPs (Gupshup, Interakt, Chat Mitra) send a flat top-level body.
@@ -228,14 +263,21 @@ async function handleInboundWhatsApp(req, res) {
       }
     }
 
-    // Cold contact: brand-new number, no listing link, and either on a
-    // dealer's direct number OR the shared number with a non-property message.
-    // Send a friendly intro instead of randomly attaching them to a listing
-    // and having the AI chat about it — that produces confusing replies.
+    // Cold contact on a dealer's number: try to answer as a listing search
+    // before falling back to the generic greeting.
+    if (receivingDealer) {
+      const searchReply = await searchDealerListings(knex, receivingDealer.id, incomingText);
+      if (searchReply) {
+        await enqueueAgentWhatsappSend({ tenantId: receivingDealer.id, phone, messageBody: searchReply });
+        return res.status(200).json({ success: true, dealerListingSearch: true });
+      }
+    }
+
+    // Not a recognisable property query — send friendly intro.
     const lang = detectReplyLanguage(incomingText);
     const coldGreeting = lang === 'en'
-      ? `Hi there! 👋 This number is for Plotra property agents.\n\n• *Looking to buy or rent a property?* Visit plotraa.com or tap the property link shared with you.\n• *Want to list properties as an agent?* Reply: *join as agent*`
-      : `Namaste! 👋 Yeh number Plotra ke property agents ke liye hai.\n\n• *Property khareedni ya rent karni hai?* plotraa.com visit karein ya aapko share ki gayi property link tap karein.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
+      ? `Hi there! 👋 This number is for Plotra property agents.\n\n• *Looking for a property?* Tell me the area and type (e.g. "plots in Ludhiana") and I'll show you available listings.\n• *Want to list properties as an agent?* Reply: *join as agent*`
+      : `Namaste! 👋 Yeh number Plotra ke property agents ke liye hai.\n\n• *Property dhundh rahe hain?* Area aur type batayein (jaise "Ludhiana mein plot") aur main available listings dikha dunga.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
 
     await enqueueAgentWhatsappSend({ tenantId: receivingDealer?.id || null, phone, messageBody: coldGreeting });
     return res.status(200).json({ success: true, coldContact: true });
