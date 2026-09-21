@@ -3,6 +3,8 @@ const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
 const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin } = require('./agentIntakeController');
 const { handleAgentSignupMessage } = require('./agentSignupController');
+const { handleAgentReceiptIntent, handleAgentReceiptPhoto } = require('./agentPaymentController');
+const { isReceiptSubmissionIntent, tryHandlePackageSelectionReply } = require('../services/agentPaymentService');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { handleBuyerSearch } = require('../services/buyerSearchService');
@@ -154,6 +156,31 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
+    // Payment: a photo while awaiting_receipt_submission is armed is a
+    // receipt, not a property photo — checked first among the media
+    // branches so it's never mistaken for a listing photo.
+    if (agentUser.awaiting_receipt_submission && mediaId) {
+      return handleAgentReceiptPhoto({ knex, agentUser, mediaId, mediaMimeType, res });
+    }
+
+    // Payment: a bare numeric reply while no package is chosen yet is a
+    // package-menu selection, not listing text — see agentPaymentService.js
+    // for why this is narrow enough (exact 1-2 digit match, only when
+    // package_id is still null) to never collide with real intake text.
+    if (!mediaId && incomingText && !agentUser.package_id) {
+      const claimed = await tryHandlePackageSelectionReply(knex, { agentUser, incomingText: incomingText.trim() });
+      if (claimed) return res.status(200).json({ success: true, packageSelected: true });
+    }
+
+    // Payment: "payment"/"receipt"/"bhugtan" etc. arms the receipt-photo
+    // flag above for the agent's next message. Checked before the normal
+    // text branches — an exact-keyword match (see agentPaymentService.js),
+    // so it won't fire on genuine listing text that happens to contain a
+    // similar word in a longer sentence.
+    if (!mediaId && incomingText && isReceiptSubmissionIntent(incomingText)) {
+      return handleAgentReceiptIntent({ knex, agentUser, res });
+    }
+
     // WhatsApp "share location" — the agent sending their in-app pin drop
     // for the property, not their own current location (there's no way to
     // distinguish those at the protocol level; the reply text asking for

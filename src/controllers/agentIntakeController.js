@@ -318,6 +318,26 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           .returning(['id', 'status', 'listing_id']);
       }
 
+      // Payment guard: blocks starting a BRAND NEW listing only — draft.listing_id
+      // being set means this draft already has a real listing behind it (an
+      // approval reply or a correction to it), which must keep working
+      // regardless of payment status ("purani listings active hain" — see
+      // agentPaymentService.js / the daily reminder cron that flips
+      // can_add_listing off). Checked before accumulated_text is touched at
+      // all, so a blocked agent's message never silently starts a draft
+      // that then can't go anywhere.
+      if (!agentUser.can_add_listing && !draft.listing_id) {
+        const blockedBody = 'Your account has a payment pending, so new listings can\'t be added right now — your existing listings stay active. Reply "payment" to submit your receipt once paid.';
+        await trx('agent_draft_messages').insert({
+          draft_id: draft.id,
+          direction: 'inbound',
+          body: incomingText,
+          bsp_message_id: bspMessageId || null,
+        });
+        await logAgentOutboundMessage(trx, { draftId: draft.id, body: blockedBody });
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: blockedBody };
+      }
+
       // Universal approval check: when the agent says "yes" and there's a
       // listing linked to this draft, never treat it as new listing text.
       // Also handles pending (still geocoding) — tell agent to wait rather
@@ -820,4 +840,4 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
   }
 }
 
-module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin };
+module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia };
