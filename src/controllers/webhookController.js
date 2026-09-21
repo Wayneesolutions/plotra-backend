@@ -7,6 +7,7 @@ const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNu
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { handleBuyerSearch } = require('../services/buyerSearchService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('../services/listingStatusCheckService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -51,6 +52,14 @@ function parseInboundPayload(body) {
     // property photo, out of scope for now.
     mediaId: value.messages?.[0]?.image?.id || null,
     mediaMimeType: value.messages?.[0]?.image?.mime_type || null,
+    // Meta Cloud API quick-reply button tap: messages[0].type === 'interactive',
+    // messages[0].interactive.button_reply.id — the id is whatever string
+    // the outbound send put there (see agentMessagingService.js's
+    // enqueueAgentWhatsappSend `buttons` param). PR 4's listing status
+    // check is the first feature to send buttons, using ids shaped
+    // `available:<listingId>` / `sold:<listingId>` — see
+    // handleInboundWhatsApp below.
+    buttonReplyId: value.messages?.[0]?.interactive?.button_reply?.id || null,
     bspThreadRef: value.messages?.[0]?.id || body.conversation_id || body.msg_id,
     inferredSlug: value.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
     receivingNumber: value.metadata?.display_phone_number || body.to || body.to_phone || null,
@@ -93,11 +102,11 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId } = parseInboundPayload(req.body);
 
-  console.log('[Webhook] parsed phone=%s text=%s media=%s', phone || 'null', incomingText || 'null', mediaId || 'null');
+  console.log('[Webhook] parsed phone=%s text=%s media=%s button=%s', phone || 'null', incomingText || 'null', mediaId || 'null', buttonReplyId || 'null');
 
-  if (!phone || (!incomingText && !mediaId)) {
+  if (!phone || (!incomingText && !mediaId && !buttonReplyId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
   }
@@ -112,6 +121,28 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
+    // PR 4: "Still Available" / "Sold" quick-reply button tap from the
+    // monthly listing status check — see listingStatusCheckService.js.
+    // Checked first among the agent branches since a button tap carries
+    // neither mediaId nor incomingText. Verifies the tapped listing
+    // actually belongs to this agent's tenant before acting — the id is
+    // opaque to WhatsApp but not to a forged/replayed request.
+    if (buttonReplyId) {
+      const [action, listingId] = buttonReplyId.split(':');
+      if ((action === 'available' || action === 'sold') && listingId) {
+        const listing = await knex('listings').where({ id: listingId, tenant_id: agentUser.tenant_id }).first();
+        if (listing) {
+          if (action === 'available') {
+            await handleStillAvailableConfirmation(knex, { listingId, agentUser });
+          } else {
+            await handleSoldConfirmation(knex, { listingId, agentUser });
+          }
+          return res.status(200).json({ success: true, statusCheckAction: action });
+        }
+      }
+      return res.status(200).json({ success: true, warning: 'Unrecognized or unauthorized button reply.' });
+    }
+
     if (mediaId && incomingText && incomingText.trim()) {
       // Photo WITH caption text (e.g. answering "what type of property?"
       // with a photo captioned "commercial property") — upload/stash the

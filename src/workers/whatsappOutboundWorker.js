@@ -41,7 +41,7 @@ async function checkServiceWindow(threadId) {
 }
 
 const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
-  const { tenantId, threadId, leadId, phone, leadName, propertyTitle, messageBody } = job.data;
+  const { tenantId, threadId, leadId, phone, leadName, propertyTitle, messageBody, buttons } = job.data;
 
   console.log(`[Job ${job.id}] Dispatched delivery pipeline loop for Thread: ${threadId} -> Mobile: ${phone}`);
 
@@ -55,7 +55,30 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
   let bspPayload;
   let deliveryStatus = 'sent';
 
-  if (withinWindow) {
+  if (withinWindow && buttons?.length) {
+    // Meta Cloud API interactive-button message — up to 3 quick-reply
+    // buttons (Meta's own limit), each { id, title } (title capped at 20
+    // chars by Meta; not validated here since every caller so far
+    // controls its own button text directly — see
+    // listingStatusCheckService.js for the first one). Same 24h-window
+    // rule as a plain text send; outside the window this falls through to
+    // the template path below like any other send (a template message
+    // can't carry ad-hoc buttons, so the reply-options text is baked into
+    // messageBody's template variable instead in that case).
+    bspPayload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: phone,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: messageBody },
+        action: {
+          buttons: buttons.map((b) => ({ type: 'reply', reply: { id: b.id, title: b.title } })),
+        },
+      },
+    };
+  } else if (withinWindow) {
     // Meta Cloud API format: https://graph.facebook.com/v25.0/{phone_number_id}/messages
     bspPayload = {
       messaging_product: 'whatsapp',
