@@ -6,6 +6,7 @@ const { handleAgentSignupMessage } = require('./agentSignupController');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { handleBuyerSearch } = require('../services/buyerSearchService');
+const { detectReplyLanguage } = require('../utils/replyLanguage');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -219,15 +220,25 @@ async function handleInboundWhatsApp(req, res) {
     });
 
     if (!receivingDealer) {
+      // Shared platform number: try marketplace search first.
       const searchResult = await handleBuyerSearch(knex, { incomingText: incomingText.trim(), buyerPhone: phone });
       if (searchResult) {
         await enqueueAgentWhatsappSend({ tenantId: null, phone, messageBody: searchResult.replyText });
         return res.status(200).json({ success: true, marketplaceSearch: true, matchCount: searchResult.matchCount });
       }
-      // searchResult null: model wasn't confident this was a property
-      // search (greeting, unrelated message, etc.) — fall through to the
-      // existing transaction below, same as before this feature existed.
     }
+
+    // Cold contact: brand-new number, no listing link, and either on a
+    // dealer's direct number OR the shared number with a non-property message.
+    // Send a friendly intro instead of randomly attaching them to a listing
+    // and having the AI chat about it — that produces confusing replies.
+    const lang = detectReplyLanguage(incomingText);
+    const coldGreeting = lang === 'en'
+      ? `Hi there! 👋 This number is for Plotra property agents.\n\n• *Looking to buy or rent a property?* Visit plotraa.com or tap the property link shared with you.\n• *Want to list properties as an agent?* Reply: *join as agent*`
+      : `Namaste! 👋 Yeh number Plotra ke property agents ke liye hai.\n\n• *Property khareedni ya rent karni hai?* plotraa.com visit karein ya aapko share ki gayi property link tap karein.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
+
+    await enqueueAgentWhatsappSend({ tenantId: receivingDealer?.id || null, phone, messageBody: coldGreeting });
+    return res.status(200).json({ success: true, coldContact: true });
   }
 
   try {

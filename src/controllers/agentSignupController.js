@@ -49,17 +49,28 @@ const EXTRACT_DEBOUNCE_MS = 7000;
 // here would intercept genuine buyer messages. Extend the list as real-world
 // missed phrases come in from support.
 const SIGNUP_TRIGGER_PATTERNS = [
-  /\bjoin\s+as\s+(?:an?\s+)?agent\b/i,
-  /\bjoin\s+as\s+(?:an?\s+)?dealer\b/i,
-  /\bbecome\s+(?:an?\s+)?agent\b/i,
-  /\bbecome\s+(?:an?\s+)?dealer\b/i,
+  // English — join / become / sign up
+  /\bjoin\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bbecome\s+(?:an?\s+)?(?:agent|dealer)\b/i,
   /\bsign\s*(?:me\s*)?up\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bi\s+want\s+to\s+(?:be|become)\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  // English — add me / add as
+  /\badd\s+me\s+as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\badd\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\badd\s+(?:me\s+)?(?:as\s+)?(?:an?\s+)?agent\b/i,
+  // English — register
+  /\bregister\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bregister\s+(?:me\s+)?(?:as\s+)?(?:an?\s+)?agent\b/i,
+  // Hindi / Hinglish
   /\bnaya\s+agent\b/i,
   /\bnayi\s+agent\b/i,
   /\bagent\s+banna\b/i,
   /\bdealer\s+banna\b/i,
-  /\bi\s+want\s+to\s+(?:be|become)\s+(?:an?\s+)?(?:agent|dealer)\b/i,
-  /\bregister\s+(?:me\s+)?as\s+(?:an?\s+)?(?:agent|dealer)\b/i,
+  /\bagent\s+banana\b/i,
+  /\bmujhe\s+agent\b/i,
+  /\bagent\s+(?:mein|me)\s+add\b/i,
+  /\bagent\s+ban\s+(?:na\s+)?chahta\b/i,
+  /\bagent\s+ban\s+(?:na\s+)?chahti\b/i,
 ];
 
 async function enqueueSignupExtractJob(signupId) {
