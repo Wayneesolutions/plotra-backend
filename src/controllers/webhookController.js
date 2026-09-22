@@ -9,6 +9,7 @@ const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNu
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { handleBuyerSearch } = require('../services/buyerSearchService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('../services/listingStatusCheckService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -88,9 +89,12 @@ function parseInboundPayload(body) {
     // property photo, out of scope for now.
     mediaId: value.messages?.[0]?.image?.id || null,
     mediaMimeType: value.messages?.[0]?.image?.mime_type || null,
+    // Meta Cloud API quick-reply button tap: messages[0].type === 'interactive',
+    // messages[0].interactive.button_reply.id — ids shaped `available:<listingId>`
+    // / `sold:<listingId>` (PR #33 listing status check).
+    buttonReplyId: value.messages?.[0]?.interactive?.button_reply?.id || null,
     // Meta Cloud API location-message shape: messages[0].type === 'location',
-    // coordinates directly on messages[0].location — no media-id lookup
-    // needed (unlike an image), the lat/lng are inline in the payload.
+    // coordinates directly on messages[0].location — no media-id lookup needed.
     locationLat: value.messages?.[0]?.location?.latitude ?? null,
     locationLng: value.messages?.[0]?.location?.longitude ?? null,
     bspThreadRef: value.messages?.[0]?.id || body.conversation_id || body.msg_id,
@@ -135,13 +139,13 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, locationLat, locationLng } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng } = parseInboundPayload(req.body);
 
   const hasLocation = locationLat != null && locationLng != null;
 
-  console.log('[Webhook] parsed phone=%s text=%s media=%s location=%s', phone || 'null', incomingText || 'null', mediaId || 'null', hasLocation ? `${locationLat},${locationLng}` : 'null');
+  console.log('[Webhook] parsed phone=%s text=%s media=%s location=%s button=%s', phone || 'null', incomingText || 'null', mediaId || 'null', hasLocation ? `${locationLat},${locationLng}` : 'null', buttonReplyId || 'null');
 
-  if (!phone || (!incomingText && !mediaId && !hasLocation)) {
+  if (!phone || (!incomingText && !mediaId && !hasLocation && !buttonReplyId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
   }
@@ -156,6 +160,26 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
+    // "Still Available" / "Sold" quick-reply button tap from the monthly
+    // listing status check — checked first since a button tap carries
+    // neither mediaId nor incomingText. Verifies the listing belongs to
+    // this agent's tenant before acting.
+    if (buttonReplyId) {
+      const [action, listingId] = buttonReplyId.split(':');
+      if ((action === 'available' || action === 'sold') && listingId) {
+        const listing = await knex('listings').where({ id: listingId, tenant_id: agentUser.tenant_id }).first();
+        if (listing) {
+          if (action === 'available') {
+            await handleStillAvailableConfirmation(knex, { listingId, agentUser });
+          } else {
+            await handleSoldConfirmation(knex, { listingId, agentUser });
+          }
+          return res.status(200).json({ success: true, statusCheckAction: action });
+        }
+      }
+      return res.status(200).json({ success: true, warning: 'Unrecognized or unauthorized button reply.' });
+    }
+
     // Payment: a photo while awaiting_receipt_submission is armed is a
     // receipt, not a property photo — checked first among the media
     // branches so it's never mistaken for a listing photo.
@@ -164,30 +188,18 @@ async function handleInboundWhatsApp(req, res) {
     }
 
     // Payment: a bare numeric reply while no package is chosen yet is a
-    // package-menu selection, not listing text — see agentPaymentService.js
-    // for why this is narrow enough (exact 1-2 digit match, only when
-    // package_id is still null) to never collide with real intake text.
+    // package-menu selection, not listing text.
     if (!mediaId && incomingText && !agentUser.package_id) {
       const claimed = await tryHandlePackageSelectionReply(knex, { agentUser, incomingText: incomingText.trim() });
       if (claimed) return res.status(200).json({ success: true, packageSelected: true });
     }
 
-    // Payment: "payment"/"receipt"/"bhugtan" etc. arms the receipt-photo
-    // flag above for the agent's next message. Checked before the normal
-    // text branches — an exact-keyword match (see agentPaymentService.js),
-    // so it won't fire on genuine listing text that happens to contain a
-    // similar word in a longer sentence.
+    // Payment: "payment"/"receipt"/"bhugtan" etc. arms the receipt-photo flag.
     if (!mediaId && incomingText && isReceiptSubmissionIntent(incomingText)) {
       return handleAgentReceiptIntent({ knex, agentUser, res });
     }
 
-    // WhatsApp "share location" — the agent sending their in-app pin drop
-    // for the property, not their own current location (there's no way to
-    // distinguish those at the protocol level; the reply text asking for
-    // this explicitly says "drop a pin on the property"). Checked before
-    // the media/text branches below since a location message carries
-    // neither mediaId nor incomingText. See agentIntakeController.js's
-    // handleAgentLocationPin for what happens with the coordinates.
+    // WhatsApp "share location" — agent's GPS pin for the property.
     if (hasLocation) {
       return handleAgentLocationPin({
         knex,

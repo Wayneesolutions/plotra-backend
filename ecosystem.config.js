@@ -10,6 +10,7 @@ module.exports = {
     { name: 'worker-builderdd',    script: 'src/workers/builderDueDiligenceWorker.js' },
     { name: 'worker-wayneRing',    script: 'src/workers/wayneRingCallSyncWorker.js' },
     { name: 'worker-agentSignup',  script: 'src/workers/agentSignupWorker.js' },
-    { name: 'worker-paymentCron',  script: 'src/workers/paymentReminderWorker.js' },
+    { name: 'worker-paymentCron',   script: 'src/workers/paymentReminderWorker.js' },
+    { name: 'worker-listingStatus', script: 'src/workers/listingStatusCheckWorker.js' },
   ]
 }

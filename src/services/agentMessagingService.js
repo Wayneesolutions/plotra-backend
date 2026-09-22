@@ -37,12 +37,20 @@ async function logAgentOutboundMessage(trx, { draftId, body }) {
  * threadId/leadId are intentionally omitted (undefined) — this is what
  * whatsappOutboundWorker.js's threadId-guard (see that file) relies on to
  * skip the buyer-shaped whatsapp_messages logging for agent-targeted sends.
+ *
+ * `buttons` (optional): [{ id, title }, ...] (max 3, per WhatsApp's own
+ * limit — Meta Cloud API's interactive-button message type). When
+ * present, whatsappOutboundWorker.js sends type:'interactive' instead of
+ * plain type:'text' — see listingStatusCheckService.js (PR 4) for the
+ * first real caller. Omit for a normal text send, exactly as before this
+ * parameter existed.
  */
-async function enqueueAgentWhatsappSend({ tenantId, phone, messageBody }) {
+async function enqueueAgentWhatsappSend({ tenantId, phone, messageBody, buttons }) {
   await whatsappOutboundQueue.add('send-agent-message', {
     tenantId,
     phone,
     messageBody,
+    buttons,
   }, {
     attempts: 3,
     backoff: { type: 'exponential', delay: 2000 },
