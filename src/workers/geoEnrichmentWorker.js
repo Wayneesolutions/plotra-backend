@@ -9,6 +9,7 @@ const { applyResolvedLocation, extractGeneralArea } = require('../services/locat
 const { lookupResolvedLocality, recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { validateAddress } = require('../services/addressValidation');
 const { resolveWithConsensus } = require('../services/geoConsensusService');
+const { mapplsGeocode } = require('../services/mapplsGeocodingService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -196,7 +197,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   // to a slightly different postal area.
   const PLUS_CODE_RE = /\b([23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3})\b/i;
   const plusCodeMatch = rawAddress.match(PLUS_CODE_RE);
-  let geocodeAddress = rawAddress;
+  // WhatsApp/mobile-keyboard autocorrect sometimes substitutes a
+  // typographic dash (en dash, em dash, etc.) for a plain ASCII hyphen —
+  // e.g. "Ludhiana, Punjab – 142027" (en dash before the pincode). Google's
+  // Geocoding API has been seen to ZERO_RESULTS on these where the plain-
+  // hyphen equivalent resolves fine. Normalize before anything else touches
+  // this text. The character class covers hyphen/dash variants U+2010
+  // (hyphen) through U+2015 (horizontal bar).
+  let geocodeAddress = rawAddress.replace(/[‐-―]/g, '-');
   if (plusCodeMatch) {
     const code = plusCodeMatch[1];
     const prefixLen = code.indexOf('+');
@@ -245,6 +253,13 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     let lat, lng, formattedAddress, lowConfidence = false, geoValidationResponseId = null;
+    // Set only when the coordinates came from the ZERO_RESULTS rescue path
+    // below (Places or Mappls, with no successful Google geocode to anchor
+    // to) — skips the Mappls cross-check further down, which needs a real
+    // Google lat/lng to compare against and would otherwise compare Mappls
+    // against itself or against a rescue coordinate it has no business
+    // "agreeing" or "disagreeing" with.
+    let geoResolutionSourceOverride = null;
     let generalArea = null;
     // Tracked across both the Address Validation and legacy Geocoding
     // branches below so the Mappls consensus step (after this if/else) has
@@ -317,8 +332,49 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       }
 
       if (response.data.status !== 'OK') {
-        throw new Error(`Google Maps Platform rejected lookup parameter with status code: ${response.data.status}`);
-      }
+        // Total miss, even after the pincode-relaxed retry above — e.g.
+        // hyper-local plot-number-first addresses Google's Geocoding index
+        // doesn't resolve unless anchored to a bigger landmark. Places
+        // "Find Place from Text" does fuzzy matching against real indexed
+        // places rather than strict structured-address parsing, so it can
+        // still succeed here. Unlike the low-precision rescue below, there's
+        // no successful geocode point yet to anchor a tight circleBias to —
+        // only the broader tenant-level bounds (if configured).
+        let zeroResultsRescue = await tryPlacesTextSearch(geocodeAddress, targetApiKey, geoBiasBounds);
+        let rescueSource = zeroResultsRescue ? 'places' : null;
+
+        // Places also came up empty — try Mappls directly (not the
+        // consensus cross-check in geoConsensusService.js, which needs a
+        // Google lat/lng to compare against and can't run when Google found
+        // nothing at all). Mappls' own address index tends to cover
+        // hyper-local Indian addresses — informal colony/block names,
+        // plot-first addressing — better than Google's in exactly the tier-
+        // 2/3 towns this platform serves, so it's a genuinely different
+        // shot at the same address, not just another guess. Gated behind
+        // the same flag as the consensus check — off until Mappls is
+        // actually provisioned/active.
+        if (!zeroResultsRescue && process.env.MAPPLS_GEO_CONSENSUS_ENABLED === 'true') {
+          const mapplsRescue = await mapplsGeocode(geocodeAddress, listingData.pincode);
+          if (mapplsRescue && !mapplsRescue.coordsUnavailable) {
+            zeroResultsRescue = { lat: mapplsRescue.lat, lng: mapplsRescue.lng, formattedAddress: mapplsRescue.formattedAddress };
+            rescueSource = 'mappls';
+          }
+        }
+
+        if (!zeroResultsRescue) {
+          throw new Error(`Google Maps Platform rejected lookup parameter with status code: ${response.data.status}`);
+        }
+        console.log(`[Job ${job.id}] Geocoding returned ${response.data.status} — ${rescueSource} rescued it.`);
+        ({ lat, lng, formattedAddress } = zeroResultsRescue);
+        generalArea = extractGeneralArea(null, formattedAddress);
+        // Rescued from a total miss, never treat as house-level confident —
+        // still worth having SOME pin over none at all, but it needs the
+        // same scrutiny as any other low-precision result (Fix 4's
+        // geo-review gate).
+        googleIsHighPrecision = false;
+        lowConfidence = true;
+        geoResolutionSourceOverride = rescueSource === 'mappls' ? 'mappls_only_google_zero_results' : 'places_only_google_zero_results';
+      } else {
 
       const result = response.data.results[0];
       formattedAddress = result.formatted_address;
@@ -396,6 +452,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
           lowConfidence = true;
         }
       }
+      } // end status === 'OK' branch
       } // end useAddressValidation else (geocoding + places path)
     }
 
@@ -405,8 +462,8 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // by a person on an earlier listing, which is categorically more
     // trustworthy than a fresh cross-check against either provider.
     let mapplsAudit = null;
-    let geoResolutionSource = cacheHit ? 'cache' : null;
-    if (!cacheHit && !plusCodeMatch && process.env.MAPPLS_GEO_CONSENSUS_ENABLED === 'true') {
+    let geoResolutionSource = cacheHit ? 'cache' : geoResolutionSourceOverride;
+    if (!cacheHit && !geoResolutionSourceOverride && !plusCodeMatch && process.env.MAPPLS_GEO_CONSENSUS_ENABLED === 'true') {
       const consensus = await resolveWithConsensus(
         { lat, lng, isHighPrecision: googleIsHighPrecision, lowConfidence },
         geocodeAddress,
@@ -420,7 +477,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       if (mapplsAudit) {
         console.log(`[Job ${job.id}] Mappls cross-check: agreement=${mapplsAudit.agreementMeters}m, houseLevel=${mapplsAudit.isHouseLevel}, source=${geoResolutionSource}`);
       }
-    } else if (!cacheHit) {
+    } else if (!cacheHit && !geoResolutionSourceOverride) {
       geoResolutionSource = 'google_only_no_mappls';
     }
 
@@ -528,12 +585,31 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 geoWorker.on('failed', async (job, err) => {
   console.error(`❌ [Job ${job?.id}] Geo-enrichment task failed permanently:`, err.message);
 
+  const { listingId, draftId } = job?.data || {};
+
+  // A listing that exhausts every geocode retry currently just sits with no
+  // lat/lng and no signal anywhere that anything went wrong — dashboard-
+  // created listings especially, since (see below) only WhatsApp intake
+  // gets a chat notification. Flag it on the listing row itself, regardless
+  // of source, so these are at least queryable/reviewable instead of
+  // silently invisible.
+  if (listingId && job.attemptsMade >= job.opts.attempts) {
+    try {
+      await knex('listings').where({ id: listingId }).update({
+        location_low_confidence: true,
+        geo_resolution_source: 'geocode_failed',
+        updated_at: knex.fn.now(),
+      });
+    } catch (flagErr) {
+      console.error(`[Job ${job?.id}] Failed to flag listing ${listingId} after permanent geocode failure:`, flagErr.message);
+    }
+  }
+
   // WhatsApp agent-intake listings: this failure is otherwise silent (the
   // dashboard-created path has no viewer waiting on it, so that behavior is
   // intentionally left unchanged) — but an agent who just texted in an
   // address deserves to know it couldn't be located, and their draft
   // shouldn't stay stuck.
-  const draftId = job?.data?.draftId;
   if (draftId && job.attemptsMade >= job.opts.attempts) {
     try {
       const draft = await knex('agent_listing_drafts').where({ id: draftId }).first();

@@ -177,9 +177,18 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
     // Collect error profiles safely to diagnose network drops vs structural API errors
     const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
     console.error(`❌ [Job ${job.id}] Outbound delivery agent dropped connection context:`, errorMessage);
-    
-    // Bubble error outward to trigger configured automatic BullMQ retry backoff policies
-    throw error;
+
+    // Re-throw with the FULL captured body as the message, not the original
+    // axios error (whose .message is just a generic "Request failed with
+    // status code 400/401" with no indication of the actual rejection
+    // reason). err.message is what both BullMQ's own stored failure reason
+    // and the on('failed') handler's delivery_failure_reason column below
+    // end up persisting — without this, the real WhatsApp API error body
+    // was only ever visible in these ephemeral console logs, never in
+    // anything queryable after the fact.
+    const richError = new Error(errorMessage);
+    richError.status = error.response?.status;
+    throw richError;
   }
 }, {
   connection: redisConnection,
