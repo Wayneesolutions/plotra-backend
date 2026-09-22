@@ -424,6 +424,22 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       geoResolutionSource = 'google_only_no_mappls';
     }
 
+    // Super-admin geo review gate (see adminGeoReviewController.js) — a
+    // WhatsApp agent-intake listing whose geocode never reached house-level
+    // precision (googleIsHighPrecision computed above from location_type /
+    // validationGranularity, BEFORE the Mappls consensus step, per the
+    // decision to stop trusting the system's own confidence judgment —
+    // consensus "agreement" has been wrong before and doesn't get a vote
+    // here) gets parked for a human to check instead of being auto-sent to
+    // the agent as awaiting_approval. Only applies when a draftId exists
+    // (WhatsApp intake — the only flow adminGeoReviewController.js knows
+    // how to release, since it looks the listing up by draft) and only when
+    // no agent pin has been shared yet — at this point in the pipeline
+    // (right after the initial geocode) that's always true; if the agent
+    // later shares a real GPS pin, handleAgentLocationPin releases the
+    // listing out of review immediately, since a pin is trusted outright.
+    const needsGeoReview = !!draftId && !googleIsHighPrecision;
+
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
     // street-view fallback images, and re-queue landmark + local-
     // intelligence enrichment — shared with the manual pin-correction
@@ -444,7 +460,9 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       targetApiKey,
       propertyType: listingData.property_type,
       extraListingUpdates: {
-        status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
+        status: needsGeoReview
+          ? 'pending_geo_review'
+          : (['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active'),
         // Neither the Geocoding API nor a Places fallback found a
         // confident, house-level match — the pin is a best-effort guess.
         // agentIntakeWorker.js's preview message uses this to add an
@@ -507,8 +525,12 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // WhatsApp agent-intake listings: send the preview link directly.
     // The listing preview page shows a satellite map with a draggable pin —
     // the agent can visually verify the location, drag the pin to fix it if
-    // needed, and click Save, then reply "yes" to publish.
-    if (draftId) {
+    // needed, and click Save, then reply "yes" to publish. Skipped when
+    // parked in pending_geo_review — the preview goes out once a super-admin
+    // approves it instead (adminGeoReviewController.js enqueues this same
+    // job), or immediately if the agent shares a trusted GPS pin first
+    // (agentIntakeController.js's handleAgentLocationPin).
+    if (draftId && !needsGeoReview) {
       await agentIntakeQueue.add('send-preview', { draftId, listingId }, {
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
@@ -540,7 +562,14 @@ geoWorker.on('failed', async (job, err) => {
       if (!draft) return;
       const agentUser = await knex('users').where({ id: draft.user_id }).first();
 
-      await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'collecting', updated_at: knex.fn.now() });
+      // Reset accumulated_text along with the status bounce-back — the
+      // listing already exists, and whatever text produced this failed
+      // geocode has been fully consumed. Without this reset, the agent's
+      // next reply gets appended onto the OLD (already-failed) address
+      // text instead of replacing it, which is the confirmed mechanism
+      // behind the session-bleed/address-gluing bug (see
+      // agentIntakeWorker.js's creation-path reset for the full story).
+      await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'collecting', accumulated_text: '', updated_at: knex.fn.now() });
 
       const body = "Yeh address locate nahi ho paya. Please ek clearer address bhejein (jaise: sector/colony, city).";
       await knex.transaction(async (trx) => { await logAgentOutboundMessage(trx, { draftId, body }); });

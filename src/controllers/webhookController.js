@@ -94,9 +94,14 @@ function parseInboundPayload(body) {
     // / `sold:<listingId>` (PR #33 listing status check).
     buttonReplyId: value.messages?.[0]?.interactive?.button_reply?.id || null,
     // Meta Cloud API location-message shape: messages[0].type === 'location',
-    // coordinates directly on messages[0].location — no media-id lookup needed.
-    locationLat: value.messages?.[0]?.location?.latitude ?? null,
-    locationLng: value.messages?.[0]?.location?.longitude ?? null,
+    // coordinates directly on messages[0].location — no media-id lookup
+    // needed. A one-time dropped pin and a "Share Live Location" both reach
+    // this webhook this way; `live_location` is checked as a fallback in
+    // case a BSP (or a future Cloud API version) ever surfaces a real-time
+    // share under its own distinct key instead — cheap to support, and
+    // otherwise a live share would silently fail to parse at all.
+    locationLat: value.messages?.[0]?.location?.latitude ?? value.messages?.[0]?.live_location?.latitude ?? null,
+    locationLng: value.messages?.[0]?.location?.longitude ?? value.messages?.[0]?.live_location?.longitude ?? null,
     bspThreadRef: value.messages?.[0]?.id || body.conversation_id || body.msg_id,
     inferredSlug: value.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
     receivingNumber: value.metadata?.display_phone_number || body.to || body.to_phone || null,
