@@ -1,8 +1,10 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
-const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto } = require('./agentIntakeController');
+const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin } = require('./agentIntakeController');
 const { handleAgentSignupMessage } = require('./agentSignupController');
+const { handleAgentReceiptIntent, handleAgentReceiptPhoto } = require('./agentPaymentController');
+const { isReceiptSubmissionIntent, tryHandlePackageSelectionReply } = require('../services/agentPaymentService');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { handleBuyerSearch } = require('../services/buyerSearchService');
@@ -28,6 +30,41 @@ const vocallmChatQueue = new Queue('vocallm-chat-processor', { connection: redis
  * helper when swapping between Chat Mitra, Getgabs, or Meta Cloud API —
  * nothing else in this file should need to change.
  */
+/**
+ * Searches a dealer's active listings for keywords extracted from a buyer's
+ * message. Returns a formatted WhatsApp reply with listing links, or null if
+ * no relevant listings found or the message isn't a property search.
+ */
+async function searchDealerListings(knex, tenantId, incomingText) {
+  const text = incomingText.toLowerCase();
+
+  // Quick intent check — must look like a property query, not a greeting.
+  const propertyKeywords = [
+    'plot', 'plots', 'property', 'properties', 'house', 'flat', 'kothi',
+    'villa', 'commercial', 'shop', 'land', 'zameen', 'makaan', 'ghar',
+    'show', 'list', 'available', 'hai kya', 'milega', 'chahiye', 'want',
+    'buy', 'rent', 'sale', 'sell', 'looking', 'search', 'find',
+  ];
+  const isPropertyQuery = propertyKeywords.some((kw) => text.includes(kw));
+  if (!isPropertyQuery) return null;
+
+  const listings = await knex('listings')
+    .where({ tenant_id: tenantId, status: 'active' })
+    .orderBy('created_at', 'desc')
+    .limit(5)
+    .select('id', 'title', 'property_type', 'plot_area', 'price', 'public_slug', 'raw_address');
+
+  if (!listings.length) return null;
+
+  const appUrl = process.env.PUBLIC_APP_URL || 'https://plotraa.com';
+  const lines = listings.map((l) => {
+    const price = l.price != null ? `₹${Number(l.price).toLocaleString('en-IN')}` : 'Price on request';
+    return `🏷 *${l.title}*\n   ${l.property_type} | ${l.plot_area || '-'} | ${price}\n   ${appUrl}/p/${l.public_slug}`;
+  });
+
+  return `Here are the available properties:\n\n${lines.join('\n\n')}\n\nTap any link to view full details, satellite view, and nearby landmarks. 📍`;
+}
+
 function parseInboundPayload(body) {
   // Meta Cloud API wraps the actual message data inside entry[0].changes[0].value.
   // Other BSPs (Gupshup, Interakt, Chat Mitra) send a flat top-level body.
@@ -53,13 +90,13 @@ function parseInboundPayload(body) {
     mediaId: value.messages?.[0]?.image?.id || null,
     mediaMimeType: value.messages?.[0]?.image?.mime_type || null,
     // Meta Cloud API quick-reply button tap: messages[0].type === 'interactive',
-    // messages[0].interactive.button_reply.id — the id is whatever string
-    // the outbound send put there (see agentMessagingService.js's
-    // enqueueAgentWhatsappSend `buttons` param). PR 4's listing status
-    // check is the first feature to send buttons, using ids shaped
-    // `available:<listingId>` / `sold:<listingId>` — see
-    // handleInboundWhatsApp below.
+    // messages[0].interactive.button_reply.id — ids shaped `available:<listingId>`
+    // / `sold:<listingId>` (PR #33 listing status check).
     buttonReplyId: value.messages?.[0]?.interactive?.button_reply?.id || null,
+    // Meta Cloud API location-message shape: messages[0].type === 'location',
+    // coordinates directly on messages[0].location — no media-id lookup needed.
+    locationLat: value.messages?.[0]?.location?.latitude ?? null,
+    locationLng: value.messages?.[0]?.location?.longitude ?? null,
     bspThreadRef: value.messages?.[0]?.id || body.conversation_id || body.msg_id,
     inferredSlug: value.messages?.[0]?.context?.referred_slug || body.metadata?.slug || null,
     receivingNumber: value.metadata?.display_phone_number || body.to || body.to_phone || null,
@@ -102,11 +139,13 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng } = parseInboundPayload(req.body);
 
-  console.log('[Webhook] parsed phone=%s text=%s media=%s button=%s', phone || 'null', incomingText || 'null', mediaId || 'null', buttonReplyId || 'null');
+  const hasLocation = locationLat != null && locationLng != null;
 
-  if (!phone || (!incomingText && !mediaId && !buttonReplyId)) {
+  console.log('[Webhook] parsed phone=%s text=%s media=%s location=%s button=%s', phone || 'null', incomingText || 'null', mediaId || 'null', hasLocation ? `${locationLat},${locationLng}` : 'null', buttonReplyId || 'null');
+
+  if (!phone || (!incomingText && !mediaId && !hasLocation && !buttonReplyId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
   }
@@ -121,12 +160,10 @@ async function handleInboundWhatsApp(req, res) {
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
   if (agentUser) {
-    // PR 4: "Still Available" / "Sold" quick-reply button tap from the
-    // monthly listing status check — see listingStatusCheckService.js.
-    // Checked first among the agent branches since a button tap carries
-    // neither mediaId nor incomingText. Verifies the tapped listing
-    // actually belongs to this agent's tenant before acting — the id is
-    // opaque to WhatsApp but not to a forged/replayed request.
+    // "Still Available" / "Sold" quick-reply button tap from the monthly
+    // listing status check — checked first since a button tap carries
+    // neither mediaId nor incomingText. Verifies the listing belongs to
+    // this agent's tenant before acting.
     if (buttonReplyId) {
       const [action, listingId] = buttonReplyId.split(':');
       if ((action === 'available' || action === 'sold') && listingId) {
@@ -141,6 +178,37 @@ async function handleInboundWhatsApp(req, res) {
         }
       }
       return res.status(200).json({ success: true, warning: 'Unrecognized or unauthorized button reply.' });
+    }
+
+    // Payment: a photo while awaiting_receipt_submission is armed is a
+    // receipt, not a property photo — checked first among the media
+    // branches so it's never mistaken for a listing photo.
+    if (agentUser.awaiting_receipt_submission && mediaId) {
+      return handleAgentReceiptPhoto({ knex, agentUser, mediaId, mediaMimeType, res });
+    }
+
+    // Payment: a bare numeric reply while no package is chosen yet is a
+    // package-menu selection, not listing text.
+    if (!mediaId && incomingText && !agentUser.package_id) {
+      const claimed = await tryHandlePackageSelectionReply(knex, { agentUser, incomingText: incomingText.trim() });
+      if (claimed) return res.status(200).json({ success: true, packageSelected: true });
+    }
+
+    // Payment: "payment"/"receipt"/"bhugtan" etc. arms the receipt-photo flag.
+    if (!mediaId && incomingText && isReceiptSubmissionIntent(incomingText)) {
+      return handleAgentReceiptIntent({ knex, agentUser, res });
+    }
+
+    // WhatsApp "share location" — agent's GPS pin for the property.
+    if (hasLocation) {
+      return handleAgentLocationPin({
+        knex,
+        agentUser,
+        lat: locationLat,
+        lng: locationLng,
+        bspMessageId: bspThreadRef,
+        res,
+      });
     }
 
     if (mediaId && incomingText && incomingText.trim()) {
@@ -259,14 +327,21 @@ async function handleInboundWhatsApp(req, res) {
       }
     }
 
-    // Cold contact: brand-new number, no listing link, and either on a
-    // dealer's direct number OR the shared number with a non-property message.
-    // Send a friendly intro instead of randomly attaching them to a listing
-    // and having the AI chat about it — that produces confusing replies.
+    // Cold contact on a dealer's number: try to answer as a listing search
+    // before falling back to the generic greeting.
+    if (receivingDealer) {
+      const searchReply = await searchDealerListings(knex, receivingDealer.id, incomingText);
+      if (searchReply) {
+        await enqueueAgentWhatsappSend({ tenantId: receivingDealer.id, phone, messageBody: searchReply });
+        return res.status(200).json({ success: true, dealerListingSearch: true });
+      }
+    }
+
+    // Not a recognisable property query — send friendly intro.
     const lang = detectReplyLanguage(incomingText);
     const coldGreeting = lang === 'en'
-      ? `Hi there! 👋 This number is for Plotra property agents.\n\n• *Looking to buy or rent a property?* Visit plotraa.com or tap the property link shared with you.\n• *Want to list properties as an agent?* Reply: *join as agent*`
-      : `Namaste! 👋 Yeh number Plotra ke property agents ke liye hai.\n\n• *Property khareedni ya rent karni hai?* plotraa.com visit karein ya aapko share ki gayi property link tap karein.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
+      ? `Hi there! 👋 This number is for Plotra property agents.\n\n• *Looking for a property?* Tell me the area and type (e.g. "plots in Ludhiana") and I'll show you available listings.\n• *Want to list properties as an agent?* Reply: *join as agent*`
+      : `Namaste! 👋 Yeh number Plotra ke property agents ke liye hai.\n\n• *Property dhundh rahe hain?* Area aur type batayein (jaise "Ludhiana mein plot") aur main available listings dikha dunga.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
 
     await enqueueAgentWhatsappSend({ tenantId: receivingDealer?.id || null, phone, messageBody: coldGreeting });
     return res.status(200).json({ success: true, coldContact: true });

@@ -13,9 +13,9 @@ const s3 = new S3Client({
 const BUCKET = process.env.AWS_S3_BUCKET || 'propertypro-media';
 const REGION = process.env.AWS_REGION || 'us-east-1';
 
-async function uploadToS3(fileBuffer, originalName, mimeType) {
+async function uploadToS3(fileBuffer, originalName, mimeType, keyPrefix = 'listings') {
   const ext = path.extname(originalName).toLowerCase() || '.jpg';
-  const key = `listings/${uuidv4()}${ext}`;
+  const key = `${keyPrefix}/${uuidv4()}${ext}`;
 
   await s3.send(new PutObjectCommand({
     Bucket: BUCKET,

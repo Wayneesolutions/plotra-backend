@@ -4,7 +4,7 @@ const axios = require('axios');
 const IORedis = require('ioredis');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
-const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
 const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 const { lookupResolvedLocality, recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { validateAddress } = require('../services/addressValidation');
@@ -476,6 +476,33 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
+
+    // Low-confidence WhatsApp listing: ask the agent to share a real GPS
+    // pin (WhatsApp's own "share location" feature) as a second, stronger
+    // verification signal than the pin-drag-on-preview nudge already in
+    // sendPreviewAndAwaitApproval's message — that one only works if the
+    // agent actually looks closely at a satellite image; a GPS pin is an
+    // explicit, unambiguous coordinate. See agentIntakeController.js's
+    // handleAgentLocationPin for what happens when it arrives. Sent
+    // ahead of send-preview below (not instead of it) — the preview flow
+    // is unchanged, this is purely an additional prompt.
+    if (draftId && lowConfidence) {
+      const draftForPinRequest = await knex('agent_listing_drafts').where({ id: draftId }).first();
+      const agentForPinRequest = draftForPinRequest
+        ? await knex('users').where({ id: draftForPinRequest.user_id }).first()
+        : null;
+
+      if (agentForPinRequest) {
+        const lang = await detectDraftLanguage(knex, draftId);
+        const pinRequestBody = lang === 'en'
+          ? "📍 We couldn't pin this address precisely. If you can, open WhatsApp's location feature and share the property's exact location — tap the ➕/attachment icon, choose *Location*, then *Share Live Location* or drop a pin on the map at the property."
+          : '📍 Yeh address bilkul sahi se locate nahi ho paya. Agar ho sake to WhatsApp ke location feature se property ki exact location share karein — ➕/attachment icon dabayein, *Location* choose karein, phir property pe pin drop karke share karein.';
+        await knex.transaction(async (trx) => {
+          await logAgentOutboundMessage(trx, { draftId, body: pinRequestBody });
+        });
+        await enqueueAgentWhatsappSend({ tenantId: listingData.tenant_id, phone: agentForPinRequest.phone, messageBody: pinRequestBody });
+      }
+    }
 
     // WhatsApp agent-intake listings: send the preview link directly.
     // The listing preview page shows a satellite map with a draggable pin —

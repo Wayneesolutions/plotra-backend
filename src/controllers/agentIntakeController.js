@@ -5,11 +5,25 @@ const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage }
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { uploadToS3 } = require('../services/s3Service');
 const { extractListingFields } = require('../services/listingExtractionService');
-const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
+const { recordImplicitApprovalIfUncorrected, recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { autoPublishIfReady } = require('./builderProfileController');
 const { provideValidationFeedback } = require('../services/addressValidation');
+const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { haversineMeters } = require('../services/geoConsensusService');
 
 const MAX_PHOTOS_WHATSAPP = 10;
+
+// Agreement threshold for "does the agent's shared pin match the geocoded
+// estimate" (handleAgentLocationPin below) — Google's own Places-candidate
+// drift check (geoEnrichmentWorker.js) and Mappls consensus check
+// (geoConsensusService.js's MAX_AGREEMENT_DRIFT_METERS) use wider radii
+// (3-4km, 400m) because they're comparing two independent guesses against
+// each other; this is comparing a geocode against the agent's own GPS pin
+// for the same property, so a tighter radius is appropriate. 120m picked
+// from the middle of the suggested 100-150m range — revisit once real pin
+// submissions show what drift is actually normal for GPS accuracy in dense
+// Punjab colonies vs. what indicates a genuinely wrong pin.
+const PIN_AGREEMENT_THRESHOLD_METERS = 120;
 
 /**
  * Derives the Meta Graph API base (origin + version) from BSP_GATEWAY_URL,
@@ -302,6 +316,26 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         [draft] = await trx('agent_listing_drafts')
           .insert({ tenant_id: agentUser.tenant_id, user_id: agentUser.id, status: 'collecting' })
           .returning(['id', 'status', 'listing_id']);
+      }
+
+      // Payment guard: blocks starting a BRAND NEW listing only — draft.listing_id
+      // being set means this draft already has a real listing behind it (an
+      // approval reply or a correction to it), which must keep working
+      // regardless of payment status ("purani listings active hain" — see
+      // agentPaymentService.js / the daily reminder cron that flips
+      // can_add_listing off). Checked before accumulated_text is touched at
+      // all, so a blocked agent's message never silently starts a draft
+      // that then can't go anywhere.
+      if (!agentUser.can_add_listing && !draft.listing_id) {
+        const blockedBody = 'Your account has a payment pending, so new listings can\'t be added right now — your existing listings stay active. Reply "payment" to submit your receipt once paid.';
+        await trx('agent_draft_messages').insert({
+          draft_id: draft.id,
+          direction: 'inbound',
+          body: incomingText,
+          bsp_message_id: bspMessageId || null,
+        });
+        await logAgentOutboundMessage(trx, { draftId: draft.id, body: blockedBody });
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: blockedBody };
       }
 
       // Universal approval check: when the agent says "yes" and there's a
@@ -652,4 +686,158 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
   }
 }
 
-module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto };
+/**
+ * WhatsApp "share location" from an agent — a real GPS pin for the
+ * property, meant to verify/correct the geocoded coordinate rather than
+ * describe it in text. Routed here directly from webhookController.js
+ * (a location message carries neither mediaId nor incomingText, so it
+ * can't flow through handleAgentIntakeMessage/handleAgentIntakePhoto).
+ *
+ * Policy: the agent's pin always becomes the listing's current lat/lng —
+ * "agent jo bheje woh final". What the agreement check below decides is
+ * only whether receiving the pin also resolves location_low_confidence:
+ *   - No confidence issue on the existing geocode: pin is trusted outright,
+ *     no distance check at all (spec: "koi validation nahi").
+ *   - Existing geocode was low-confidence and the pin lands close (within
+ *     PIN_AGREEMENT_THRESHOLD_METERS): treat it as confirming the
+ *     location — clear location_low_confidence.
+ *   - Existing geocode was low-confidence and the pin is far from it:
+ *     still use the pin as the coordinate, but leave location_low_confidence
+ *     set — a mismatch this size is itself worth a human glance later, same
+ *     caution as geoConsensusService.js's MAX_AGREEMENT_DRIFT_METERS
+ *     disagreement case, not a "resolved" outcome.
+ *
+ * Note: pending_geo_review (the super-admin review queue) isn't wired into
+ * this — that status is currently never set anywhere in this codebase (the
+ * gate that used to route into it was reverted in b645dd7); this function
+ * only touches location_low_confidence, which IS live and IS what drives
+ * the "please check the pin" nudge in the agent's own preview message. If
+ * the admin-review gate gets reinstated later, hook it in here too.
+ */
+async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId, res }) {
+  try {
+    // Most recently active draft with a listing already created — a
+    // location share only ever makes sense as a correction/verification
+    // for a listing already in flight, never as the start of a new one.
+    const draft = await knex('agent_listing_drafts')
+      .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
+      .whereIn('status', LIVE_STATUSES)
+      .whereNotNull('listing_id')
+      .orderBy('updated_at', 'desc')
+      .first();
+
+    const lang = draft ? await detectDraftLanguage(knex, draft.id) : 'hi';
+
+    if (!draft) {
+      const body = lang === 'en'
+        ? "I don't have a listing in progress to attach this location to. Start a new listing first, then share the pin."
+        : 'Abhi koi listing in-progress nahi hai jisse yeh location jode. Pehle naya listing shuru karein, phir pin share karein.';
+      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
+      return res.status(200).json({ success: true, noop: true });
+    }
+
+    const listing = await knex('listings').where({ id: draft.listing_id }).first();
+    if (!listing) {
+      return res.status(200).json({ success: true, noop: true });
+    }
+
+    const wasLowConfidence = !!listing.location_low_confidence;
+    const hasExistingCoords = listing.lat != null && listing.lng != null;
+    const distanceMeters = hasExistingCoords
+      ? Math.round(haversineMeters(Number(listing.lat), Number(listing.lng), lat, lng))
+      : null;
+    const pinAgrees = wasLowConfidence
+      ? (distanceMeters != null && distanceMeters <= PIN_AGREEMENT_THRESHOLD_METERS)
+      : true; // no confidence issue to begin with — pin trusted outright, no distance check
+
+    const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
+    const targetApiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+
+    // Best-effort reverse geocode so the displayed address stays roughly
+    // consistent with the pin — same non-fatal pattern as
+    // publicListingController.js's manual pin-drag endpoint.
+    let formattedAddress = null;
+    if (targetApiKey) {
+      try {
+        const reverseUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${targetApiKey}`;
+        const reverseResponse = await axios.get(reverseUrl, { timeout: 8000 });
+        if (reverseResponse.data.status === 'OK' && reverseResponse.data.results.length) {
+          formattedAddress = reverseResponse.data.results[0].formatted_address;
+        }
+      } catch (reverseErr) {
+        console.error('Agent location pin: reverse geocode failed (non-fatal):', reverseErr.message);
+      }
+    }
+
+    await applyResolvedLocation(knex, {
+      listingId: listing.id,
+      lat,
+      lng,
+      formattedAddress,
+      targetApiKey,
+      propertyType: listing.property_type,
+      extraListingUpdates: {
+        location_source: 'agent_pin',
+        agent_pin_lat: lat,
+        agent_pin_lng: lng,
+        pin_geocode_distance_m: distanceMeters,
+        pin_manually_corrected: true,
+        location_low_confidence: wasLowConfidence ? !pinAgrees : false,
+        geo_resolution_source: 'agent_whatsapp_pin',
+      },
+    });
+
+    // Same self-learning cache + Google feedback loop as a manual pin drag
+    // (publicListingController.js) — an agent's explicit GPS share is the
+    // same kind of human-confirmed signal, not a lesser one.
+    await recordResolvedLocality(knex, {
+      tenantId: listing.tenant_id,
+      buildingName: listing.building_name,
+      rawAddress: listing.raw_address,
+      lat,
+      lng,
+      formattedAddress,
+      source: 'agent_whatsapp_pin',
+    });
+
+    if (listing.geo_validation_response_id && targetApiKey) {
+      await provideValidationFeedback({
+        responseId: listing.geo_validation_response_id,
+        conclusion: 'USER_VERSION_USED',
+        apiKey: targetApiKey,
+      });
+    }
+
+    const confirmBody = !wasLowConfidence
+      ? (lang === 'en'
+          ? '📍 Got your location pin — saved.'
+          : '📍 Location pin mil gaya — save ho gaya.')
+      : pinAgrees
+        ? (lang === 'en'
+            ? `📍 Pin received and matches the address closely (${distanceMeters}m) — location confirmed.`
+            : `📍 Pin mil gaya aur address se match karta hai (${distanceMeters}m) — location confirm ho gayi.`)
+        : (lang === 'en'
+            ? `📍 Pin received, but it's ${distanceMeters}m from the address we found. Using your pin as the location — flagging this for a closer look before it goes fully live.`
+            : `📍 Pin mil gaya, lekin yeh address se ${distanceMeters}m door hai. Location aapke pin se set kar di hai — publish se pehle ek baar dobara check kar lenge.`);
+
+    await knex.transaction(async (trx) => {
+      await trx('agent_draft_messages').insert({
+        draft_id: draft.id,
+        direction: 'inbound',
+        body: `[location pin shared: ${lat},${lng}]`,
+        bsp_message_id: bspMessageId || null,
+      });
+      await logAgentOutboundMessage(trx, { draftId: draft.id, body: confirmBody });
+    });
+    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
+
+    return res.status(200).json({ success: true, pinAgrees, distanceMeters });
+  } catch (error) {
+    console.error('Failed to process agent WhatsApp location pin:', error.message);
+    // Still ack 200 so the BSP doesn't retry-storm us — same rationale as
+    // every other handler in this file.
+    return res.status(200).json({ success: true, trackingError: error.message });
+  }
+}
+
+module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia };
