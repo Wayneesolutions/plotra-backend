@@ -2,7 +2,7 @@
  * Locality matcher service — the one thing the rest of Plotra calls.
  *
  *   const matcher = createLocalityMatcher({ knex });
- *   const r = await matcher.match({ city: 'Ludhiana', text: 'plot dugri ph-2', lat, lng, listingId });
+ *   const r = await matcher.match({ cityId: tenant.city_id, text: 'plot dugri ph-2', lat, lng, listingId });
  *
  *   r.decision:
  *     'auto'     -> save r.localityId on the listing, no question to dealer
@@ -12,6 +12,16 @@
  *
  * After the dealer says "Haan" (or admin resolves), call matcher.confirm(...) so the
  * spelling the dealer used becomes a new alias and next time it's an instant match.
+ *
+ * Only a `live` city is matched for real listings (see the `requireLive`
+ * default below) — a `draft` city (not yet imported/verified) can still be
+ * tried through the admin test box by passing `requireLive: false`.
+ *
+ * Deprecated: passing `{ city: 'Ludhiana' }` (a name) instead of
+ * `{ cityId }` still works — it's resolved to an id on every call (a small
+ * extra query, not cached) and logs a deprecation warning. Update callers
+ * to pass `cityId` directly; this shim exists only so older call sites from
+ * before the Cities feature don't break outright.
  */
 
 const { normalize } = require('./normalize');
@@ -22,19 +32,30 @@ const { checkPin, localitiesForPoint } = require('./geoCheck');
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
 function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logger = console }) {
-  const cache = new Map(); // cityKey -> { at, rows, index }
+  const cache = new Map(); // cityId -> { at, rows, index, city: {id,name,status} }
+  const nameToIdCache = new Map(); // lowercased city name -> id, for the deprecated `city` shim only
 
-  const cityKey = (city) => String(city || '').trim().toLowerCase();
+  async function resolveCityId(cityName) {
+    const key = String(cityName || '').trim().toLowerCase();
+    if (!key) return null;
+    if (nameToIdCache.has(key)) return nameToIdCache.get(key);
+    const row = await knex('cities').whereRaw('lower(name) = ?', [key]).first('id');
+    const id = row ? row.id : null;
+    if (id != null) nameToIdCache.set(key, id);
+    return id;
+  }
 
-  async function load(city) {
-    const key = cityKey(city);
-    const hit = cache.get(key);
+  async function load(cityId) {
+    const hit = cache.get(cityId);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit;
 
-    const rows = await knex('localities')
-      .whereRaw('lower(city) = ?', [key])
-      .whereNot('status', 'disabled')
-      .select('id', 'name', 'kind', 'parent_id', 'pincode', 'center_lat', 'center_lng', 'radius_m', 'boundary', 'status');
+    const city = await knex('cities').where({ id: cityId }).first('id', 'name', 'status');
+    const rows = city
+      ? await knex('localities')
+          .where({ city_id: cityId })
+          .whereNot('status', 'disabled')
+          .select('id', 'name', 'kind', 'parent_id', 'pincode', 'center_lat', 'center_lng', 'radius_m', 'boundary', 'status')
+      : [];
     const aliasRows = rows.length
       ? await knex('locality_aliases').whereIn('locality_id', rows.map((r) => r.id)).select('locality_id', 'alias')
       : [];
@@ -45,29 +66,29 @@ function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logg
     }
     for (const r of rows) r.aliases = aliasMap.get(r.id) || [];
 
-    const entry = { at: Date.now(), rows, index: buildIndex(rows) };
-    cache.set(key, entry);
+    const entry = { at: Date.now(), rows, index: buildIndex(rows), city };
+    cache.set(cityId, entry);
     return entry;
   }
 
-  function invalidate(city) {
-    if (city) cache.delete(cityKey(city));
+  function invalidate(cityId) {
+    if (cityId != null) cache.delete(cityId);
     else cache.clear();
   }
 
-  async function queueUnmatched({ city, text, normalized, listingId, suggestion }) {
+  async function queueUnmatched({ cityId, text, normalized, listingId, suggestion }) {
     if (!normalized) return;
     try {
       await knex('locality_unmatched')
         .insert({
-          city,
+          city_id: cityId,
           raw_text: text,
           normalized: normalized.slice(0, 300),
           listing_id: listingId || null,
           suggested_locality_id: suggestion ? suggestion.localityId : null,
           suggested_confidence: suggestion ? suggestion.score : null,
         })
-        .onConflict(['city', 'normalized'])
+        .onConflict(['city_id', 'normalized'])
         .merge({
           seen_count: knex.raw('locality_unmatched.seen_count + 1'),
           listing_id: listingId || knex.raw('locality_unmatched.listing_id'),
@@ -78,8 +99,29 @@ function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logg
     }
   }
 
-  async function match({ city, text, lat = null, lng = null, listingId = null, record = true }) {
-    const { rows, index } = await load(city);
+  /**
+   * @param {boolean} [requireLive=true] - when true (the default, used by
+   *   the real listing pipeline), a city that isn't status='live' never
+   *   matches — callers get 'unmatched'/'city_not_live' instead of a false
+   *   positive against an unverified/still-being-imported city. The admin
+   *   test box passes false so a draft city can be tried before go-live.
+   */
+  async function match({ city, cityId, text, lat = null, lng = null, listingId = null, record = true, requireLive = true }) {
+    if (cityId == null && city != null) {
+      logger.warn('[locality] matcher.match({ city }) is deprecated — pass { cityId } instead.');
+      cityId = await resolveCityId(city);
+    }
+    if (cityId == null) {
+      return { decision: 'unmatched', reason: 'no_city', localityId: null, candidates: [] };
+    }
+
+    const { rows, index, city: cityRow } = await load(cityId);
+    if (!cityRow) {
+      return { decision: 'unmatched', reason: 'unknown_city', localityId: null, candidates: [] };
+    }
+    if (requireLive && cityRow.status !== 'live') {
+      return { decision: 'unmatched', reason: 'city_not_live', localityId: null, candidates: [] };
+    }
     if (!rows.length) {
       return { decision: 'unmatched', reason: 'no_localities_for_city', localityId: null, candidates: [] };
     }
@@ -93,7 +135,7 @@ function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logg
       // candidates first, then the rest of the city, so the model sees likely options up top
       const candidateIds = new Set(result.candidates.map((c) => c.localityId));
       const ordered = [...rows.filter((r) => candidateIds.has(r.id)), ...rows.filter((r) => !candidateIds.has(r.id))];
-      const llmRes = await llm({ city, rawText: text, localities: ordered });
+      const llmRes = await llm({ city: cityRow.name, rawText: text, localities: ordered });
       if (llmRes && llmRes.localityId != null) {
         const agreesWithBest = best && best.localityId === llmRes.localityId;
         // Deterministic + LLM agreeing is strong evidence; LLM alone is capped at "confirm" territory
@@ -142,7 +184,7 @@ function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logg
     }
 
     if (record && result.decision === 'unmatched') {
-      await queueUnmatched({ city, text, normalized: result.text, listingId, suggestion: best });
+      await queueUnmatched({ cityId, text, normalized: result.text, listingId, suggestion: best });
     }
 
     return {
@@ -165,13 +207,19 @@ function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logg
    * Dealer said "Haan" / admin picked the right locality.
    * Learns the phrase as an alias (only human-confirmed matches are ever learned).
    */
-  async function confirm({ city, localityId, phrase, source = 'learned' }) {
+  async function confirm({ city, cityId, localityId, phrase, source = 'learned' }) {
+    if (cityId == null && city != null) {
+      logger.warn('[locality] matcher.confirm({ city }) is deprecated — pass { cityId } instead.');
+      cityId = await resolveCityId(city);
+    }
+    if (cityId == null) return { learned: false, reason: 'no_city' };
+
     const norm = normalize(phrase || '');
     if (!norm || norm.length < 4) return { learned: false };
     // Don't learn a phrase that already points at a different locality in this city
     const clash = await knex('locality_aliases as a')
       .join('localities as l', 'l.id', 'a.locality_id')
-      .whereRaw('lower(l.city) = ?', [cityKey(city)])
+      .where('l.city_id', cityId)
       .where('a.alias_normalized', norm)
       .whereNot('a.locality_id', localityId)
       .first();
@@ -181,7 +229,7 @@ function createLocalityMatcher({ knex, llm = resolveWithLLM, useLLM = true, logg
       .insert({ locality_id: localityId, alias: phrase.trim().slice(0, 200), alias_normalized: norm, source })
       .onConflict(['locality_id', 'alias_normalized'])
       .ignore();
-    invalidate(city);
+    invalidate(cityId);
     return { learned: true };
   }
 

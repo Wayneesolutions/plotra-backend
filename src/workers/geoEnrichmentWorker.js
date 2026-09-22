@@ -563,17 +563,20 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // Locality Master tagging — best-effort and purely additive: resolves
     // listingData.raw_address against the curated locality list (see
     // localityMatcher.js), using the coordinates just persisted above as a
-    // pin cross-check. Only ever writes locality_id when the match is
-    // confident enough to auto-accept ('confirm'/'unmatched' results are
-    // left for a dealer/admin flow to wire up later — see PR description);
-    // a miss or an error here never blocks or fails the geocoding job that
-    // already succeeded by this point, same non-fatal pattern as the
-    // resolved-locality cache write in publicListingController.js.
+    // pin cross-check. Keyed by the tenant's city_id (Cities feature,
+    // migration 20260923_01) — a tenant with no city_id yet, or whose city
+    // isn't status='live', simply gets 'unmatched'/no-op here (requireLive
+    // defaults to true), same as before this feature existed. Only ever
+    // writes locality_id when the match is confident enough to auto-accept
+    // ('confirm'/'unmatched' results are left for a dealer/admin flow to
+    // wire up later — see PR description); a miss or an error here never
+    // blocks or fails the geocoding job that already succeeded by this
+    // point, same non-fatal pattern as the resolved-locality cache write in
+    // publicListingController.js.
     try {
       const tenantForLocality = await knex('tenants').where({ id: listingData.tenant_id }).first();
-      const localityCity = tenantForLocality?.operating_city || 'Ludhiana';
       const localityResult = await localityMatcher.match({
-        city: localityCity,
+        cityId: tenantForLocality?.city_id ?? null,
         text: listingData.raw_address,
         lat,
         lng,
