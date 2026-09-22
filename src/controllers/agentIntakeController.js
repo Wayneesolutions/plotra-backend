@@ -8,7 +8,7 @@ const { extractListingFields } = require('../services/listingExtractionService')
 const { recordImplicitApprovalIfUncorrected, recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { autoPublishIfReady } = require('./builderProfileController');
 const { provideValidationFeedback } = require('../services/addressValidation');
-const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 const { haversineMeters } = require('../services/geoConsensusService');
 
 const MAX_PHOTOS_WHATSAPP = 10;
@@ -809,12 +809,25 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
     // consistent with the pin — same non-fatal pattern as
     // publicListingController.js's manual pin-drag endpoint.
     let formattedAddress = null;
+    let generalArea = null;
     if (targetApiKey) {
       try {
         const reverseUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${targetApiKey}`;
         const reverseResponse = await axios.get(reverseUrl, { timeout: 8000 });
         if (reverseResponse.data.status === 'OK' && reverseResponse.data.results.length) {
           formattedAddress = reverseResponse.data.results[0].formatted_address;
+          // Bug fix: this reverse-geocode result already carries
+          // address_components, but general_area (the locality-only text
+          // buyers actually see on the public listing page — see
+          // publicListingController.js's Fix 5) was never recomputed here,
+          // unlike every other geocoding path (geoEnrichmentWorker.js,
+          // adminGeoReviewController.js). Without this, an agent's GPS
+          // pin correctly moved the actual lat/lng, but the buyer-facing
+          // locality text stayed stuck on whatever the original wrong
+          // geocode said — "location was shared but Plotraa didn't pick
+          // it up" from the buyer's point of view, even though the pin
+          // itself was saved correctly.
+          generalArea = extractGeneralArea(reverseResponse.data.results[0].address_components, formattedAddress);
         }
       } catch (reverseErr) {
         console.error('Agent location pin: reverse geocode failed (non-fatal):', reverseErr.message);
@@ -834,6 +847,10 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
         agent_pin_lng: lng,
         pin_geocode_distance_m: distanceMeters,
         pin_manually_corrected: true,
+        // Only overwrite if the reverse geocode actually succeeded — never
+        // null out an existing (possibly still-correct-enough) general_area
+        // just because this particular reverse-geocode call failed.
+        ...(generalArea ? { general_area: generalArea } : {}),
         // Unconditional — the agent's pin is standing at the property, the
         // geocode was only ever a guess from address text. No agreement
         // check decides this anymore (see the function doc comment).

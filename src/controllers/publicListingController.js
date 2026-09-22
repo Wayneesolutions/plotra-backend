@@ -1,7 +1,7 @@
 const { Queue } = require('bullmq');
 const axios = require('axios');
 const { normalizePhone, toWaMeDigits } = require('../utils/phone');
-const { applyResolvedLocation } = require('../services/locationResolutionService');
+const { applyResolvedLocation, extractGeneralArea } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { provideValidationFeedback } = require('../services/addressValidation');
 
@@ -433,11 +433,19 @@ async function updateListingLocation(req, res) {
     // regardless of whether a nice address string comes back for them;
     // falls back to whatever address the listing already had.
     let formattedAddress = null;
+    let generalArea = null;
     try {
       const reverseUrl = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${nLat},${nLng}&key=${targetApiKey}`;
       const reverseResponse = await axios.get(reverseUrl, { timeout: 8000 });
       if (reverseResponse.data.status === 'OK' && reverseResponse.data.results.length) {
         formattedAddress = reverseResponse.data.results[0].formatted_address;
+        // Bug fix: general_area (the locality-only text buyers actually see
+        // on the public listing page — see Fix 5 above) was never
+        // recomputed on a manual pin drag, unlike geoEnrichmentWorker.js
+        // and adminGeoReviewController.js. The dealer's corrected pin
+        // moved lat/lng correctly, but the buyer-facing locality text
+        // stayed stuck on the original (possibly wrong) geocode.
+        generalArea = extractGeneralArea(reverseResponse.data.results[0].address_components, formattedAddress);
       }
     } catch (reverseErr) {
       console.error('Reverse geocode for manual pin correction failed (non-fatal):', reverseErr.message);
@@ -463,7 +471,15 @@ async function updateListingLocation(req, res) {
       // geo_resolution_source: overrides whatever the geocode consensus
       // step (geoConsensusService.js) had set, same reasoning as
       // location_low_confidence above — keeps the audit trail meaningful.
-      extraListingUpdates: { pin_manually_corrected: true, location_low_confidence: false, geo_resolution_source: 'manual_pin_drag' },
+      extraListingUpdates: {
+        pin_manually_corrected: true,
+        location_low_confidence: false,
+        geo_resolution_source: 'manual_pin_drag',
+        // Only overwrite if the reverse geocode actually succeeded — never
+        // null out an existing general_area just because this particular
+        // reverse-geocode call failed.
+        ...(generalArea ? { general_area: generalArea } : {}),
+      },
     });
 
     // Self-learning cache: a dealer just explicitly confirmed this is the
