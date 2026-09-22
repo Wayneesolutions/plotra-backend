@@ -13,6 +13,7 @@ const {
   updateTenantStatus,
   updateTenantPlan,
   listAllListings,
+  listCallingOverage,
 } = require('../controllers/adminController');
 const {
   listAdPlacements,
@@ -210,5 +211,13 @@ router.get('/agents-payments', listAgentsPaymentStatus);
 router.get('/packages', listPackagesAdmin);
 router.post('/packages', createPackage);
 router.patch('/packages/:id', updatePackage);
+
+/**
+ * @route   GET /api/v1/admin/calling-overage
+ * @desc    Tenants currently over their plan's included calling minutes
+ *          this month, and what they owe at the plan's overage rate.
+ *          Read-only — does not charge anything.
+ */
+router.get('/calling-overage', listCallingOverage);
 
 module.exports = router;
