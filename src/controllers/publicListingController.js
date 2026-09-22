@@ -127,6 +127,20 @@ async function getPublicListing(req, res) {
         title: listing.title,
         raw_address: listing.raw_address,
         formatted_address: listing.formatted_address,
+        // Bug fix: PropertyView.jsx already prefers general_area over
+        // formatted_address/raw_address for the public-facing address line
+        // (`listing.general_area || listing.formatted_address ||
+        // listing.raw_address`) — precisely so the full street/plot address
+        // isn't shown to buyers before they've contacted the dealer. But
+        // this response never actually included general_area (only
+        // selected it in the query above, line ~52), so that fallback chain
+        // always skipped straight to the full address. raw_address/
+        // formatted_address stay in the response (not admin/backend-only)
+        // deliberately — PropertyView.jsx's own fallback to them for
+        // listings with no general_area yet (pre-dating this worker's
+        // general_area computation) is documented, intentional behavior
+        // (geoEnrichmentWorker.js: "already-shared links are unaffected").
+        general_area: listing.general_area,
         lat: listing.lat != null ? parseFloat(listing.lat) : null,
         lng: listing.lng != null ? parseFloat(listing.lng) : null,
         price: listing.price,

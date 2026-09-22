@@ -8,6 +8,7 @@
 // server process. Queue *producers* (what this file creates) are safe to
 // instantiate from multiple processes; Worker *consumers* are not.
 const { Queue } = require('bullmq');
+const axios = require('axios');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -51,6 +52,51 @@ function extractGeneralArea(addressComponents, formattedAddress) {
 }
 
 /**
+ * Initial great-circle bearing (degrees, 0-360, 0=north) from point 1 to
+ * point 2 — the standard forward-azimuth formula.
+ */
+function calculateBearing(lat1, lng1, lat2, lng2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const toDeg = (r) => (r * 180) / Math.PI;
+  const dLng = toRad(lng2 - lng1);
+  const y = Math.sin(dLng) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2))
+    - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+/**
+ * Bug fix: the static Street View URL previously had no `heading` param at
+ * all, so Google defaults to whatever direction that camera happened to be
+ * facing when Google's car drove past — frequently pointing across or into
+ * the plot instead of showing the property from the street. The actual
+ * camera position (a point on the nearest road Street View has coverage
+ * for) is USUALLY NOT the same as the property's own lat/lng — it's
+ * wherever the road is, which can be tens of meters away. Calling the free
+ * Street View Metadata endpoint first gets that real camera position, then
+ * the bearing FROM there TO the property's lat/lng is the heading that
+ * actually points the camera at the property, not just "some" heading.
+ * Returns null (never throws) on any failure — the caller falls back to
+ * the no-heading URL exactly like before this fix, same degrade-gracefully
+ * convention as every other geo lookup in this codebase.
+ */
+async function getStreetViewHeading(lat, lng, apiKey) {
+  try {
+    const metaUrl = `https://maps.googleapis.com/maps/api/streetview/metadata?location=${lat},${lng}&key=${apiKey}`;
+    const response = await axios.get(metaUrl, { timeout: 8000 });
+    if (response.data?.status !== 'OK' || !response.data?.location) return null;
+
+    const { lat: panoLat, lng: panoLng } = response.data.location;
+    if (typeof panoLat !== 'number' || typeof panoLng !== 'number') return null;
+
+    return Math.round(calculateBearing(panoLat, panoLng, lat, lng));
+  } catch (err) {
+    console.error('Street View metadata/heading lookup failed (non-fatal, using default angle):', err.message);
+    return null;
+  }
+}
+
+/**
  * Persists resolved lat/lng (+ optionally formatted_address and any other
  * listing fields via extraListingUpdates) for a listing, regenerates the
  * static satellite/street-view fallback images (used for WhatsApp/OG
@@ -69,6 +115,12 @@ async function applyResolvedLocation(knex, {
   propertyType,
   extraListingUpdates = {},
 }) {
+  // Network call before the transaction opens, not inside it — same
+  // don't-hold-a-DB-transaction-across-an-external-API-round-trip
+  // convention used throughout this codebase (see e.g.
+  // agentIntakeController.js's handleAgentIntakeMessage).
+  const streetViewHeading = await getStreetViewHeading(lat, lng, targetApiKey);
+
   await knex.transaction(async (trx) => {
     const updates = { lat, lng, updated_at: knex.fn.now(), ...extraListingUpdates };
     if (formattedAddress) updates.formatted_address = formattedAddress;
@@ -76,7 +128,8 @@ async function applyResolvedLocation(knex, {
     await trx('listings').where({ id: listingId }).update(updates);
 
     const staticSatelliteUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=18&size=800x450&maptype=satellite&key=${targetApiKey}`;
-    const staticStreetViewUrl = `https://maps.googleapis.com/maps/api/streetview?size=800x450&location=${lat},${lng}&key=${targetApiKey}`;
+    const headingParam = streetViewHeading != null ? `&heading=${streetViewHeading}` : '';
+    const staticStreetViewUrl = `https://maps.googleapis.com/maps/api/streetview?size=800x450&location=${lat},${lng}${headingParam}&key=${targetApiKey}`;
 
     await trx('listing_media')
       .insert({
