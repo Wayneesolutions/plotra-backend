@@ -25,10 +25,31 @@ const wayneRingSyncQueue = new Queue('wayne-ring-sync', { connection: redisConne
 
 console.log(`[Worker Engine] Initializing WayneRing Call Sync Poller...`);
 
+// Checked once at module load, not per-tick — WAYNERING_BASE_URL/EMAIL/
+// PASSWORD are read fresh from process.env here on purpose (env vars don't
+// change without a process restart, so this is equivalent to checking every
+// tick but without the wasted work). Missing credentials produced the exact
+// same "WayneRing credentials not configured" error on every single poll in
+// production — ~25k accumulated BullMQ failures and counting, all identical,
+// none of them a transient condition a retry could ever fix. That's a
+// deployment gap, not a code bug: the polling feature itself is deliberately
+// kept running as a fallback (see file header) even after the webhook
+// receiver exists, so this skips cleanly instead of removing the job.
+const WAYNERING_CONFIGURED = !!(process.env.WAYNERING_BASE_URL && process.env.WAYNERING_EMAIL && process.env.WAYNERING_PASSWORD);
+let loggedMissingWayneRingCredsOnce = false;
+
 const wayneRingCallSyncWorker = new Worker('wayne-ring-sync', async (job) => {
   if (job.name !== 'poll-calls') {
     console.warn(`[Job ${job.id}] Unknown job name '${job.name}' on wayne-ring-sync, skipping.`);
     return { success: false, skipped: true };
+  }
+
+  if (!WAYNERING_CONFIGURED) {
+    if (!loggedMissingWayneRingCredsOnce) {
+      console.warn(`[Job ${job.id}] WayneRing credentials not configured (WAYNERING_BASE_URL/EMAIL/PASSWORD) — skipping sync polls until they're set in production. This warning won't repeat.`);
+      loggedMissingWayneRingCredsOnce = true;
+    }
+    return { success: true, skipped: 'not_configured' };
   }
 
   try {
