@@ -13,18 +13,6 @@ const { haversineMeters } = require('../services/geoConsensusService');
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
-// Agreement threshold for "does the agent's shared pin match the geocoded
-// estimate" (handleAgentLocationPin below) — Google's own Places-candidate
-// drift check (geoEnrichmentWorker.js) and Mappls consensus check
-// (geoConsensusService.js's MAX_AGREEMENT_DRIFT_METERS) use wider radii
-// (3-4km, 400m) because they're comparing two independent guesses against
-// each other; this is comparing a geocode against the agent's own GPS pin
-// for the same property, so a tighter radius is appropriate. 120m picked
-// from the middle of the suggested 100-150m range — revisit once real pin
-// submissions show what drift is actually normal for GPS accuracy in dense
-// Punjab colonies vs. what indicates a genuinely wrong pin.
-const PIN_AGREEMENT_THRESHOLD_METERS = 120;
-
 /**
  * Derives the Meta Graph API base (origin + version) from BSP_GATEWAY_URL,
  * which is already configured for outbound sends
@@ -125,10 +113,16 @@ function buildConfirmationMessage(publicSlug, lang) {
     : `Live ho gaya! Yeh raha aapka link, kisi ko bhi bhej sakte ho:\n${link}`;
 }
 
+// Fix 1 (new-listing-swallowed bug): the only way out of this reminder loop
+// used to be an EXACT phrase match on NEW_LISTING_PHRASES
+// (agentReplyIntent.js) that the agent had no way of knowing existed — a
+// plain "No" meant to decline/redirect just kept re-triggering this same
+// message forever. Both variants below now name the escape hatch
+// explicitly instead of assuming the agent already knows it.
 function buildStillAwaitingApprovalMessage(lang) {
   return lang === 'en'
-    ? `Your previous listing is still awaiting approval. Reply "yes" or "approve" to publish it, or send the details you'd like to change.`
-    : `Aapki pichli listing abhi approval ka wait kar rahi hai. "haan" ya "approve" reply karke publish karein, ya jo detail badalni hai wo bhejein.`;
+    ? `Your previous listing is still awaiting approval. Reply "yes" or "approve" to publish it, send the details you'd like to change, or reply "new listing" to start a different one instead.`
+    : `Aapki pichli listing abhi approval ka wait kar rahi hai. "haan" ya "approve" reply karke publish karein, jo detail badalni hai wo bhejein, ya "naya listing" reply karke alag property shuru karein.`;
 }
 
 /**
@@ -142,8 +136,8 @@ function buildStillAwaitingApprovalMessage(lang) {
  */
 function buildNeedsCorrectionDetailMessage(lang) {
   return lang === 'en'
-    ? `I still don't have a corrected value to change — please send the actual detail, e.g. "Ludhiana" or "price 55 lakh". Or reply "yes" to publish it as-is.`
-    : `Mujhe abhi tak sahi/corrected value nahi mili — please asli detail bhejein, jaise "Ludhiana" ya "price 55 lakh". Ya "yes" bolke isko jaisa hai waisa publish kar dein.`;
+    ? `I still don't have a corrected value to change — please send the actual detail, e.g. "Ludhiana" or "price 55 lakh". Reply "yes" to publish it as-is, or "new listing" if this is actually a different property.`
+    : `Mujhe abhi tak sahi/corrected value nahi mili — please asli detail bhejein, jaise "Ludhiana" ya "price 55 lakh". "yes" bolke isko jaisa hai waisa publish kar dein, ya "naya listing" bolein agar yeh ek alag property hai.`;
 }
 
 /**
@@ -192,6 +186,33 @@ function isDifferentProperty(newFields, existingListing) {
   if (!a || !b) return false;
   if (a === b) return false;
   return !a.includes(b) && !b.includes(a);
+}
+
+// Fix 1's confirmed root cause (found via prod BullMQ/DB evidence): the
+// partial unique index idx_agent_drafts_one_live_per_agent (one live draft
+// per agent — see migration 20260817_01) is exactly what's SUPPOSED to stop
+// two near-simultaneous inbound messages from creating duplicate drafts.
+// But the transaction below only takes out a row lock (`forUpdate()`) on a
+// draft that already exists — when NO live draft exists yet, two truly
+// concurrent inbound messages (a double-text, or a duplicate BSP webhook
+// delivery for the very first message of a conversation) can both pass the
+// "no draft found" check and both attempt the INSERT below. Postgres lets
+// only one through; the other's transaction aborts with a 23505 unique-
+// violation, which the outer try/catch swallows into an ack-200 with
+// trackingError — the message is silently dropped instead of "surfacing a
+// choice to the agent." Retrying the whole transaction once on exactly
+// this constraint fixes it: the retry's SELECT ... FOR UPDATE now finds the
+// now-committed row and the message flows through the normal
+// draft/awaiting_approval handling instead of vanishing.
+async function runWithLiveDraftRaceRetry(knex, txFn) {
+  try {
+    return await knex.transaction(txFn);
+  } catch (err) {
+    if (err?.code === '23505' && err?.constraint === 'idx_agent_drafts_one_live_per_agent') {
+      return await knex.transaction(txFn);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -296,7 +317,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       }
     }
 
-    const result = await knex.transaction(async (trx) => {
+    const result = await runWithLiveDraftRaceRetry(knex, async (trx) => {
       if (bspMessageId) {
         const dup = await trx('agent_draft_messages')
           .join('agent_listing_drafts', 'agent_draft_messages.draft_id', 'agent_listing_drafts.id')
@@ -528,6 +549,42 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         return { action: 'extract', draftId: draft.id };
       }
 
+      // collecting / extracting / creating / enriching — same
+      // isNewListingIntent escape hatch as the awaiting_approval branch
+      // above, extended here too. Without this, an agent who explicitly
+      // says "naya listing" while a draft is mid-flight (e.g. bounced back
+      // to 'collecting' after a failed geocode, or just slow-walking
+      // through the required-fields Q&A) had that phrase silently appended
+      // onto accumulated_text like any other fragment instead of starting
+      // fresh — one more contributor to the session-bleed/address-gluing
+      // bug alongside the accumulated_text resets above. Skipped when the
+      // draft has nothing in it yet (brand new, empty accumulated_text, no
+      // listing) — there's nothing to protect from contamination, and
+      // abandoning+recreating an empty draft would just be churn.
+      if (isNewListingIntent(incomingText) && (draft.accumulated_text || draft.listing_id)) {
+        await trx('agent_listing_drafts')
+          .where({ id: draft.id })
+          .update({ status: 'abandoned', updated_at: trx.fn.now() });
+
+        const [newDraft] = await trx('agent_listing_drafts')
+          .insert({ tenant_id: agentUser.tenant_id, user_id: agentUser.id, status: 'collecting', accumulated_text: '' })
+          .returning(['id']);
+
+        await trx('agent_draft_messages').insert({
+          draft_id: newDraft.id,
+          direction: 'inbound',
+          body: incomingText,
+          bsp_message_id: bspMessageId || null,
+        });
+
+        const lang = detectReplyLanguage(incomingText);
+        const promptBody = lang === 'en'
+          ? 'Starting fresh! Send me the details for the new property — address, type (plot/flat/commercial), and price if you have it.'
+          : 'Naya listing shuru karte hain! Naye property ki details bhejein — address, type (plot/flat/commercial), aur price agar pata ho.';
+        await logAgentOutboundMessage(trx, { draftId: newDraft.id, body: promptBody });
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: promptBody };
+      }
+
       await trx('agent_draft_messages').insert({
         draft_id: draft.id,
         direction: 'inbound',
@@ -693,26 +750,21 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
  * (a location message carries neither mediaId nor incomingText, so it
  * can't flow through handleAgentIntakeMessage/handleAgentIntakePhoto).
  *
- * Policy: the agent's pin always becomes the listing's current lat/lng —
- * "agent jo bheje woh final". What the agreement check below decides is
- * only whether receiving the pin also resolves location_low_confidence:
- *   - No confidence issue on the existing geocode: pin is trusted outright,
- *     no distance check at all (spec: "koi validation nahi").
- *   - Existing geocode was low-confidence and the pin lands close (within
- *     PIN_AGREEMENT_THRESHOLD_METERS): treat it as confirming the
- *     location — clear location_low_confidence.
- *   - Existing geocode was low-confidence and the pin is far from it:
- *     still use the pin as the coordinate, but leave location_low_confidence
- *     set — a mismatch this size is itself worth a human glance later, same
- *     caution as geoConsensusService.js's MAX_AGREEMENT_DRIFT_METERS
- *     disagreement case, not a "resolved" outcome.
+ * Policy (decided after the confidence-flagging system proved unreliable —
+ * listings marked "confident" kept coming out wrong): the agent's shared
+ * pin is ALWAYS the final location, full stop. No distance-from-geocode
+ * comparison, no confidence check, no "flagging for a closer look" —
+ * Google/Mappls are only ever guessing from address text, the agent is
+ * standing at the property. The geocoded address is purely a fallback for
+ * when no pin is ever shared at all.
  *
- * Note: pending_geo_review (the super-admin review queue) isn't wired into
- * this — that status is currently never set anywhere in this codebase (the
- * gate that used to route into it was reverted in b645dd7); this function
- * only touches location_low_confidence, which IS live and IS what drives
- * the "please check the pin" nudge in the agent's own preview message. If
- * the admin-review gate gets reinstated later, hook it in here too.
+ * If the listing was parked in the super-admin geo-review queue
+ * (pending_geo_review — see adminGeoReviewController.js / Fix 4's
+ * GEOMETRIC_CENTER gate in geoEnrichmentWorker.js) waiting on a human to
+ * eyeball a coarse geocode, a trusted GPS pin from the agent is a stronger
+ * signal than anything an admin could confirm from a satellite image —
+ * it releases the listing straight to awaiting_approval instead of making
+ * the agent wait on a review that a pin has already resolved.
  */
 async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId, res }) {
   try {
@@ -741,14 +793,14 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
       return res.status(200).json({ success: true, noop: true });
     }
 
-    const wasLowConfidence = !!listing.location_low_confidence;
+    const wasPendingGeoReview = listing.status === 'pending_geo_review';
+    // Distance from the old geocode is recorded purely as an audit trail
+    // (pin_geocode_distance_m below) — it no longer gates anything. The pin
+    // always wins, unconditionally.
     const hasExistingCoords = listing.lat != null && listing.lng != null;
     const distanceMeters = hasExistingCoords
       ? Math.round(haversineMeters(Number(listing.lat), Number(listing.lng), lat, lng))
       : null;
-    const pinAgrees = wasLowConfidence
-      ? (distanceMeters != null && distanceMeters <= PIN_AGREEMENT_THRESHOLD_METERS)
-      : true; // no confidence issue to begin with — pin trusted outright, no distance check
 
     const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
     const targetApiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
@@ -782,8 +834,16 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
         agent_pin_lng: lng,
         pin_geocode_distance_m: distanceMeters,
         pin_manually_corrected: true,
-        location_low_confidence: wasLowConfidence ? !pinAgrees : false,
+        // Unconditional — the agent's pin is standing at the property, the
+        // geocode was only ever a guess from address text. No agreement
+        // check decides this anymore (see the function doc comment).
+        location_low_confidence: false,
         geo_resolution_source: 'agent_whatsapp_pin',
+        // A trusted GPS pin resolves whatever a super-admin was going to
+        // check for in the geo-review queue (Fix 4's GEOMETRIC_CENTER
+        // gate) — release it straight to awaiting_approval instead of
+        // leaving the agent waiting on a review this pin already settled.
+        ...(wasPendingGeoReview ? { status: 'awaiting_approval' } : {}),
       },
     });
 
@@ -808,17 +868,16 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
       });
     }
 
-    const confirmBody = !wasLowConfidence
+    // Unconditional confirmation — no "flagging this for a closer look"
+    // hedge anymore. Still mentions the distance when there was an
+    // existing geocode, purely as transparency, never as a caveat.
+    const confirmBody = distanceMeters == null
       ? (lang === 'en'
           ? '📍 Got your location pin — saved.'
           : '📍 Location pin mil gaya — save ho gaya.')
-      : pinAgrees
-        ? (lang === 'en'
-            ? `📍 Pin received and matches the address closely (${distanceMeters}m) — location confirmed.`
-            : `📍 Pin mil gaya aur address se match karta hai (${distanceMeters}m) — location confirm ho gayi.`)
-        : (lang === 'en'
-            ? `📍 Pin received, but it's ${distanceMeters}m from the address we found. Using your pin as the location — flagging this for a closer look before it goes fully live.`
-            : `📍 Pin mil gaya, lekin yeh address se ${distanceMeters}m door hai. Location aapke pin se set kar di hai — publish se pehle ek baar dobara check kar lenge.`);
+      : (lang === 'en'
+          ? `📍 Got your location pin — saved as the final location (${distanceMeters}m from our initial address guess).`
+          : `📍 Location pin mil gaya — final location ke roop mein save ho gaya (address se ${distanceMeters}m door tha).`);
 
     await knex.transaction(async (trx) => {
       await trx('agent_draft_messages').insert({
@@ -831,7 +890,14 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
     });
     await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: confirmBody });
 
-    return res.status(200).json({ success: true, pinAgrees, distanceMeters });
+    if (wasPendingGeoReview) {
+      await agentIntakeQueue.add('send-preview', { draftId: draft.id, listingId: listing.id }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+      });
+    }
+
+    return res.status(200).json({ success: true, distanceMeters, releasedFromGeoReview: wasPendingGeoReview });
   } catch (error) {
     console.error('Failed to process agent WhatsApp location pin:', error.message);
     // Still ack 200 so the BSP doesn't retry-storm us — same rationale as

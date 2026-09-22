@@ -221,6 +221,18 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         status: 'enriching', // geo-enrichment is now running in the background (geoEnrichmentWorker.js)
         extracted_fields: JSON.stringify(extracted),
         missing_fields: null,
+        // accumulated_text has now been fully consumed into the listing —
+        // reset it so any FUTURE message (a correction, or a re-attempt
+        // after a failed geocode) starts clean instead of getting appended
+        // onto this listing's original creation text forever. Without this,
+        // an agent who creates several listings over days/weeks while a
+        // draft never fully leaves the live-status set (e.g. bounces back
+        // to 'collecting' on a geocode failure — see geoEnrichmentWorker.js)
+        // ends up with every one of those addresses concatenated into a
+        // single blob that GPT re-extracts a "corrected" raw_address from —
+        // this is the confirmed mechanism behind the session-bleed/address-
+        // gluing bug seen in production.
+        accumulated_text: '',
         pending_photo_urls: '[]',
         updated_at: knex.fn.now(),
       });
@@ -313,6 +325,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       await knex('agent_listing_drafts').where({ id: draftId }).update({
         status: 'enriching',
         extracted_fields: JSON.stringify(merged),
+        accumulated_text: '', // consumed into `merged` above — see the creation-path reset for why this matters
         updated_at: knex.fn.now(),
       });
       await enqueueGeoEnrichment({ listingId: draft.listing_id, rawAddress: merged.raw_address, draftId });
@@ -332,6 +345,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     await knex('agent_listing_drafts').where({ id: draftId }).update({
       status: 'enriching',
       extracted_fields: JSON.stringify(merged),
+      accumulated_text: '', // consumed into `merged` above — see the creation-path reset for why this matters
       updated_at: knex.fn.now(),
     });
 
@@ -360,6 +374,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
   await knex('agent_listing_drafts').where({ id: draftId }).update({
     status: 'enriching',
     extracted_fields: JSON.stringify(merged),
+    accumulated_text: '', // consumed into `merged` above — see the creation-path reset for why this matters
     updated_at: knex.fn.now(),
   });
   await enqueueGeoEnrichment({ listingId: draft.listing_id, rawAddress: merged.raw_address, draftId });
