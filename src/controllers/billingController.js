@@ -137,7 +137,18 @@ async function getBillingStatus(req, res) {
       .orderBy('created_at', 'desc')
       .limit(5);
 
-    return res.json({ success: true, billing: tenant, history });
+    // Bug fix: DashboardListings.jsx's "WhatsApp connection status" header
+    // was reading connectedPhone purely from a localStorage-cached user
+    // object captured at login time, which never refreshes for the rest of
+    // that session — an agent/owner whose number got connected any other
+    // way (e.g. by a colleague, or on a different device) keeps seeing the
+    // stale "Connect WhatsApp" prompt indefinitely on this one, even though
+    // it's already connected. This endpoint is already polled on every
+    // dashboard load for plan info, so piggybacking the live phone value
+    // here avoids a whole extra round trip for one field.
+    const currentUser = await knex('users').where({ id: req.user.id }).select('phone').first();
+
+    return res.json({ success: true, billing: tenant, history, currentUserPhone: currentUser?.phone || null });
   } catch (error) {
     console.error('Failed to fetch billing status:', error.message);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to fetch billing status.' } });

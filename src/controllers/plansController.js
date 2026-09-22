@@ -25,7 +25,19 @@ async function listPlansAdmin(req, res) {
 async function updatePlan(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { key } = req.params;
-  const allowedFields = ['label', 'price_inr', 'listing_limit', 'features', 'is_active', 'sort_order'];
+  // Bug fix: multi_agent_whatsapp and max_whatsapp_numbers are the two
+  // actually-ENFORCED plan gates (validateAssignedAgent in listingService.js,
+  // and the cap check in whatsappNumberController.js's addWhatsappNumber) —
+  // unlike `features`, which is purely the marketing bullet list shown on
+  // the pricing page and never checked by any code path. Neither gate was
+  // ever editable here, meaning a super-admin had no way to actually change
+  // which plans unlock these features short of editing the DB directly;
+  // whatever the original migration hardcoded (growth/unlimited only) was
+  // permanent.
+  const allowedFields = [
+    'label', 'price_inr', 'listing_limit', 'features', 'is_active', 'sort_order',
+    'multi_agent_whatsapp', 'max_whatsapp_numbers',
+  ];
 
   const updates = {};
   for (const field of allowedFields) {
@@ -42,6 +54,14 @@ async function updatePlan(req, res) {
 
   if (updates.listing_limit !== undefined && updates.listing_limit !== null && (!Number.isInteger(updates.listing_limit) || updates.listing_limit <= 0)) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'listing_limit must be a positive integer, or null for unlimited.' } });
+  }
+
+  if (updates.multi_agent_whatsapp !== undefined && typeof updates.multi_agent_whatsapp !== 'boolean') {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'multi_agent_whatsapp must be true or false.' } });
+  }
+
+  if (updates.max_whatsapp_numbers !== undefined && (!Number.isInteger(updates.max_whatsapp_numbers) || updates.max_whatsapp_numbers <= 0)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'max_whatsapp_numbers must be a positive integer.' } });
   }
 
   if (updates.features !== undefined) {

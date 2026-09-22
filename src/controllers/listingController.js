@@ -75,7 +75,7 @@ async function getListings(req, res) {
   // RLS this would have returned zero rows instead of the tenant's actual
   // listings.
   const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id } = req.user;
+  const { tenant_id, role, id: userId } = req.user;
   const { q, min_price, max_price, property_type } = req.query;
 
   try {
@@ -113,6 +113,20 @@ async function getListings(req, res) {
       )
       .count('listing_visits.id as visit_count')
       .where('listings.tenant_id', tenant_id);
+
+    // Security fix: an agent-role user previously saw every listing in the
+    // tenant (only tenant_id was ever checked), not just their own — any
+    // WhatsApp-onboarded agent linked to a multi-agent tenant (e.g. Wayne E
+    // Solutions) could see the full agent listing set, including other
+    // agents' addresses/prices/contact details. Same convention already
+    // used for leads (leadsController.js's getLeads): owner sees everything
+    // tenant-wide (no extra filter), agent sees only listings.assigned_agent_id
+    // = themselves — which WhatsApp-created listings already set to their
+    // creator (listingService.js's createListingRecord), so this doesn't
+    // hide anything an agent created via WhatsApp intake.
+    if (role === 'agent') {
+      query = query.where('listings.assigned_agent_id', userId);
+    }
 
     // Free-text search — covers "search by area", since area/locality is
     // almost always part of raw_address or formatted_address (e.g.
@@ -180,7 +194,7 @@ async function getListings(req, res) {
  */
 async function updateListing(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id } = req.user;
+  const { tenant_id, role, id: userId } = req.user;
   const { id } = req.params;
   const { title, raw_address, price, plot_area, property_type, description, status, assigned_agent_id } = req.body;
 
@@ -191,8 +205,25 @@ async function updateListing(req, res) {
     });
   }
 
+  // Security fix: same gap as getListings below — an agent could previously
+  // edit (or, in deleteListing, delete) ANY listing in the tenant, not just
+  // their own, since only tenant_id was ever checked. Scope to
+  // assigned_agent_id for the 'agent' role, same convention as getListings.
+  // An agent-role caller trying to reassign a listing away from themselves
+  // (or to another agent) is also blocked here for the same reason — that's
+  // an owner-level action.
+  const ownerScope = { id, tenant_id };
+  if (role === 'agent') {
+    ownerScope.assigned_agent_id = userId;
+    if (assigned_agent_id !== undefined && assigned_agent_id !== userId) {
+      return res.status(403).json({
+        error: { code: 'FORBIDDEN', message: 'Only an account owner can reassign a listing to a different team member.' }
+      });
+    }
+  }
+
   try {
-    const existing = await knex('listings').where({ id, tenant_id }).first();
+    const existing = await knex('listings').where(ownerScope).first();
     if (!existing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
     }
@@ -223,7 +254,7 @@ async function updateListing(req, res) {
     }
 
     const [updated] = await knex('listings')
-      .where({ id, tenant_id })
+      .where(ownerScope)
       .update(updates)
       .returning(['id', 'title', 'status', 'raw_address', 'public_slug']);
 
@@ -261,16 +292,23 @@ async function updateListing(req, res) {
  */
 async function deleteListing(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id } = req.user;
+  const { tenant_id, role, id: userId } = req.user;
   const { id } = req.params;
 
+  // Security fix: same gap as updateListing/getListings — an agent could
+  // previously delete ANY listing in the tenant, not just their own.
+  const ownerScope = { id, tenant_id };
+  if (role === 'agent') {
+    ownerScope.assigned_agent_id = userId;
+  }
+
   try {
-    const existing = await knex('listings').where({ id, tenant_id }).first();
+    const existing = await knex('listings').where(ownerScope).first();
     if (!existing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
     }
 
-    await knex('listings').where({ id, tenant_id }).del();
+    await knex('listings').where(ownerScope).del();
 
     return res.status(200).json({ success: true, message: 'Listing deleted.' });
   } catch (error) {

@@ -345,8 +345,8 @@ async function handleInboundWhatsApp(req, res) {
     // Not a recognisable property query — send friendly intro.
     const lang = detectReplyLanguage(incomingText);
     const coldGreeting = lang === 'en'
-      ? `Hi there! 👋 This number is for Plotra property agents.\n\n• *Looking for a property?* Tell me the area and type (e.g. "plots in Ludhiana") and I'll show you available listings.\n• *Want to list properties as an agent?* Reply: *join as agent*`
-      : `Namaste! 👋 Yeh number Plotra ke property agents ke liye hai.\n\n• *Property dhundh rahe hain?* Area aur type batayein (jaise "Ludhiana mein plot") aur main available listings dikha dunga.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
+      ? `Hi there! 👋 This number is for Plotraa property agents.\n\n• *Looking for a property?* Tell me the area and type (e.g. "plots in Ludhiana") and I'll show you available listings.\n• *Want to list properties as an agent?* Reply: *join as agent*`
+      : `Namaste! 👋 Yeh number Plotraa ke property agents ke liye hai.\n\n• *Property dhundh rahe hain?* Area aur type batayein (jaise "Ludhiana mein plot") aur main available listings dikha dunga.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
 
     await enqueueAgentWhatsappSend({ tenantId: receivingDealer?.id || null, phone, messageBody: coldGreeting });
     return res.status(200).json({ success: true, coldContact: true });

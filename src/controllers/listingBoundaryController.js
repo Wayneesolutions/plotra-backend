@@ -6,7 +6,7 @@
 async function updateListingBoundary(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { id } = req.params;
-  const { tenant_id } = req.user;
+  const { tenant_id, role, id: userId } = req.user;
   const { boundaryGeoJSON } = req.body;
 
   if (!boundaryGeoJSON || !boundaryGeoJSON.geometry) {
@@ -15,8 +15,13 @@ async function updateListingBoundary(req, res) {
     });
   }
 
+  // Security fix (same gap as listingController.js/mediaController.js): scope
+  // to the agent's own listings, same assigned_agent_id convention.
+  const ownerScope = { id, tenant_id };
+  if (role === 'agent') ownerScope.assigned_agent_id = userId;
+
   try {
-    const listing = await knex('listings').where({ id, tenant_id }).first();
+    const listing = await knex('listings').where(ownerScope).first();
 
     if (!listing) {
       return res.status(404).json({

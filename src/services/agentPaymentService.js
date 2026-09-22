@@ -42,12 +42,28 @@ function formatPackageMenu(packages) {
 /**
  * Sent once right after an agent is approved (both the tenant-owner and
  * super-admin approval paths in agentSignupController.js call this).
- * Silently does nothing if no active packages exist yet — an admin who
- * hasn't set any up shouldn't cause a broken/empty WhatsApp message.
  */
 async function sendPackageSelectionPrompt(knex, { tenantId, phone }) {
   const packages = await getActivePackagesInMenuOrder(knex);
-  if (!packages.length) return;
+  if (!packages.length) {
+    // Previously a silent no-op — this is the confirmed cause of "new
+    // agent joins via WhatsApp, plan never shared, payment never happens":
+    // if a tenant has no package marked is_active (never configured one,
+    // or deactivated the only one), the agent gets approved and then hears
+    // nothing further, ever, with zero signal anywhere that anything went
+    // wrong. Log loudly (diagnosable from logs going forward, instead of
+    // silently invisible) and still send the agent SOMETHING instead of
+    // total radio silence — they at least know they aren't being ignored,
+    // and can still list properties in the meantime (can_add_listing
+    // defaults true until the payment-reminder cron actually restricts it).
+    console.warn(`[agentPaymentService] No active packages configured for tenant ${tenantId} — agent ${phone} was approved but has nothing to select a payment plan from.`);
+    await enqueueAgentWhatsappSend({
+      tenantId,
+      phone,
+      messageBody: "You're approved! 🎉 Payment plan setup is still being finalized on our end — we'll message you shortly with package options. You can already send property details to list them in the meantime.",
+    });
+    return;
+  }
 
   const body = `📦 *Choose your agent package* — reply with its number:\n\n${formatPackageMenu(packages)}\n\nYou can list properties either way; this just sets up your payment plan.`;
   await enqueueAgentWhatsappSend({ tenantId, phone, messageBody: body });

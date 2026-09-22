@@ -19,7 +19,9 @@
     "worker:localIntel": "node src/workers/localIntelligenceWorker.js",
     "worker:builderDD": "node src/workers/builderDueDiligenceWorker.js",
     "worker:wayneRingSync": "node src/workers/wayneRingCallSyncWorker.js",
-    "workers": "concurrently \"npm:worker:geo\" \"npm:worker:landmark\" \"npm:worker:vocallm\" \"npm:worker:whatsapp\" \"npm:worker:agentIntake\" \"npm:worker:agentSignup\" \"npm:worker:localIntel\" \"npm:worker:builderDD\" \"npm:worker:wayneRingSync\""
+    "worker:paymentReminder": "node src/workers/paymentReminderWorker.js",
+    "worker:listingStatusCheck": "node src/workers/listingStatusCheckWorker.js",
+    "workers": "concurrently \"npm:worker:geo\" \"npm:worker:landmark\" \"npm:worker:vocallm\" \"npm:worker:whatsapp\" \"npm:worker:agentIntake\" \"npm:worker:agentSignup\" \"npm:worker:localIntel\" \"npm:worker:builderDD\" \"npm:worker:wayneRingSync\" \"npm:worker:paymentReminder\" \"npm:worker:listingStatusCheck\""
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1084.0",

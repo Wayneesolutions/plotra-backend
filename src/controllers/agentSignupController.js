@@ -417,7 +417,7 @@ async function approveAgentSignupAdmin(req, res) {
     // Notify agent via WhatsApp
     const approvalMessage =
       `✅ *Congratulations, ${signup.name}!*\n\n` +
-      `Your request to join as a Plotra agent has been *approved*.\n\n` +
+      `Your request to join as a Plotraa agent has been *approved*.\n\n` +
       `You can now send property details to this number to create listings.\n\n` +
       `*Your login credentials:*\n` +
       `📧 Email: ${placeholderEmail}\n` +
@@ -466,7 +466,7 @@ async function rejectAgentSignupAdmin(req, res) {
     await knex('pending_agent_signups').where({ id }).update({ status: 'rejected', updated_at: knex.fn.now() });
 
     const rejectionMessage =
-      `We've reviewed your request to join as a Plotra agent and are unable to approve it at this time. ` +
+      `We've reviewed your request to join as a Plotraa agent and are unable to approve it at this time. ` +
       `If you have questions, please reply to this message.`;
 
     await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: normalizePhone(signup.phone), messageBody: rejectionMessage });

@@ -27,13 +27,24 @@ const uploadMiddleware = (req, res, next) => {
   });
 };
 
+// Security fix (same gap as listingController.js's getListings/updateListing/
+// deleteListing): an agent-role user could previously view/upload/delete
+// photos on ANY listing in the tenant, not just their own, since only
+// tenant_id was ever checked. Same convention: owner unrestricted, agent
+// scoped to listings.assigned_agent_id.
+function listingOwnerScope(req, listingId) {
+  const { tenant_id, role, id: userId } = req.user;
+  const scope = { id: listingId, tenant_id };
+  if (role === 'agent') scope.assigned_agent_id = userId;
+  return scope;
+}
+
 async function getListingMedia(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { id: listingId } = req.params;
-  const { tenant_id } = req.user;
 
   try {
-    const listing = await knex('listings').where({ id: listingId, tenant_id }).select('id').first();
+    const listing = await knex('listings').where(listingOwnerScope(req, listingId)).select('id').first();
     if (!listing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
     }
@@ -49,10 +60,9 @@ async function getListingMedia(req, res) {
 async function uploadListingPhoto(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { id: listingId } = req.params;
-  const { tenant_id } = req.user;
 
   try {
-    const listing = await knex('listings').where({ id: listingId, tenant_id }).select('id').first();
+    const listing = await knex('listings').where(listingOwnerScope(req, listingId)).select('id').first();
     if (!listing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
     }
@@ -89,7 +99,6 @@ async function uploadListingPhoto(req, res) {
 async function deleteListingPhoto(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { id: listingId } = req.params;
-  const { tenant_id } = req.user;
   const { url } = req.body;
 
   if (!url) {
@@ -97,7 +106,7 @@ async function deleteListingPhoto(req, res) {
   }
 
   try {
-    const listing = await knex('listings').where({ id: listingId, tenant_id }).select('id').first();
+    const listing = await knex('listings').where(listingOwnerScope(req, listingId)).select('id').first();
     if (!listing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Listing not found.' } });
     }
