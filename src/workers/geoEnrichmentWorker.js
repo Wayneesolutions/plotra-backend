@@ -10,6 +10,14 @@ const { lookupResolvedLocality, recordResolvedLocality } = require('../services/
 const { validateAddress } = require('../services/addressValidation');
 const { resolveWithConsensus } = require('../services/geoConsensusService');
 const { mapplsGeocode } = require('../services/mapplsGeocodingService');
+const { createLocalityMatcher } = require('../services/locality/localityMatcher');
+
+// Locality Master — resolves the dealer's raw address TEXT (independent of
+// whatever lat/lng Google/Mappls landed on above) against a curated list of
+// known areas, with the geocoded/pin coordinates used only as a secondary
+// cross-check (see localityMatcher.js). One instance per worker process,
+// same lifetime as `knex` above.
+const localityMatcher = createLocalityMatcher({ knex });
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -551,6 +559,33 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
+
+    // Locality Master tagging — best-effort and purely additive: resolves
+    // listingData.raw_address against the curated locality list (see
+    // localityMatcher.js), using the coordinates just persisted above as a
+    // pin cross-check. Only ever writes locality_id when the match is
+    // confident enough to auto-accept ('confirm'/'unmatched' results are
+    // left for a dealer/admin flow to wire up later — see PR description);
+    // a miss or an error here never blocks or fails the geocoding job that
+    // already succeeded by this point, same non-fatal pattern as the
+    // resolved-locality cache write in publicListingController.js.
+    try {
+      const tenantForLocality = await knex('tenants').where({ id: listingData.tenant_id }).first();
+      const localityCity = tenantForLocality?.operating_city || 'Ludhiana';
+      const localityResult = await localityMatcher.match({
+        city: localityCity,
+        text: listingData.raw_address,
+        lat,
+        lng,
+        listingId,
+      });
+      if (localityResult.decision === 'auto') {
+        await localityMatcher.applyToListing(listingId, localityResult);
+        console.log(`[Job ${job.id}] Locality Master: tagged "${localityResult.name}" (${localityResult.method}, ${localityResult.confidence}).`);
+      }
+    } catch (localityErr) {
+      console.error(`[Job ${job.id}] Locality Master match failed (non-fatal):`, localityErr.message);
+    }
 
     // Low-confidence WhatsApp listing: ask the agent to share a real GPS
     // pin (WhatsApp's own "share location" feature) as a second, stronger

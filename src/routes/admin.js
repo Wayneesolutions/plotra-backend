@@ -36,6 +36,9 @@ const {
   createPackage,
   updatePackage,
 } = require('../controllers/agentPaymentController');
+// NEW — Locality Master: curated locality list + alias/fuzzy/AI matcher for
+// dealer-typed addresses (adminLocalities.js), mounted below at /localities*
+const { createLocalityAdminRouter } = require('./adminLocalities');
 
 // Every admin route requires a valid JWT (authGuard), super_admin role
 // (adminGuard), AND now serviceContext — these routes legitimately read/
@@ -210,5 +213,16 @@ router.get('/agents-payments', listAgentsPaymentStatus);
 router.get('/packages', listPackagesAdmin);
 router.post('/packages', createPackage);
 router.patch('/packages/:id', updatePackage);
+
+/**
+ * @route   GET/POST/PATCH /api/v1/admin/localities, /localities/:id/aliases,
+ *          DELETE /localities/aliases/:aliasId, GET /localities/unmatched,
+ *          POST /localities/unmatched/:id/resolve|ignore, POST /localities/test-match
+ * @desc    Locality Master — curated area list (Dugri Phase 2, Sarabha
+ *          Nagar...) with aliases, an unmatched-text review queue, and a
+ *          test box for the matcher. See adminLocalities.js /
+ *          services/locality/localityMatcher.js.
+ */
+router.use('/', createLocalityAdminRouter());
 
 module.exports = router;
