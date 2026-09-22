@@ -26,16 +26,26 @@ class ListingLimitError extends Error {
 /**
  * Validates a proposed listings.assigned_agent_id — per-listing WhatsApp
  * attribution (a specific team member's number shown to buyers on this
- * listing, instead of the tenant's default) is gated to plans with
- * multi_agent_whatsapp (growth/unlimited — see migration 20260821_04),
- * and the referenced user must actually belong to this tenant. Never
- * silently downgrades an invalid request to null — that would look like
- * it worked when it didn't; callers should surface the thrown
- * ValidationError instead.
+ * listing, instead of the tenant's default) only makes sense for a tenant
+ * with more than one WhatsApp number to assign FROM in the first place.
+ *
+ * Part 2, build-order item 7 — re-pointed at plans.max_whatsapp_numbers
+ * (> 1) instead of the old plans.multi_agent_whatsapp boolean, per the
+ * brief: "needs re-pointing at the new Tier 2/3 flags instead of being
+ * rebuilt." multi_agent_whatsapp still exists as a column (not dropped —
+ * a separate, later cleanup, not part of this re-point) but is no longer
+ * what's checked here. Defaults to 1 if a plan somehow has no
+ * max_whatsapp_numbers value (shouldn't happen post-20260825_01, which
+ * backfills 1 onto every existing plan) — never treats "unknown" as
+ * "unlimited."
+ *
+ * The referenced user must actually belong to this tenant. Never silently
+ * downgrades an invalid request to null — that would look like it worked
+ * when it didn't; callers should surface the thrown ValidationError instead.
  *
  * Returns null for "no assignment" (clears any existing one) without
  * needing the plan check — clearing an assignment is always allowed,
- * same as how a Starter-plan tenant can still see/keep using a listing
+ * same as how a single-number tenant can still see/keep using a listing
  * that already has one from before a downgrade.
  */
 async function validateAssignedAgent(knex, { tenantId, plan, assignedAgentId }) {
@@ -43,8 +53,8 @@ async function validateAssignedAgent(knex, { tenantId, plan, assignedAgentId }) 
     return null;
   }
 
-  if (!plan?.multi_agent_whatsapp) {
-    const err = new Error("Assigning a listing to a specific team member's WhatsApp number requires the Growth or Unlimited plan.");
+  if (!plan || (plan.max_whatsapp_numbers ?? 1) <= 1) {
+    const err = new Error("Assigning a listing to a specific team member's WhatsApp number requires a plan with more than one WhatsApp number.");
     err.name = 'ValidationError';
     throw err;
   }
