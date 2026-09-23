@@ -70,6 +70,24 @@ async function sendPreviewAndAwaitApproval({ draftId, listingId }) {
     const draft = await trx('agent_listing_drafts').where({ id: draftId }).first();
     if (!listing || !draft) return null;
 
+    // Still parked for a super-admin to check the pin (adminGeoReviewController.js
+    // releases it from here) — sending a preview now would 404 (publicListingController.js
+    // only serves active/awaiting_approval) and flipping the DRAFT to
+    // awaiting_approval without the LISTING actually reaching that status
+    // would make a later "yes" silently no-op forever (the approval query
+    // filters on listings.status='awaiting_approval', which this isn't).
+    // Found via a live production report: a no-op follow-up message (e.g.
+    // "?") to an already-pending_geo_review listing hit this function
+    // through the no-re-geocode-needed correction path below, which never
+    // checked for this status before calling here.
+    if (listing.status === 'pending_geo_review') {
+      const waitingBody = lang === 'en'
+        ? "This listing's location still needs a quick check by our team before it can go live — we'll notify you the moment it's approved."
+        : 'Iss listing ki location abhi bhi humari team dwara check honi baaki hai, uske baad hi yeh live hogi — approve hote hi aapko batayenge.';
+      await logAgentOutboundMessage(trx, { draftId, body: waitingBody });
+      return { tenantId: draft.tenant_id, phone: (await trx('users').where({ id: draft.user_id }).first()).phone, messageBody: waitingBody };
+    }
+
     // geoEnrichmentWorker.js couldn't get a confident, house-level geocode
     // for this address — the pin is a best-effort guess and may be off by
     // a street or more. Say so explicitly instead of the routine "check
