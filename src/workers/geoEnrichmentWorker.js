@@ -36,6 +36,21 @@ console.log(`[Worker Engine] Initializing Geo-Enrichment Task Consumer...`);
 // the actual house — see tryPlacesTextSearch below for why.
 const HIGH_PRECISION_LOCATION_TYPES = ['ROOFTOP', 'RANGE_INTERPOLATED'];
 
+// Builds a Google `bounds`-shaped "south,west|north,east" box around a
+// point — same string shape geoBiasBounds already flows through (see
+// migration 20260821_02 / tenant_configs.geo_bias_bounds), just computed
+// from a Locality Master area instead of the tenant's whole operating
+// city. `paddingMultiplier` widens the curated radius before converting —
+// this is a soft ranking hint to Google (never a hard filter, per the
+// existing geoBiasBounds comment below), so erring slightly wide is safe;
+// erring too tight risks the bias fighting a slightly-off curated centre.
+function boundsFromCircle(lat, lng, radiusM, paddingMultiplier = 2.5) {
+  const effectiveRadius = Math.max(radiusM || 1000, 800) * paddingMultiplier;
+  const dLat = effectiveRadius / 111320;
+  const dLng = effectiveRadius / (111320 * Math.cos((lat * Math.PI) / 180));
+  return `${lat - dLat},${lng - dLng}|${lat + dLat},${lng + dLng}`;
+}
+
 // Address Validation API equivalent of the above — verdict.validationGranularity
 // values below PREMISE/SUB_PREMISE (ROUTE, BLOCK, PREMISE_PROXIMITY, OTHER)
 // mean the same "resolved to a street/area, not a specific house" gap that
@@ -157,6 +172,50 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     throw new Error('Missing available Google Maps API Access Token.');
   }
 
+  // Fetched once, reused below both for the locality pre-match bias (this
+  // block) and the post-geocode Locality Master tagging step further down
+  // — avoids querying `tenants` twice per job.
+  const tenantRow = await knex('tenants').where({ id: listingData.tenant_id }).first();
+
+  // Locality Master — TEXT-only match, run BEFORE any geocoding call, so a
+  // confident hit can narrow Google's search to the specific curated area
+  // instead of just the tenant's whole operating city. This is what
+  // resolves "known place, no house number" addresses (a named mall,
+  // society, hotel) that neither Address Validation nor a city-wide bias
+  // can score well on their own — Address Validation has no house number
+  // to validate against and caps at ROUTE granularity; a city-wide bounds
+  // box is too wide for Google to disambiguate a same-named place.
+  // `record: false` — this is a speculative pre-pass with no pin yet to
+  // cross-check, so it must never write to the unmatched queue; the real
+  // match+record call still happens after geocoding, further down, with
+  // the actual resolved coordinates as its pin cross-check.
+  // Fully non-fatal and inert whenever there's no city_id yet (every
+  // tenant that existed before this feature) or the city isn't live —
+  // falls straight through to today's plain tenant-wide bias unchanged.
+  let localityBiasBounds = null;
+  let localityBiasName = null;
+  if (tenantRow?.city_id) {
+    try {
+      const localityPreMatch = await localityMatcher.match({
+        cityId: tenantRow.city_id,
+        text: rawAddress,
+        lat: null,
+        lng: null,
+        record: false,
+      });
+      if (localityPreMatch.decision !== 'unmatched' && localityPreMatch.localityId) {
+        const matchedLocality = await knex('localities').where({ id: localityPreMatch.localityId }).first();
+        if (matchedLocality?.center_lat != null && matchedLocality?.center_lng != null) {
+          localityBiasBounds = boundsFromCircle(Number(matchedLocality.center_lat), Number(matchedLocality.center_lng), matchedLocality.radius_m);
+          localityBiasName = matchedLocality.name;
+          console.log(`[Job ${job.id}] Locality Master pre-match: "${matchedLocality.name}" (${localityPreMatch.method}, ${localityPreMatch.confidence}) — biasing geocode to this area.`);
+        }
+      }
+    } catch (localityPreErr) {
+      console.error(`[Job ${job.id}] Locality Master pre-match failed (non-fatal):`, localityPreErr.message);
+    }
+  }
+
   // Soft geographic bias toward wherever THIS tenant actually operates —
   // Google's `bounds` param *influences* ranking without hard-excluding
   // results outside it (unlike `components`, which is a strict filter).
@@ -177,7 +236,9 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   // ~1,700km away. Every downstream feature that derives from lat/lng
   // (satellite/street view, nearby-landmark search) is consequently wrong
   // too whenever this happens — same root cause, multiple symptoms.
-  const geoBiasBounds = config?.geo_bias_bounds || null;
+  // A confident Locality Master pre-match wins over the plain tenant-wide
+  // bounds — it's a tighter, curated-area-specific box, not a guess.
+  const geoBiasBounds = localityBiasBounds || config?.geo_bias_bounds || null;
 
   // pincode (optional, dealer-provided — see listingExtractionService.js)
   // is a much stronger signal than the tenant-level bounds bias: a bounds
@@ -288,8 +349,17 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         // Address Validation API path — replaces Geocoding + Places fallback.
         // Returns per-component confidence so we can programmatically detect
         // bad pins rather than relying on Google's silent coarse-match behaviour.
+        // Unlike Geocoding/Places, this API has no lat/lng bias parameter at
+        // all — text is the only lever available, so a confident Locality
+        // Master pre-match gets appended as a real, verified locality name.
+        // This is what lets a known place with no house number ("Wave Mall,
+        // Ferozepur Road") validate against something more structured than
+        // a bare road name, instead of capping at ROUTE granularity.
+        const addressLineForValidation = localityBiasName
+          ? `${geocodeAddress}, ${localityBiasName}`
+          : geocodeAddress;
         const { result, responseId } = await validateAddress({
-          addressLines: [geocodeAddress],
+          addressLines: [addressLineForValidation],
           apiKey: targetApiKey,
         });
 
@@ -594,9 +664,10 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // point, same non-fatal pattern as the resolved-locality cache write in
     // publicListingController.js.
     try {
-      const tenantForLocality = await knex('tenants').where({ id: listingData.tenant_id }).first();
+      // Reuses tenantRow fetched at the top of this job for the pre-match
+      // bias, rather than querying `tenants` a second time.
       const localityResult = await localityMatcher.match({
-        cityId: tenantForLocality?.city_id ?? null,
+        cityId: tenantRow?.city_id ?? null,
         text: listingData.raw_address,
         lat,
         lng,
