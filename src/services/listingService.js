@@ -97,6 +97,7 @@ async function createListingRecord(knex, {
   description,
   pincode,
   buildingName,
+  hasHouseNumber,
   assignedAgentId,
 }) {
   if (!title || !rawAddress || !propertyType) {
@@ -159,6 +160,7 @@ async function createListingRecord(knex, {
       description: description ? description.trim() : null,
       pincode: (typeof pincode === 'string' && /^\d{6}$/.test(pincode.trim())) ? pincode.trim() : null,
       building_name: buildingName ? buildingName.trim() : null,
+      has_house_number: hasHouseNumber === true || hasHouseNumber === false ? hasHouseNumber : null,
       assigned_agent_id: validatedAgentId,
       public_slug: publicSlug,
       status: 'pending' // Remains 'pending' until the background geocoder confirms coordinates

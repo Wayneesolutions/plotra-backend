@@ -343,7 +343,25 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       formattedAddress = cacheHit.formatted_address || null;
       generalArea = extractGeneralArea(null, formattedAddress); // no address_components on a cache hit — text-heuristic fallback
     } else {
-      const useAddressValidation = process.env.USE_ADDRESS_VALIDATION_API === 'true';
+      // has_house_number (listingExtractionService.js — set by the same
+      // GPT extraction call that already parses the rest of the address,
+      // not an extra lookup) routes AROUND Address Validation for a named
+      // place with no unit number: that API has no geographic bias
+      // parameter at all and caps at ROUTE granularity for exactly this
+      // case regardless of how findable the place actually is — confirmed
+      // live ("Wave Malls Ferozepur Road Ludhiana" scored
+      // possibleNextAction=ACCEPT, validationGranularity=ROUTE). The
+      // legacy Geocoding+Places path below has a real fuzzy-match fallback
+      // for named places (tryPlacesTextSearch) that Address Validation has
+      // no equivalent of. `null` (dashboard-created listings, or anything
+      // that didn't go through GPT extraction) keeps today's behavior
+      // unchanged either way — this only ever narrows when to skip
+      // Address Validation, never forces it on.
+      const useAddressValidation = process.env.USE_ADDRESS_VALIDATION_API === 'true'
+        && listingData.has_house_number !== false;
+      if (process.env.USE_ADDRESS_VALIDATION_API === 'true' && listingData.has_house_number === false) {
+        console.log(`[Job ${job.id}] has_house_number=false — routing around Address Validation to the legacy Geocoding+Places path.`);
+      }
 
       if (useAddressValidation) {
         // Address Validation API path — replaces Geocoding + Places fallback.

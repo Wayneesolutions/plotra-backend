@@ -38,9 +38,10 @@ async function extractListingFields(accumulatedText, correctionContext) {
 
   const systemPrompt = `You extract real-estate listing fields from a Punjab/India property agent's freeform message (often Hinglish/Punjabi-English mixed, using local shorthand).${correctionSection}
 
-Return ONLY a JSON object with exactly these keys: title, raw_address, price, plot_area, property_type, description, pincode, building_name.
+Return ONLY a JSON object with exactly these keys: title, raw_address, price, plot_area, property_type, description, pincode, building_name, has_house_number.
 
 Rules:
+- has_house_number: true ONLY when the address itself names a specific unit — a house/plot/flat/shop number ("Plot No. 45", "H.No. 74", "Flat 302", "SCO 145", a bare leading number like "45, Model Town Extn"). false for a locality/sector/block number alone ("Sector 45 Mohali", "Phase 2 Dugri" — these identify an AREA, not a specific unit within it) and for a named building/mall/hotel with no unit number ("DLF Chandigarh One", "Elante Mall", "backside Keys Hotel"). In normal (non-correction) mode this is never null — always true or false, since "no number was given" is itself the answer. In CORRECTION MODE only, use null here too when the correction doesn't touch the address at all (same "stays null = unchanged" rule as every other field there).
 - Use null for any field not actually stated in the text — never guess or invent a value, EXCEPT title (see below).
 - price: convert Indian shorthand to a plain number in rupees. "55 lakh" -> 5500000, "1.2 crore" -> 12000000, "80k" -> 80000.
 - plot_area: keep as the agent's own phrasing (e.g. "250 gaj", "5 marla", "1200 sq ft") — don't convert units.
@@ -53,22 +54,28 @@ Rules:
 
 Examples:
 Input: "3BHK plot 250 gaj sector 45 mohali 55 lakh"
-Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":5500000,"plot_area":"250 gaj","property_type":"Plot","description":"3BHK","pincode":null,"building_name":null}
+Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":5500000,"plot_area":"250 gaj","property_type":"Plot","description":"3BHK","pincode":null,"building_name":null,"has_house_number":false}
 
 Input: "shop for sale ludhiana 80 lakh, pincode 141001"
-Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":"141001","building_name":null}
+Output: {"title":"Shop in Ludhiana","raw_address":"Ludhiana","price":8000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":"141001","building_name":null,"has_house_number":false}
 
 Input: "3BHK plot in Sector 45 Mohali"
-Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":null,"plot_area":null,"property_type":"Plot","description":"3BHK","pincode":null,"building_name":null}
+Output: {"title":"3BHK Plot in Sector 45 Mohali","raw_address":"Sector 45, Mohali","price":null,"plot_area":null,"property_type":"Plot","description":"3BHK","pincode":null,"building_name":null,"has_house_number":false}
 
 Input: "flat available in DLF Chandigarh One"
-Output: {"title":"Flat in DLF Chandigarh One","raw_address":null,"price":null,"plot_area":null,"property_type":"Flat","description":null,"pincode":null,"building_name":"DLF Chandigarh One"}
+Output: {"title":"Flat in DLF Chandigarh One","raw_address":null,"price":null,"plot_area":null,"property_type":"Flat","description":null,"pincode":null,"building_name":"DLF Chandigarh One","has_house_number":false}
 
 Input: "retail space available in Elante Mall, 60 lakh"
-Output: {"title":"Retail Space in Elante Mall","raw_address":null,"price":6000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":null,"building_name":"Elante Mall"}
+Output: {"title":"Retail Space in Elante Mall","raw_address":null,"price":6000000,"plot_area":null,"property_type":"Commercial","description":null,"pincode":null,"building_name":"Elante Mall","has_house_number":false}
 
 Input: "flat in Hero Homes South City Ludhiana, 45 lakh"
-Output: {"title":"Flat in Hero Homes South City","raw_address":"Ludhiana","price":4500000,"plot_area":null,"property_type":"Flat","description":null,"pincode":null,"building_name":"Hero Homes South City"}`;
+Output: {"title":"Flat in Hero Homes South City","raw_address":"Ludhiana","price":4500000,"plot_area":null,"property_type":"Flat","description":null,"pincode":null,"building_name":"Hero Homes South City","has_house_number":false}
+
+Input: "Plot No. 142-B, Ranjit Avenue, Amritsar, 60 lakh"
+Output: {"title":"Plot in Ranjit Avenue","raw_address":"Plot No. 142-B, Ranjit Avenue, Amritsar","price":6000000,"plot_area":null,"property_type":"Plot","description":null,"pincode":null,"building_name":null,"has_house_number":true}
+
+Input: "H.No 74, Guru Nanak Nagar, Ludhiana, 3BHK"
+Output: {"title":"3BHK House in Guru Nanak Nagar","raw_address":"H.No 74, Guru Nanak Nagar, Ludhiana","price":null,"plot_area":null,"property_type":"Villa","description":"3BHK","pincode":null,"building_name":null,"has_house_number":true}`;
 
   const response = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o-mini',

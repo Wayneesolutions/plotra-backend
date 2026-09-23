@@ -325,6 +325,9 @@ async function handleWebChatMessage(req, res) {
         if (extracted.property_type) patch.property_type = extracted.property_type.trim();
         if (extracted.description) patch.description = extracted.description.trim();
         if (extracted.building_name) patch.building_name = extracted.building_name.trim();
+        // != null, not truthy — has_house_number is a boolean, and `false`
+        // is a real, meaningful value here (not "nothing to apply").
+        if (extracted.has_house_number != null) patch.has_house_number = extracted.has_house_number;
 
         // Neither the address nor the pincode were ever in this patch
         // before — meaning even a same-property, GPT-confirmed correction
@@ -430,6 +433,7 @@ async function handleWebChatMessage(req, res) {
       description: extracted.description,
       pincode: extracted.pincode,
       buildingName: extracted.building_name,
+      hasHouseNumber: extracted.has_house_number,
     });
 
     session.listingId = newListing.id;
