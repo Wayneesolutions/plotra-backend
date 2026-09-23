@@ -23,9 +23,10 @@ async function login(req, res) {
   }
 
   try {
-    // 2. Locate user and eagerly join active tenant status profile
+    // 2. Locate user and eagerly join active tenant status + plan profile
     const user = await knex('users')
       .join('tenants', 'users.tenant_id', 'tenants.id')
+      .join('plans', 'plans.key', 'tenants.plan')
       .select(
         'users.id',
         'users.tenant_id',
@@ -34,7 +35,8 @@ async function login(req, res) {
         'users.password_hash',
         'users.role',
         'tenants.status as tenant_status',
-        'tenants.business_name'
+        'tenants.business_name',
+        'plans.dashboard_access'
       )
       .where('users.email', email.trim().toLowerCase())
       .first();
@@ -50,6 +52,19 @@ async function login(req, res) {
     if (user.tenant_status !== 'active') {
       return res.status(403).json({
         error: { code: 'TENANT_LOCKED', message: 'Account context suspended or inactive. Please contact billing support.' }
+      });
+    }
+
+    // 4b. Plan-level dashboard gate (Part 2, build-order item 5). A brand-new
+    // Tier 1 (WhatsApp Only) tenant never gets a users row in the first
+    // place — see the WhatsApp self-serve onboarding flow — so this really
+    // only ever fires for an existing user whose tenant downgraded to a
+    // plan without dashboard access. Checked here (not just
+    // tenantTransaction.js) so that case gets a clear message right at
+    // login, rather than a token that then fails on every dashboard call.
+    if (user.dashboard_access === false) {
+      return res.status(403).json({
+        error: { code: 'PLAN_RESTRICTED', message: 'Your current plan does not include dashboard access.' }
       });
     }
 

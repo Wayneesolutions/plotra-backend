@@ -26,16 +26,26 @@ class ListingLimitError extends Error {
 /**
  * Validates a proposed listings.assigned_agent_id — per-listing WhatsApp
  * attribution (a specific team member's number shown to buyers on this
- * listing, instead of the tenant's default) is gated to plans with
- * multi_agent_whatsapp (growth/unlimited — see migration 20260821_04),
- * and the referenced user must actually belong to this tenant. Never
- * silently downgrades an invalid request to null — that would look like
- * it worked when it didn't; callers should surface the thrown
- * ValidationError instead.
+ * listing, instead of the tenant's default) only makes sense for a tenant
+ * with more than one WhatsApp number to assign FROM in the first place.
+ *
+ * Part 2, build-order item 7 — re-pointed at plans.max_whatsapp_numbers
+ * (> 1) instead of the old plans.multi_agent_whatsapp boolean, per the
+ * brief: "needs re-pointing at the new Tier 2/3 flags instead of being
+ * rebuilt." multi_agent_whatsapp still exists as a column (not dropped —
+ * a separate, later cleanup, not part of this re-point) but is no longer
+ * what's checked here. Defaults to 1 if a plan somehow has no
+ * max_whatsapp_numbers value (shouldn't happen post-20260825_01, which
+ * backfills 1 onto every existing plan) — never treats "unknown" as
+ * "unlimited."
+ *
+ * The referenced user must actually belong to this tenant. Never silently
+ * downgrades an invalid request to null — that would look like it worked
+ * when it didn't; callers should surface the thrown ValidationError instead.
  *
  * Returns null for "no assignment" (clears any existing one) without
  * needing the plan check — clearing an assignment is always allowed,
- * same as how a Starter-plan tenant can still see/keep using a listing
+ * same as how a single-number tenant can still see/keep using a listing
  * that already has one from before a downgrade.
  */
 async function validateAssignedAgent(knex, { tenantId, plan, assignedAgentId }) {
@@ -43,8 +53,8 @@ async function validateAssignedAgent(knex, { tenantId, plan, assignedAgentId }) 
     return null;
   }
 
-  if (!plan?.multi_agent_whatsapp) {
-    const err = new Error("Assigning a listing to a specific team member's WhatsApp number requires the Growth or Unlimited plan.");
+  if (!plan || (plan.max_whatsapp_numbers ?? 1) <= 1) {
+    const err = new Error("Assigning a listing to a specific team member's WhatsApp number requires a plan with more than one WhatsApp number.");
     err.name = 'ValidationError';
     throw err;
   }
@@ -98,7 +108,25 @@ async function createListingRecord(knex, {
   const tenant = await knex('tenants').where({ id: tenantId }).first();
   const plan = await knex('plans').where({ key: tenant.plan }).first();
 
-  if (plan && plan.listing_limit !== null) {
+  // monthly_listing_limit (see 20260825_01_plan_tier_gates.js) takes over
+  // from the legacy lifetime listing_limit once a plan has it set — the
+  // new Tier 1/2/3 system caps listings per calendar month (40-50/100/200),
+  // not for the account's whole lifetime. A plan with monthly_listing_limit
+  // still null (any plan not yet migrated to the new tier system) keeps
+  // the original all-time check exactly as before — additive, not a
+  // behavior change for those plans.
+  if (plan && plan.monthly_listing_limit !== null && plan.monthly_listing_limit !== undefined) {
+    const [{ count }] = await knex('listings')
+      .where({ tenant_id: tenantId })
+      .where('created_at', '>=', knex.raw("date_trunc('month', now())"))
+      .count('id as count');
+    if (parseInt(count, 10) >= plan.monthly_listing_limit) {
+      throw new ListingLimitError(
+        `Your ${plan.label} plan allows up to ${plan.monthly_listing_limit} listings per month. Upgrade your plan, or add more next month.`,
+        plan
+      );
+    }
+  } else if (plan && plan.listing_limit !== null) {
     const [{ count }] = await knex('listings').where({ tenant_id: tenantId }).count('id as count');
     if (parseInt(count, 10) >= plan.listing_limit) {
       throw new ListingLimitError(
