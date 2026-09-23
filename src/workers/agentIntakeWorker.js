@@ -214,6 +214,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         propertyType: extracted.property_type,
         description: extracted.description,
         buildingName: extracted.building_name,
+        hasHouseNumber: extracted.has_house_number,
       });
 
       await knex('agent_listing_drafts').where({ id: draftId }).update({
@@ -297,6 +298,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     property_type: extracted.property_type ?? existingListing.property_type,
     description: extracted.description ?? existingListing.description,
     building_name: extracted.building_name ?? existingListing.building_name,
+    has_house_number: extracted.has_house_number ?? existingListing.has_house_number,
   };
 
   await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'creating', updated_at: knex.fn.now() });
@@ -340,6 +342,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       property_type: merged.property_type,
       description: merged.description,
       building_name: merged.building_name,
+      has_house_number: merged.has_house_number,
       updated_at: knex.fn.now(),
     });
     await knex('agent_listing_drafts').where({ id: draftId }).update({
