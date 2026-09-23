@@ -14,6 +14,27 @@ function generateTempPassword() {
 }
 
 /**
+ * Best-effort match of a tenant's free-text operating_city against the
+ * Cities table (migration 20260923_01), so newly onboarded tenants get
+ * locality matching (services/locality/localityMatcher.js) without a
+ * separate admin step. Matches a city in ANY status (draft included) —
+ * matching itself stays gated on the city being 'live' at match time
+ * (matcher.js's requireLive), so tagging a tenant early is harmless. Never
+ * throws: a lookup failure just leaves city_id null, same as any tenant
+ * onboarded before this feature existed.
+ */
+async function resolveTenantCityId(knex, operatingCity) {
+  if (!operatingCity) return null;
+  try {
+    const city = await knex('cities').whereRaw('lower(name) = ?', [operatingCity.trim().toLowerCase()]).first('id');
+    return city ? city.id : null;
+  } catch (err) {
+    console.error('resolveTenantCityId failed (non-fatal):', err.message);
+    return null;
+  }
+}
+
+/**
  * POST /api/v1/public/request-access
  * Public — no auth. Saves a pending onboarding request from a prospective tenant.
  */
@@ -135,6 +156,7 @@ async function approveRequest(req, res) {
     // to Google, and a DB transaction shouldn't sit open for however long
     // that takes (or however long a retry/timeout takes if it's slow).
     const geoBiasBounds = await resolveCityBounds(request.operating_city, request.operating_state);
+    const cityId = await resolveTenantCityId(knex, request.operating_city);
 
     let newTenant, newUser;
 
@@ -146,6 +168,7 @@ async function approveRequest(req, res) {
         status: 'active',
         operating_city: request.operating_city,
         operating_state: request.operating_state,
+        city_id: cityId,
       }).returning(['id', 'business_name', 'plan', 'status']);
 
       [newUser] = await trx('users').insert({
@@ -424,6 +447,7 @@ async function createTenant(req, res) {
     // Same reasoning as approveRequest — resolved before the transaction
     // opens, since it's a real external HTTP call.
     const geoBiasBounds = await resolveCityBounds(operating_city, operating_state);
+    const cityId = await resolveTenantCityId(knex, operating_city);
 
     let newTenant, newUser;
 
@@ -435,6 +459,7 @@ async function createTenant(req, res) {
         status: 'active',
         operating_city: operating_city?.trim() || null,
         operating_state: operating_state?.trim() || null,
+        city_id: cityId,
       }).returning(['id', 'business_name', 'plan', 'status']);
 
       [newUser] = await trx('users').insert({

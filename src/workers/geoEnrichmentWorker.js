@@ -10,6 +10,14 @@ const { lookupResolvedLocality, recordResolvedLocality } = require('../services/
 const { validateAddress } = require('../services/addressValidation');
 const { resolveWithConsensus } = require('../services/geoConsensusService');
 const { mapplsGeocode } = require('../services/mapplsGeocodingService');
+const { createLocalityMatcher } = require('../services/locality/localityMatcher');
+
+// Locality Master — resolves the dealer's raw address TEXT (independent of
+// whatever lat/lng Google/Mappls landed on above) against a curated list of
+// known areas, with the geocoded/pin coordinates used only as a secondary
+// cross-check (see localityMatcher.js). One instance per worker process,
+// same lifetime as `knex` above.
+const localityMatcher = createLocalityMatcher({ knex });
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -312,8 +320,28 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         }
       } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
+      //
+      // Task 4 fix: neither this call nor the pincode-fallback retry below
+      // ever had a `timeout` set — axios defaults to 0 (no timeout) when
+      // omitted, unlike every OTHER outbound call in this same pipeline
+      // (tryPlacesTextSearch above, the Address Validation branch,
+      // mapplsGeocodingService.js), all of which explicitly set 8000ms.
+      // A stalled connection here (Google accepts the TCP connection but
+      // goes quiet, rather than refusing outright) would hang on the
+      // underlying OS socket timeout instead — commonly ~2 minutes on
+      // Linux, which matches the reported "response time went from ~7-8s
+      // to 2+ minutes" regression exactly. Worse, this worker's BullMQ
+      // concurrency processes one job at a time by default, so a single
+      // stalled geocode call stalls every OTHER listing's geocoding queued
+      // behind it too, not just the one that triggered it. This is also
+      // the most likely explanation for the reported listing showing "no
+      // longer available" — publicListingController.js only ever serves
+      // status='active' listings; a job that's still hung (or that
+      // eventually failed after minutes) leaves the listing sitting in
+      // 'pending'/'enriching'/'pending_geo_review' indefinitely, which
+      // renders as that exact generic message.
       const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=${effectiveComponents}${effectiveBoundsParam}&key=${targetApiKey}`;
-      let response = await axios.get(geoUrl);
+      let response = await axios.get(geoUrl, { timeout: 8000 });
 
       // If the pincode-scoped lookup returned no results, retry without it.
       // A valid locality ("Focal Point, Chandigarh Road, Ludhiana") can get
@@ -325,7 +353,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       if (response.data.status !== 'OK' && listingData.pincode) {
         const fallbackBoundsParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
         const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
-        const fallbackResponse = await axios.get(fallbackUrl);
+        const fallbackResponse = await axios.get(fallbackUrl, { timeout: 8000 });
         if (fallbackResponse.data.status === 'OK') {
           response = fallbackResponse;
         }
@@ -551,6 +579,36 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     });
 
     console.log(`[Geo Worker Pipeline] Appended Landmark task chain for Listing Ref: ${listingId}`);
+
+    // Locality Master tagging — best-effort and purely additive: resolves
+    // listingData.raw_address against the curated locality list (see
+    // localityMatcher.js), using the coordinates just persisted above as a
+    // pin cross-check. Keyed by the tenant's city_id (Cities feature,
+    // migration 20260923_01) — a tenant with no city_id yet, or whose city
+    // isn't status='live', simply gets 'unmatched'/no-op here (requireLive
+    // defaults to true), same as before this feature existed. Only ever
+    // writes locality_id when the match is confident enough to auto-accept
+    // ('confirm'/'unmatched' results are left for a dealer/admin flow to
+    // wire up later — see PR description); a miss or an error here never
+    // blocks or fails the geocoding job that already succeeded by this
+    // point, same non-fatal pattern as the resolved-locality cache write in
+    // publicListingController.js.
+    try {
+      const tenantForLocality = await knex('tenants').where({ id: listingData.tenant_id }).first();
+      const localityResult = await localityMatcher.match({
+        cityId: tenantForLocality?.city_id ?? null,
+        text: listingData.raw_address,
+        lat,
+        lng,
+        listingId,
+      });
+      if (localityResult.decision === 'auto') {
+        await localityMatcher.applyToListing(listingId, localityResult);
+        console.log(`[Job ${job.id}] Locality Master: tagged "${localityResult.name}" (${localityResult.method}, ${localityResult.confidence}).`);
+      }
+    } catch (localityErr) {
+      console.error(`[Job ${job.id}] Locality Master match failed (non-fatal):`, localityErr.message);
+    }
 
     // Low-confidence WhatsApp listing: ask the agent to share a real GPS
     // pin (WhatsApp's own "share location" feature) as a second, stronger
