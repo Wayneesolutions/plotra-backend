@@ -335,7 +335,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // one consistent signal for "did Google itself already reach
     // house-level precision" regardless of which path produced it.
     let googleIsHighPrecision = false;
-
+       let placesMatched = false;
     if (cacheHit) {
       console.log(`[Job ${job.id}] Resolved-locality cache HIT (${cacheHit.key_type}="${cacheHit.display_name}", confidence=${cacheHit.confidence}) — skipping Google geocode.`);
       lat = Number(cacheHit.lat);
@@ -563,6 +563,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 
         if (placesResult) {
           ({ lat, lng, formattedAddress } = placesResult);
+                       placesMatched = true;
           console.log(`[Job ${job.id}] Places text search found a match, using it instead of the low-precision geocode.`);
         } else {
           lowConfidence = true;
@@ -611,7 +612,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // (right after the initial geocode) that's always true; if the agent
     // later shares a real GPS pin, handleAgentLocationPin releases the
     // listing out of review immediately, since a pin is trusted outright.
-    const needsGeoReview = !!draftId && !googleIsHighPrecision;
+           const needsGeoReview = !!draftId && !googleIsHighPrecision && !placesMatched;
 
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
     // street-view fallback images, and re-queue landmark + local-
