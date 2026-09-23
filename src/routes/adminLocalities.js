@@ -149,7 +149,10 @@ function createLocalityAdminRouter() {
         .where('l.city_id', city.id).where('li.status', 'active')
         .count('li.id as c').first();
       if (Number(activeListings.c) > 0) {
-        return res.status(409).json(err('ACTIVE_LISTINGS_EXIST', `${activeListings.c} active listing(s) use localities in this city. Pass ?force=true to disable anyway.`));
+        return res.status(409).json({
+          error: { code: 'ACTIVE_LISTINGS_EXIST', message: `${activeListings.c} active listing(s) use localities in this city. Pass ?force=true to disable anyway.` },
+          count: Number(activeListings.c),
+        });
       }
     }
     const [row] = await knex('cities').where({ id: city.id }).update({ status: 'disabled', updated_at: knex.fn.now() }).returning('*');
@@ -380,11 +383,16 @@ function createLocalityAdminRouter() {
   // ---------------------------------------------------------------------
 
   r.get('/cities/:cityId/unmatched', wrap(async (req, res) => {
+    // Joined in so the admin UI's "Listing" link can point at the real
+    // public page (/p/:public_slug) instead of the raw internal listing id,
+    // which the public route never accepts (publicListingController.js
+    // matches on public_slug only, no numeric-id fallback).
     const rows = await knex('locality_unmatched as u')
       .leftJoin('localities as s', 's.id', 'u.suggested_locality_id')
+      .leftJoin('listings as li', 'li.id', 'u.listing_id')
       .where('u.city_id', req.params.cityId)
       .where('u.status', req.query.status || 'pending')
-      .select('u.*', 's.name as suggested_name')
+      .select('u.*', 's.name as suggested_name', 'li.public_slug as listing_slug', 'li.title as listing_title')
       .orderBy([{ column: 'u.seen_count', order: 'desc' }, { column: 'u.updated_at', order: 'desc' }])
       .limit(200);
     res.json(rows);
