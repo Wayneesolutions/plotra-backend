@@ -312,8 +312,28 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         }
       } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
+      //
+      // Task 4 fix: neither this call nor the pincode-fallback retry below
+      // ever had a `timeout` set — axios defaults to 0 (no timeout) when
+      // omitted, unlike every OTHER outbound call in this same pipeline
+      // (tryPlacesTextSearch above, the Address Validation branch,
+      // mapplsGeocodingService.js), all of which explicitly set 8000ms.
+      // A stalled connection here (Google accepts the TCP connection but
+      // goes quiet, rather than refusing outright) would hang on the
+      // underlying OS socket timeout instead — commonly ~2 minutes on
+      // Linux, which matches the reported "response time went from ~7-8s
+      // to 2+ minutes" regression exactly. Worse, this worker's BullMQ
+      // concurrency processes one job at a time by default, so a single
+      // stalled geocode call stalls every OTHER listing's geocoding queued
+      // behind it too, not just the one that triggered it. This is also
+      // the most likely explanation for the reported listing showing "no
+      // longer available" — publicListingController.js only ever serves
+      // status='active' listings; a job that's still hung (or that
+      // eventually failed after minutes) leaves the listing sitting in
+      // 'pending'/'enriching'/'pending_geo_review' indefinitely, which
+      // renders as that exact generic message.
       const geoUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=${effectiveComponents}${effectiveBoundsParam}&key=${targetApiKey}`;
-      let response = await axios.get(geoUrl);
+      let response = await axios.get(geoUrl, { timeout: 8000 });
 
       // If the pincode-scoped lookup returned no results, retry without it.
       // A valid locality ("Focal Point, Chandigarh Road, Ludhiana") can get
@@ -325,7 +345,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       if (response.data.status !== 'OK' && listingData.pincode) {
         const fallbackBoundsParam = geoBiasBounds ? `&bounds=${geoBiasBounds}` : '';
         const fallbackUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeAddress)}&components=country:IN${fallbackBoundsParam}&key=${targetApiKey}`;
-        const fallbackResponse = await axios.get(fallbackUrl);
+        const fallbackResponse = await axios.get(fallbackUrl, { timeout: 8000 });
         if (fallbackResponse.data.status === 'OK') {
           response = fallbackResponse;
         }
