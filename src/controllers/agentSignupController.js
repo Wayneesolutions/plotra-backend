@@ -26,6 +26,7 @@ const { normalizePhone } = require('../utils/phone');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { sendPackageSelectionPrompt } = require('../services/agentPaymentService');
+const { setAgentCities, CityValidationError } = require('../services/tenantCityService');
 
 // Same fail-fast producer config used throughout (webhookController.js,
 // agentIntakeController.js) — called from an inbound webhook request, not
@@ -281,6 +282,11 @@ async function approveAgentSignup(req, res) {
         phone: normalizedPhone,
       }).returning(['id', 'name', 'email', 'phone', 'role']);
 
+      // Optional: limit the agent to some of the tenant's cities.
+      if (Array.isArray(req.body?.city_ids) && req.body.city_ids.length) {
+        await setAgentCities(trx, tenant_id, newUser.id, req.body.city_ids);
+      }
+
       await trx('pending_agent_signups')
         .where({ id })
         .update({ status: 'approved', updated_at: trx.fn.now() });
@@ -305,6 +311,9 @@ async function approveAgentSignup(req, res) {
       temporaryPassword: tempPassword,
     });
   } catch (error) {
+    if (error instanceof CityValidationError) {
+      return res.status(error.status || 400).json({ error: { code: error.code, message: error.message } });
+    }
     if (error.code === '23505') { // unique_violation — phone already registered to someone else
       return res.status(409).json({
         error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered to another account.' }
@@ -411,6 +420,11 @@ async function approveAgentSignupAdmin(req, res) {
         phone: normalizedPhone,
       }).returning(['id', 'name', 'email', 'phone', 'role']);
 
+      // Optional: limit the agent to some of the tenant's cities.
+      if (Array.isArray(req.body?.city_ids) && req.body.city_ids.length) {
+        await setAgentCities(trx, signup.tenant_id, newUser.id, req.body.city_ids);
+      }
+
       await trx('pending_agent_signups').where({ id }).update({ status: 'approved', updated_at: trx.fn.now() });
     });
 
@@ -441,6 +455,9 @@ async function approveAgentSignupAdmin(req, res) {
       temporaryPassword: tempPassword,
     });
   } catch (error) {
+    if (error instanceof CityValidationError) {
+      return res.status(error.status || 400).json({ error: { code: error.code, message: error.message } });
+    }
     if (error.code === '23505') {
       return res.status(409).json({ error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered.' } });
     }
