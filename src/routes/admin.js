@@ -15,6 +15,9 @@ const {
   updateTenantPlan,
   listAllListings,
   listCallingOverage,
+  updateTenant,
+  updateTenantCities,
+  updateAgentCities,
 } = require('../controllers/adminController');
 const {
   listAdPlacements,
@@ -121,6 +124,19 @@ router.patch('/tenants/:id/status', updateTenantStatus);
  * @desc    Admin-side manual plan override
  */
 router.patch('/tenants/:id/plan', updateTenantPlan);
+
+/**
+ * @route   PATCH /api/v1/admin/tenants/:id
+ * @desc    Edit business name / owner name, email, phone
+ * @route   PUT /api/v1/admin/tenants/:id/cities
+ * @desc    Set the tenant's cities { city_ids, primary_city_id } — each city
+ *          gets its own permanent city-wise code (LDH-002, ASR-001)
+ * @route   PUT /api/v1/admin/tenants/:id/agents/:userId/cities
+ * @desc    Limit an agent to some of the tenant's cities ([] = all)
+ */
+router.patch('/tenants/:id', updateTenant);
+router.put('/tenants/:id/cities', updateTenantCities);
+router.put('/tenants/:id/agents/:userId/cities', updateAgentCities);
 
 /**
  * @route   GET /api/v1/admin/agent-signups

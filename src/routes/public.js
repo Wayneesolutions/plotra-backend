@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getPublicListing, logVisit, capturePublicLead, updateListingLocation } = require('../controllers/publicListingController');
 const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
-const { submitAccessRequest } = require('../controllers/adminController');
+const { submitAccessRequest, listPublicCities } = require('../controllers/adminController');
 // Phase 6 — monetization
 const { executeRentVsBuyCalculation } = require('../controllers/calculatorController');
 const { fetchTargetedAdPlacements, recordAdMetricEvent } = require('../controllers/adController');
@@ -59,6 +59,13 @@ router.get('/listings/:slug/builder-profile', publicReadLimiter, getPublicBuilde
  * @access  Public
  */
 router.post('/request-access', publicWriteLimiter, submitAccessRequest);
+
+/**
+ * @route   GET /api/v1/public/cities
+ * @desc    Cities a dealer can pick on the Request Access form
+ * @access  Public
+ */
+router.get('/cities', publicReadLimiter, listPublicCities);
 
 /**
  * @route   POST /api/v1/public/tools/rent-vs-buy
