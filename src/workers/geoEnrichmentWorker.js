@@ -11,6 +11,7 @@ const { validateAddress } = require('../services/addressValidation');
 const { resolveWithConsensus } = require('../services/geoConsensusService');
 const { mapplsGeocode } = require('../services/mapplsGeocodingService');
 const { createLocalityMatcher } = require('../services/locality/localityMatcher');
+const { buildGeocodeQuery, isLocalityCorroborated, isWeakLocation } = require('../services/geoReviewDecision');
 
 // Locality Master — resolves the dealer's raw address TEXT (independent of
 // whatever lat/lng Google/Mappls landed on above) against a curated list of
@@ -194,6 +195,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   // falls straight through to today's plain tenant-wide bias unchanged.
   let localityBiasBounds = null;
   let localityBiasName = null;
+  let localityBiasCenter = null; // { lat, lng, radius } of the pre-matched area
   if (tenantRow?.city_id) {
     try {
       const localityPreMatch = await localityMatcher.match({
@@ -208,6 +210,11 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         if (matchedLocality?.center_lat != null && matchedLocality?.center_lng != null) {
           localityBiasBounds = boundsFromCircle(Number(matchedLocality.center_lat), Number(matchedLocality.center_lng), matchedLocality.radius_m);
           localityBiasName = matchedLocality.name;
+          localityBiasCenter = {
+            lat: Number(matchedLocality.center_lat),
+            lng: Number(matchedLocality.center_lng),
+            radius: matchedLocality.radius_m || 1000,
+          };
           console.log(`[Job ${job.id}] Locality Master pre-match: "${matchedLocality.name}" (${localityPreMatch.method}, ${localityPreMatch.confidence}) — biasing geocode to this area.`);
         }
       }
@@ -302,6 +309,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     geocodeAddress = geocodeAddress.replace(
       /^(near|opp\.?|opposite|behind|adj\.?|adjacent|beside|next\s+to|in\s+front\s+of)\s+/i, ''
     );
+    // GPT extraction moves a named shop/mall/building/society out of
+    // raw_address into building_name — put it back, it's usually the most
+    // findable part of the address ("Burger King, Dugri Main Market").
+    const withBuilding = buildGeocodeQuery(geocodeAddress, listingData.building_name);
+    if (withBuilding !== geocodeAddress) {
+      console.log(`[Job ${job.id}] Including building_name in geocode query: "${withBuilding}"`);
+      geocodeAddress = withBuilding;
+    }
   }
 
   try {
@@ -405,6 +420,38 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
 
         if (lowConfidence) {
           console.log(`[Job ${job.id}] Address Validation: low-confidence result (possibleNextAction=${result.verdict?.possibleNextAction ?? 'MISSING'}, suspiciousComponent=${hasSuspiciousComponent}, validationGranularity=${result.verdict?.validationGranularity}).`);
+
+          // Address Validation has no fuzzy named-place fallback of its own
+          // (it returned the Ludhiana city centroid for "Plot 45, Solitaire
+          // Homes, backside Keys Hotel, ..."). Give Places a shot, same as
+          // the legacy Geocoding path already does. Only trusted outright
+          // (placesMatched) when anchored to a Locality Master area the text
+          // already named, and within 3km of it; otherwise the Places pin is
+          // used as a better guess but still treated as a weak location.
+          if (!plusCodeMatch) {
+            const circle = localityBiasCenter
+              ? { lat: localityBiasCenter.lat, lng: localityBiasCenter.lng, radius: Math.max(localityBiasCenter.radius * 3, 3000) }
+              : null;
+            const avPlaces = await tryPlacesTextSearch(
+              geocodeAddress,
+              targetApiKey,
+              geoBiasBounds,
+              circle,
+              localityBiasCenter ? localityBiasCenter.lat : null,
+              localityBiasCenter ? localityBiasCenter.lng : null
+            );
+            if (avPlaces) {
+              ({ lat, lng } = avPlaces);
+              formattedAddress = avPlaces.formattedAddress || formattedAddress;
+              if (localityBiasCenter) {
+                placesMatched = true;
+                lowConfidence = false;
+                console.log(`[Job ${job.id}] Address Validation low-confidence — Places matched inside pre-matched area "${localityBiasName}", using it.`);
+              } else {
+                console.log(`[Job ${job.id}] Address Validation low-confidence — using Places pin as a better guess (no area anchor, still low-confidence).`);
+              }
+            }
+          }
         }
       } else {
       // 1. Dispatch lookup request directly to Google Geocoding engine
@@ -598,21 +645,44 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       geoResolutionSource = 'google_only_no_mappls';
     }
 
-    // Super-admin geo review gate (see adminGeoReviewController.js) — a
-    // WhatsApp agent-intake listing whose geocode never reached house-level
-    // precision (googleIsHighPrecision computed above from location_type /
-    // validationGranularity, BEFORE the Mappls consensus step, per the
-    // decision to stop trusting the system's own confidence judgment —
-    // consensus "agreement" has been wrong before and doesn't get a vote
-    // here) gets parked for a human to check instead of being auto-sent to
-    // the agent as awaiting_approval. Only applies when a draftId exists
-    // (WhatsApp intake — the only flow adminGeoReviewController.js knows
-    // how to release, since it looks the listing up by draft) and only when
-    // no agent pin has been shared yet — at this point in the pipeline
-    // (right after the initial geocode) that's always true; if the agent
-    // later shares a real GPS pin, handleAgentLocationPin releases the
-    // listing out of review immediately, since a pin is trusted outright.
-           const needsGeoReview = !!draftId && !googleIsHighPrecision && !placesMatched;
+    // (Removed 2026-09-24: the super-admin geo-review gate that parked
+    // non-house-level WhatsApp listings at status='pending_geo_review'. The
+    // automatic pipeline now always sends the preview — see weakLocation
+    // below. adminGeoReviewController.js stays only to release listings
+    // parked before this change.)
+    // Locality Master cross-check with the final pin (moved up from after
+    // persisting, so it can take part in the weak-location decision below). A
+    // confident text match to a verified area that the pin also sits in is
+    // treated as a confident location (no pin request, no rough-guess warning) — see
+    // geoReviewDecision.js isLocalityCorroborated.
+    let localityResult = null;
+    let localityCorroborated = false;
+    try {
+      localityResult = await localityMatcher.match({
+        cityId: tenantRow?.city_id ?? null,
+        text: listingData.raw_address,
+        lat,
+        lng,
+        listingId,
+      });
+      if (localityResult.decision === 'auto' && localityResult.localityId) {
+        const matchedRow = await knex('localities').where({ id: localityResult.localityId }).first('kind');
+        localityCorroborated = isLocalityCorroborated(localityResult, matchedRow?.kind ?? null);
+      }
+      if (localityCorroborated) {
+        console.log(`[Job ${job.id}] Locality Master corroborates pin: "${localityResult.name}" (pin ${localityResult.pin?.verdict}, ${localityResult.pin?.distanceM}m) — treating location as confident.`);
+      }
+    } catch (localityErr) {
+      console.error(`[Job ${job.id}] Locality Master match failed (non-fatal):`, localityErr.message);
+    }
+
+    // No manual geo-review parking any more — the automatic pipeline above
+    // (Locality Master + building name + Address Validation/Geocoding +
+    // Places) decides, and the agent always gets the preview. A weak result
+    // additionally asks the agent for a WhatsApp location pin (below) and
+    // keeps the "rough guess" warning on the preview.
+    const weakLocation = isWeakLocation({ googleIsHighPrecision, placesMatched, localityCorroborated });
+    if (localityCorroborated) lowConfidence = false;
 
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
     // street-view fallback images, and re-queue landmark + local-
@@ -634,9 +704,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       targetApiKey,
       propertyType: listingData.property_type,
       extraListingUpdates: {
-        status: needsGeoReview
-          ? 'pending_geo_review'
-          : (['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active'),
+        status: ['whatsapp', 'web'].includes(listingData.source) ? 'awaiting_approval' : 'active',
         // Neither the Geocoding API nor a Places fallback found a
         // confident, house-level match — the pin is a best-effort guess.
         // agentIntakeWorker.js's preview message uses this to add an
@@ -682,22 +750,14 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // blocks or fails the geocoding job that already succeeded by this
     // point, same non-fatal pattern as the resolved-locality cache write in
     // publicListingController.js.
+    // (match itself now runs above, before the geo-review decision.)
     try {
-      // Reuses tenantRow fetched at the top of this job for the pre-match
-      // bias, rather than querying `tenants` a second time.
-      const localityResult = await localityMatcher.match({
-        cityId: tenantRow?.city_id ?? null,
-        text: listingData.raw_address,
-        lat,
-        lng,
-        listingId,
-      });
-      if (localityResult.decision === 'auto') {
+      if (localityResult && localityResult.decision === 'auto') {
         await localityMatcher.applyToListing(listingId, localityResult);
         console.log(`[Job ${job.id}] Locality Master: tagged "${localityResult.name}" (${localityResult.method}, ${localityResult.confidence}).`);
       }
     } catch (localityErr) {
-      console.error(`[Job ${job.id}] Locality Master match failed (non-fatal):`, localityErr.message);
+      console.error(`[Job ${job.id}] Locality Master tagging failed (non-fatal):`, localityErr.message);
     }
 
     // Low-confidence WhatsApp listing: ask the agent to share a real GPS
@@ -709,7 +769,12 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // handleAgentLocationPin for what happens when it arrives. Sent
     // ahead of send-preview below (not instead of it) — the preview flow
     // is unchanged, this is purely an additional prompt.
-    if (draftId && lowConfidence) {
+    // Only for a weak location — a pin the Locality Master (or Places)
+    // already corroborated just gets the normal preview. Sent in addition
+    // to the preview (never instead of it); an agent pin that arrives later
+    // overwrites the location via agentIntakeController.js's
+    // handleAgentLocationPin.
+    if (draftId && weakLocation) {
       const draftForPinRequest = await knex('agent_listing_drafts').where({ id: draftId }).first();
       const agentForPinRequest = draftForPinRequest
         ? await knex('users').where({ id: draftForPinRequest.user_id }).first()
@@ -718,8 +783,8 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       if (agentForPinRequest) {
         const lang = await detectDraftLanguage(knex, draftId);
         const pinRequestBody = lang === 'en'
-          ? "📍 We couldn't pin this address precisely. If you can, open WhatsApp's location feature and share the property's exact location — tap the ➕/attachment icon, choose *Location*, then *Share Live Location* or drop a pin on the map at the property."
-          : '📍 Yeh address bilkul sahi se locate nahi ho paya. Agar ho sake to WhatsApp ke location feature se property ki exact location share karein — ➕/attachment icon dabayein, *Location* choose karein, phir property pe pin drop karke share karein.';
+          ? "📍 We could only place this address approximately. Your preview link is on its way — if you can, also share the property's exact location: tap the ➕/attachment icon, choose *Location*, and drop a pin at the property. The map updates automatically."
+          : '📍 Yeh address sirf andaze se locate ho paya. Preview link aa raha hai — agar ho sake to property ki exact location bhi share karein: ➕/attachment icon dabayein, *Location* choose karein, property pe pin drop karke bhejein. Map apne aap update ho jayega.';
         await knex.transaction(async (trx) => {
           await logAgentOutboundMessage(trx, { draftId, body: pinRequestBody });
         });
@@ -727,15 +792,10 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       }
     }
 
-    // WhatsApp agent-intake listings: send the preview link directly.
-    // The listing preview page shows a satellite map with a draggable pin —
-    // the agent can visually verify the location, drag the pin to fix it if
-    // needed, and click Save, then reply "yes" to publish. Skipped when
-    // parked in pending_geo_review — the preview goes out once a super-admin
-    // approves it instead (adminGeoReviewController.js enqueues this same
-    // job), or immediately if the agent shares a trusted GPS pin first
-    // (agentIntakeController.js's handleAgentLocationPin).
-    if (draftId && !needsGeoReview) {
+    // WhatsApp agent-intake listings: always send the preview link. The
+    // preview page shows a satellite map with a draggable pin — the agent
+    // can verify it, drag to fix, tap Save, then reply "yes" to publish.
+    if (draftId) {
       await agentIntakeQueue.add('send-preview', { draftId, listingId }, {
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
