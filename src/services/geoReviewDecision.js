@@ -49,16 +49,20 @@ function isLocalityCorroborated(localityResult, localityKind) {
 }
 
 /**
- * Whether a WhatsApp-intake listing gets parked in pending_geo_review (no
- * preview; agent asked to share a GPS pin / super-admin must release it).
+ * Whether the automatic pipeline ended up with only a rough guess — no
+ * house-level Google result, no Places match, and no Locality Master
+ * corroboration. Listings are never parked for manual review any more
+ * (the agent always gets the preview); this only decides whether the
+ * agent is ALSO asked to share a WhatsApp location pin and whether the
+ * preview carries the "pin is a rough guess" warning.
  */
-function shouldParkForGeoReview({ draftId, googleIsHighPrecision, placesMatched, localityCorroborated }) {
-  return !!draftId && !googleIsHighPrecision && !placesMatched && !localityCorroborated;
+function isWeakLocation({ googleIsHighPrecision, placesMatched, localityCorroborated }) {
+  return !googleIsHighPrecision && !placesMatched && !localityCorroborated;
 }
 
 module.exports = {
   COARSE_LOCALITY_KINDS,
   buildGeocodeQuery,
   isLocalityCorroborated,
-  shouldParkForGeoReview,
+  isWeakLocation,
 };
