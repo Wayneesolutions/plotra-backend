@@ -4,8 +4,59 @@
  * function here can assume req.user.role === 'super_admin'.
  */
 
+const multer = require('multer');
+const { uploadToS3 } = require('../services/s3Service');
+
 const VALID_POSITIONS = ['calculator_result', 'listing_sidebar', 'listing_footer'];
 const VALID_REVENUE_MODELS = ['cpl', 'flat_fee'];
+
+const AD_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const AD_IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+const _adImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: AD_IMAGE_MAX_BYTES },
+  fileFilter: (_req, file, cb) => {
+    if (AD_IMAGE_TYPES.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only JPEG, PNG, WebP and GIF images are allowed.'));
+  },
+});
+
+/** multer middleware for POST /admin/ads/upload-image (field name: "image") */
+function adImageUploadMiddleware(req, res, next) {
+  _adImageUpload.single('image')(req, res, (err) => {
+    if (err) {
+      const message = err.code === 'LIMIT_FILE_SIZE' ? 'Image must be 5 MB or smaller.' : err.message;
+      return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message } });
+    }
+    next();
+  });
+}
+
+/**
+ * POST /api/v1/admin/ads/upload-image  (multipart, field "image")
+ * Uploads an ad creative to S3 under ads/ and returns its public URL, which
+ * the admin form then submits as image_url on create/update.
+ */
+async function uploadAdImage(req, res) {
+  if (!req.file) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'No image uploaded.' } });
+  }
+  try {
+    const url = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'ads');
+    return res.status(201).json({ success: true, url });
+  } catch (error) {
+    console.error('Ad image upload failed:', error.message);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to upload image.' } });
+  }
+}
+
+/** Only one default ad per position — clear the flag on the others. */
+async function clearOtherDefaults(knex, position, keepId = null) {
+  const q = knex('ad_placements').where({ position, is_default: true });
+  if (keepId) q.whereNot({ id: keepId });
+  await q.update({ is_default: false, updated_at: knex.fn.now() });
+}
 
 /**
  * GET /api/v1/admin/ads
@@ -23,7 +74,7 @@ async function listAdPlacements(req, res) {
       )
       .leftJoin('ad_events', 'ad_placements.id', 'ad_events.placement_id')
       .groupBy('ad_placements.id')
-      .orderBy('ad_placements.created_at', 'desc');
+      .orderBy([{ column: 'ad_placements.is_default', order: 'desc' }, { column: 'ad_placements.created_at', order: 'desc' }]);
 
     return res.json({ success: true, placements });
   } catch (error) {
@@ -48,13 +99,21 @@ async function createAdPlacement(req, res) {
     active_from,
     active_to,
   } = req.body;
+  const is_default = req.body.is_default === true || req.body.is_default === 'true';
 
-  if (!advertiser_name || !position || !image_url || !click_url || !active_from || !active_to) {
+  if (!advertiser_name || !position || !image_url || !click_url) {
     return res.status(400).json({
       error: {
         code: 'VALIDATION_ERROR',
-        message: 'advertiser_name, position, image_url, click_url, active_from, and active_to are required.',
+        message: 'advertiser_name, position, image (upload or URL), and click_url are required.',
       },
+    });
+  }
+
+  // Paid campaigns need a window; a default ad runs until deactivated.
+  if (!is_default && (!active_from || !active_to)) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: 'active_from and active_to are required for non-default ads.' },
     });
   }
 
@@ -70,13 +129,15 @@ async function createAdPlacement(req, res) {
     });
   }
 
-  if (new Date(active_to) <= new Date(active_from)) {
+  if (active_from && active_to && new Date(active_to) <= new Date(active_from)) {
     return res.status(400).json({
       error: { code: 'VALIDATION_ERROR', message: 'active_to must be after active_from.' }
     });
   }
 
   try {
+    if (is_default) await clearOtherDefaults(knex, position);
+
     const [placement] = await knex('ad_placements')
       .insert({
         advertiser_name: advertiser_name.trim(),
@@ -85,9 +146,10 @@ async function createAdPlacement(req, res) {
         click_url: click_url.trim(),
         city_filter: city_filter ? city_filter.trim() : null,
         revenue_model,
-        active_from,
-        active_to,
+        active_from: active_from || knex.fn.now(),
+        active_to: active_to || null,
         is_active: true,
+        is_default,
       })
       .returning('*');
 
@@ -108,7 +170,7 @@ async function updateAdPlacement(req, res) {
   const { id } = req.params;
   const allowedFields = [
     'advertiser_name', 'position', 'image_url', 'click_url',
-    'city_filter', 'revenue_model', 'active_from', 'active_to', 'is_active',
+    'city_filter', 'revenue_model', 'active_from', 'active_to', 'is_active', 'is_default',
   ];
 
   const updates = {};
@@ -140,6 +202,13 @@ async function updateAdPlacement(req, res) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Ad placement not found.' } });
     }
 
+    if (updates.is_default === true) {
+      await clearOtherDefaults(knex, updates.position || existing.position, id);
+    } else if (updates.position && existing.is_default && updates.position !== existing.position) {
+      // Moving a default ad to another slot — it becomes that slot's default.
+      await clearOtherDefaults(knex, updates.position, id);
+    }
+
     const [placement] = await knex('ad_placements').where({ id }).update(updates).returning('*');
     return res.json({ success: true, placement });
   } catch (error) {
@@ -148,4 +217,10 @@ async function updateAdPlacement(req, res) {
   }
 }
 
-module.exports = { listAdPlacements, createAdPlacement, updateAdPlacement };
+module.exports = {
+  listAdPlacements,
+  createAdPlacement,
+  updateAdPlacement,
+  uploadAdImage,
+  adImageUploadMiddleware,
+};

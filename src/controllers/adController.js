@@ -14,8 +14,14 @@ async function fetchTargetedAdPlacements(req, res) {
   const { targetCity, interfacePosition } = req.query;
 
   try {
+    const cityScope = function () {
+      this.where({ city_filter: targetCity }).orWhereNull('city_filter');
+    };
+
+    // 1. Paid campaigns running right now.
     const queryBuilder = knex('ad_placements')
       .where('is_active', true)
+      .andWhere('is_default', false)
       .andWhere('active_from', '<=', knex.fn.now())
       .andWhere('active_to', '>=', knex.fn.now());
 
@@ -24,14 +30,25 @@ async function fetchTargetedAdPlacements(req, res) {
     }
 
     if (targetCity) {
-      queryBuilder.andWhere(function () {
-        this.where({ city_filter: targetCity }).orWhereNull('city_filter');
-      });
+      queryBuilder.andWhere(cityScope);
     }
 
-    const matchedCampaigns = await queryBuilder
-      .select('id', 'advertiser_name', 'position', 'image_url', 'click_url')
+    let matchedCampaigns = await queryBuilder
+      .select('id', 'advertiser_name', 'position', 'image_url', 'click_url', 'is_default')
       .orderBy('created_at', 'desc');
+
+    // 2. Nothing paid for this slot → fall back to its default (house) ad,
+    //    so slots like calculator_result / listing_footer are never empty.
+    //    Defaults ignore the campaign window; only is_active switches them off.
+    if (matchedCampaigns.length === 0 && interfacePosition) {
+      const defaultQuery = knex('ad_placements')
+        .where({ is_active: true, is_default: true, position: interfacePosition });
+      if (targetCity) defaultQuery.andWhere(cityScope);
+
+      matchedCampaigns = await defaultQuery
+        .select('id', 'advertiser_name', 'position', 'image_url', 'click_url', 'is_default')
+        .limit(1);
+    }
 
     return res.status(200).json({ success: true, ads: matchedCampaigns });
   } catch (error) {

@@ -20,6 +20,8 @@ const {
   listAdPlacements,
   createAdPlacement,
   updateAdPlacement,
+  uploadAdImage,
+  adImageUploadMiddleware,
 } = require('../controllers/adminAdsController');
 const { listAgentSignupsAdmin, approveAgentSignupAdmin, rejectAgentSignupAdmin } = require('../controllers/agentSignupController');
 // NEW — plan management (gap #3)
@@ -145,6 +147,13 @@ router.get('/ads', listAdPlacements);
  * @desc    Create a new ad placement
  */
 router.post('/ads', createAdPlacement);
+
+/**
+ * @route   POST /api/v1/admin/ads/upload-image
+ * @desc    Upload an ad creative (multipart field "image", ≤5 MB) to S3 —
+ *          returns { url } to use as image_url on create/update.
+ */
+router.post('/ads/upload-image', adImageUploadMiddleware, uploadAdImage);
 
 /**
  * @route   PATCH /api/v1/admin/ads/:id
