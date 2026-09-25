@@ -8,6 +8,35 @@ const { resolveCityBounds } = require('../services/geoBiasService');
 const { getPlan, createCheckoutSession } = require('../services/billingService');
 const { addNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
+const {
+  CityValidationError, validateCityChoice, setTenantCities, getTenantCities,
+  getTenantCitiesMap, setAgentCities, getUserCitiesMap,
+} = require('../services/tenantCityService');
+
+const { normalizePhone } = require('../utils/phone');
+
+function sendCityError(res, e) {
+  return res.status(e.status || 400).json({ error: { code: e.code, message: e.message } });
+}
+
+/**
+ * Cities for a new tenant: explicit { city_ids, primary_city_id } from the
+ * request body wins, then the ids saved on the access request, then a
+ * best-effort name match of the legacy free-text operating_city.
+ */
+async function resolveNewTenantCityChoice(knex, { body = {}, request = null }) {
+  let cityIds = body.city_ids;
+  let primaryCityId = body.primary_city_id;
+  if ((!cityIds || !cityIds.length) && request?.city_ids?.length) {
+    cityIds = request.city_ids;
+    primaryCityId = request.city_ids[0];
+  }
+  if ((!cityIds || !cityIds.length) && request?.operating_city) {
+    const legacy = await resolveTenantCityId(knex, request.operating_city);
+    if (legacy) cityIds = [legacy];
+  }
+  return validateCityChoice(knex, { cityIds, primaryCityId });
+}
 
 function generateTempPassword() {
   return `Welcome${crypto.randomBytes(4).toString('hex')}!`;
@@ -40,7 +69,7 @@ async function resolveTenantCityId(knex, operatingCity) {
  */
 async function submitAccessRequest(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { business_name, contact_name, email, phone, message, operating_city, operating_state } = req.body;
+  const { business_name, contact_name, email, phone, message, operating_city, operating_state, city_ids } = req.body;
 
   if (!business_name || !contact_name || !email || !phone) {
     return res.status(400).json({
@@ -49,6 +78,21 @@ async function submitAccessRequest(req, res) {
   }
 
   try {
+    // Cities picked on the form (multi-select, first = primary). Required
+    // when any city exists to pick from; validated against the cities table.
+    let requestCityIds = null;
+    let requestCity = null;
+    if (Array.isArray(city_ids) && city_ids.length) {
+      try {
+        const choice = await validateCityChoice(knex, { cityIds: city_ids });
+        requestCityIds = choice.cityIds;
+        requestCity = choice.primaryCity;
+      } catch (e) {
+        if (e instanceof CityValidationError) return sendCityError(res, e);
+        throw e;
+      }
+    }
+
     const existing = await knex('tenant_requests')
       .where({ email: email.trim().toLowerCase(), status: 'pending' })
       .first();
@@ -69,8 +113,9 @@ async function submitAccessRequest(req, res) {
       // approval time to auto-derive their geocoding bias (see
       // geoBiasService.js) so their listings' addresses resolve accurately
       // without an admin having to configure that by hand.
-      operating_city: operating_city?.trim() || null,
-      operating_state: operating_state?.trim() || null,
+      operating_city: requestCity?.name || operating_city?.trim() || null,
+      operating_state: requestCity?.state || operating_state?.trim() || null,
+      city_ids: requestCityIds,
     });
 
     return res.status(201).json({
@@ -149,14 +194,21 @@ async function approveRequest(req, res) {
       });
     }
 
+    let cityChoice;
+    try {
+      cityChoice = await resolveNewTenantCityChoice(knex, { body: req.body || {}, request });
+    } catch (e) {
+      if (e instanceof CityValidationError) return sendCityError(res, e);
+      throw e;
+    }
+
     const tempPassword = generateTempPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
     // Resolved before opening the transaction — this is a real HTTP call
     // to Google, and a DB transaction shouldn't sit open for however long
     // that takes (or however long a retry/timeout takes if it's slow).
-    const geoBiasBounds = await resolveCityBounds(request.operating_city, request.operating_state);
-    const cityId = await resolveTenantCityId(knex, request.operating_city);
+    const geoBiasBounds = await resolveCityBounds(cityChoice.primaryCity.name, cityChoice.primaryCity.state);
 
     let newTenant, newUser;
 
@@ -166,10 +218,9 @@ async function approveRequest(req, res) {
         plan: 'starter',
         whatsapp_mode: 'shared',
         status: 'active',
-        operating_city: request.operating_city,
-        operating_state: request.operating_state,
-        city_id: cityId,
       }).returning(['id', 'business_name', 'plan', 'status']);
+
+      newTenant.cities = await setTenantCities(trx, newTenant.id, cityChoice);
 
       [newUser] = await trx('users').insert({
         tenant_id: newTenant.id,
@@ -236,6 +287,16 @@ async function approveRequest(req, res) {
  */
 async function approveWhatsappSignupRequest(req, res, knex, request, adminUserId) {
   try {
+    // No structured city comes from the WhatsApp flow — the approving admin
+    // picks the tenant's cities (body.city_ids / primary_city_id).
+    let cityChoice;
+    try {
+      cityChoice = await resolveNewTenantCityChoice(knex, { body: req.body || {}, request });
+    } catch (e) {
+      if (e instanceof CityValidationError) return sendCityError(res, e);
+      throw e;
+    }
+
     const plan = await getPlan(knex, request.requested_plan);
     if (!plan) {
       return res.status(500).json({
@@ -251,6 +312,8 @@ async function approveWhatsappSignupRequest(req, res, knex, request, adminUserId
         whatsapp_mode: 'dedicated',
         status: 'pending_payment',
       }).returning(['id', 'business_name', 'plan', 'status']);
+
+      newTenant.cities = await setTenantCities(trx, newTenant.id, cityChoice);
 
       await trx('tenant_configs').insert({
         tenant_id: newTenant.id,
@@ -425,7 +488,7 @@ async function rejectRequest(req, res) {
  */
 async function createTenant(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { business_name, contact_name, email, phone, operating_city, operating_state } = req.body;
+  const { business_name, contact_name, email, phone, city_ids, primary_city_id } = req.body;
 
   if (!business_name || !contact_name || !email || !phone) {
     return res.status(400).json({
@@ -441,13 +504,22 @@ async function createTenant(req, res) {
       });
     }
 
+    // At least one city is required — without it the tenant gets no area
+    // matching, no tenant code and no city bias for geocoding.
+    let cityChoice;
+    try {
+      cityChoice = await validateCityChoice(knex, { cityIds: city_ids, primaryCityId: primary_city_id });
+    } catch (e) {
+      if (e instanceof CityValidationError) return sendCityError(res, e);
+      throw e;
+    }
+
     const tempPassword = generateTempPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
     // Same reasoning as approveRequest — resolved before the transaction
     // opens, since it's a real external HTTP call.
-    const geoBiasBounds = await resolveCityBounds(operating_city, operating_state);
-    const cityId = await resolveTenantCityId(knex, operating_city);
+    const geoBiasBounds = await resolveCityBounds(cityChoice.primaryCity.name, cityChoice.primaryCity.state);
 
     let newTenant, newUser;
 
@@ -457,10 +529,9 @@ async function createTenant(req, res) {
         plan: 'starter',
         whatsapp_mode: 'shared',
         status: 'active',
-        operating_city: operating_city?.trim() || null,
-        operating_state: operating_state?.trim() || null,
-        city_id: cityId,
       }).returning(['id', 'business_name', 'plan', 'status']);
+
+      newTenant.cities = await setTenantCities(trx, newTenant.id, cityChoice);
 
       [newUser] = await trx('users').insert({
         tenant_id: newTenant.id,
@@ -528,6 +599,13 @@ async function listTenants(req, res) {
       .groupBy('tenants.id')
       .orderBy('tenants.created_at', 'desc');
 
+    // Cities + city-wise codes (LDH-002, ASR-001), primary first.
+    const citiesMap = await getTenantCitiesMap(knex, tenants.map((t) => t.id));
+    for (const t of tenants) {
+      t.cities = citiesMap.get(t.id) || [];
+      t.primary_code = t.cities[0]?.code || null;
+    }
+
     return res.json({ success: true, tenants });
   } catch (error) {
     console.error('Failed to list tenants:', error);
@@ -565,8 +643,16 @@ async function getTenantDetail(req, res) {
 
     const owner = await knex('users')
       .where({ tenant_id: id, role: 'owner' })
-      .select('id', 'name', 'email')
+      .select('id', 'name', 'email', 'phone')
       .first();
+
+    const cities = await getTenantCities(knex, id);
+    const agents = await knex('users')
+      .where({ tenant_id: id, role: 'agent' })
+      .select('id', 'name', 'phone', 'email')
+      .orderBy('name');
+    const agentCities = await getUserCitiesMap(knex, agents.map((a) => a.id));
+    for (const a of agents) a.city_ids = agentCities.get(a.id) || [];
 
     const listings = await knex('listings')
       .leftJoin('listing_visits', 'listings.id', 'listing_visits.listing_id')
@@ -611,8 +697,11 @@ async function getTenantDetail(req, res) {
         subscriptionStatus: tenant.subscription_status,
         currentPeriodEnd: tenant.current_period_end,
         createdAt: tenant.created_at,
+        cities,
+        primaryCode: cities[0]?.code || null,
       },
       owner: owner || null,
+      agents,
       listings,
       usageThisMonth: {
         views: parseInt(viewCount || 0),
@@ -827,7 +916,153 @@ async function listCallingOverage(req, res) {
   }
 }
 
+/**
+ * PATCH /api/v1/admin/tenants/:id
+ * Body (all optional): { business_name, owner_name, owner_email, owner_phone }
+ * Owner fields update the tenant's 'owner' user.
+ */
+async function updateTenant(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  const { business_name, owner_name, owner_email, owner_phone } = req.body || {};
+
+  try {
+    const tenant = await knex('tenants').where({ id }).first('id');
+    if (!tenant) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Tenant not found.' } });
+
+    const tenantPatch = {};
+    if (business_name !== undefined) {
+      if (!String(business_name).trim()) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Business name cannot be empty.' } });
+      }
+      tenantPatch.business_name = String(business_name).trim();
+    }
+
+    const userPatch = {};
+    if (owner_name !== undefined) {
+      if (!String(owner_name).trim()) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Owner name cannot be empty.' } });
+      userPatch.name = String(owner_name).trim();
+    }
+    if (owner_email !== undefined) {
+      const em = String(owner_email).trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) {
+        return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Enter a valid email.' } });
+      }
+      userPatch.email = em;
+    }
+    if (owner_phone !== undefined) {
+      const raw = String(owner_phone).trim();
+      // Normalized like agents' phones. Note: webhookController.js treats any
+      // user with a matching phone as a known WhatsApp sender, so an owner
+      // with a phone set can also send listings over WhatsApp.
+      userPatch.phone = raw ? normalizePhone(raw) : null;
+      if (raw && !userPatch.phone) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Enter a valid phone number.' } });
+    }
+
+    const owner = Object.keys(userPatch).length
+      ? await knex('users').where({ tenant_id: id, role: 'owner' }).first('id')
+      : null;
+    if (Object.keys(userPatch).length && !owner) {
+      return res.status(409).json({ error: { code: 'NO_OWNER', message: 'This tenant has no dashboard owner login to update.' } });
+    }
+    if (userPatch.email) {
+      const clash = await knex('users').where({ email: userPatch.email }).whereNot('id', owner.id).first('id');
+      if (clash) return res.status(409).json({ error: { code: 'DUPLICATE_EMAIL', message: 'Another user already has this email.' } });
+    }
+    if (userPatch.phone) {
+      const clash = await knex('users').where({ phone: userPatch.phone }).whereNot('id', owner.id).first('id');
+      if (clash) return res.status(409).json({ error: { code: 'DUPLICATE_PHONE', message: 'Another user already has this phone number.' } });
+    }
+
+    await knex.transaction(async (trx) => {
+      if (Object.keys(tenantPatch).length) {
+        await trx('tenants').where({ id }).update({ ...tenantPatch, updated_at: trx.fn.now() });
+      }
+      if (Object.keys(userPatch).length) {
+        await trx('users').where({ id: owner.id }).update({ ...userPatch, updated_at: trx.fn.now() });
+      }
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to update tenant:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to update tenant.' } });
+  }
+}
+
+/**
+ * PUT /api/v1/admin/tenants/:id/cities
+ * Body: { city_ids: number[], primary_city_id?: number }
+ * New cities get a new city-wise code; removed cities keep their code
+ * (re-adding restores it) and are dropped from agents' city lists.
+ */
+async function updateTenantCities(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  const { city_ids, primary_city_id } = req.body || {};
+
+  try {
+    const tenant = await knex('tenants').where({ id }).first('id');
+    if (!tenant) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Tenant not found.' } });
+
+    let cities;
+    await knex.transaction(async (trx) => {
+      cities = await setTenantCities(trx, id, { cityIds: city_ids, primaryCityId: primary_city_id });
+    });
+
+    // Keep the tenant-wide geocoding bias pointing at the primary city.
+    const primary = cities[0];
+    const bounds = primary ? await resolveCityBounds(primary.name, primary.state) : null;
+    if (bounds) await knex('tenant_configs').where({ tenant_id: id }).update({ geo_bias_bounds: bounds });
+
+    return res.json({ success: true, cities });
+  } catch (error) {
+    if (error instanceof CityValidationError) return sendCityError(res, error);
+    console.error('Failed to update tenant cities:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to update tenant cities.' } });
+  }
+}
+
+/**
+ * PUT /api/v1/admin/tenants/:id/agents/:userId/cities
+ * Body: { city_ids: number[] } — subset of the tenant's cities; [] = all.
+ */
+async function updateAgentCities(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id, userId } = req.params;
+  try {
+    let cityIds;
+    await knex.transaction(async (trx) => {
+      cityIds = await setAgentCities(trx, id, userId, (req.body || {}).city_ids || []);
+    });
+    return res.json({ success: true, city_ids: cityIds });
+  } catch (error) {
+    if (error instanceof CityValidationError) return sendCityError(res, error);
+    console.error('Failed to update agent cities:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to update agent cities.' } });
+  }
+}
+
+/**
+ * GET /api/v1/public/cities
+ * Cities a dealer can pick on the Request Access form (anything not disabled).
+ */
+async function listPublicCities(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  try {
+    const cities = await knex('cities').whereNot('status', 'disabled').select('id', 'name', 'state').orderBy('name');
+    return res.json({ success: true, cities });
+  } catch (error) {
+    console.error('Failed to list public cities:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to load cities.' } });
+  }
+}
+
 module.exports = {
+  updateTenant,
+  updateTenantCities,
+  updateAgentCities,
+  listPublicCities,
   submitAccessRequest,
   listRequests,
   approveRequest,

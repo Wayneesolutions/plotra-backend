@@ -26,6 +26,7 @@ const { normalize, slugify } = require('../services/locality/normalize');
 const { haversineM } = require('../services/locality/geoCheck');
 const { createLocalityMatcher } = require('../services/locality/localityMatcher');
 const { importLocalities } = require('../services/locality/importService');
+const { normalizeCityCode, suggestCityCode } = require('../services/tenantCityService');
 
 const matcher = createLocalityMatcher({ knex });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -34,6 +35,13 @@ const INDIA_LAT = [6, 37];
 const INDIA_LNG = [68, 98];
 const MIN_RADIUS_M = 200;
 const MAX_RADIUS_M = 5000;
+
+// City slugs must NOT go through locality slugify(): its normalize() step
+// strips city names as noise ("ludhiana", "punjab"), which left Ludhiana's
+// slug as an empty string.
+function citySlug(name) {
+  return String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
 
 function err(code, message) {
   return { error: { code, message } };
@@ -79,7 +87,7 @@ function createLocalityAdminRouter() {
   }));
 
   r.post('/cities', wrap(async (req, res) => {
-    const { name, state, center_lat, center_lng, bounds_radius_km } = req.body;
+    const { name, state, center_lat, center_lng, bounds_radius_km, code: rawCode } = req.body;
     if (!name || !state || center_lat == null || center_lng == null) {
       return res.status(400).json(err('VALIDATION_ERROR', 'name, state, center_lat and center_lng are required'));
     }
@@ -87,12 +95,19 @@ function createLocalityAdminRouter() {
     if (lat < INDIA_LAT[0] || lat > INDIA_LAT[1] || lng < INDIA_LNG[0] || lng > INDIA_LNG[1]) {
       return res.status(400).json(err('OUT_OF_BOUNDS', `Coordinates must fall within India (lat ${INDIA_LAT.join('-')}, lng ${INDIA_LNG.join('-')})`));
     }
-    const slug = slugify(name);
+    const slug = citySlug(name);
     const existing = await knex('cities').where({ slug }).first();
     if (existing) return res.status(409).json(err('DUPLICATE_CITY', 'City already exists'));
 
+    // City code for tenant codes (LDH-001). Suggested from the name when not given.
+    const code = rawCode ? normalizeCityCode(rawCode) : suggestCityCode(name);
+    if (!code) return res.status(400).json(err('INVALID_CITY_CODE', 'City code must be 2-4 letters, e.g. LDH'));
+    if (await knex('cities').where({ code }).first()) {
+      return res.status(409).json(err('DUPLICATE_CITY_CODE', `City code ${code} is already used by another city`));
+    }
+
     const [{ id }] = await knex('cities')
-      .insert({ name: name.trim(), slug, state: state.trim(), center_lat: lat, center_lng: lng, bounds_radius_km: bounds_radius_km || 25, status: 'draft' })
+      .insert({ name: name.trim(), slug, state: state.trim(), center_lat: lat, center_lng: lng, bounds_radius_km: bounds_radius_km || 25, status: 'draft', code })
       .returning('id');
     const city = await knex('cities').where({ id }).first();
     res.status(201).json({ ...city, ...(await cityStats(id)) });
@@ -105,8 +120,16 @@ function createLocalityAdminRouter() {
   }));
 
   r.patch('/cities/:id', wrap(async (req, res) => {
-    const allowed = ['name', 'state', 'center_lat', 'center_lng', 'bounds_radius_km', 'min_verified_pct'];
+    const allowed = ['name', 'state', 'center_lat', 'center_lng', 'bounds_radius_km', 'min_verified_pct', 'code'];
     const patch = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+    // Changing a city code only affects tenant codes issued AFTER the change —
+    // existing codes (LDH-002) are permanent by design.
+    if (patch.code !== undefined) {
+      patch.code = normalizeCityCode(patch.code);
+      if (!patch.code) return res.status(400).json(err('INVALID_CITY_CODE', 'City code must be 2-4 letters, e.g. LDH'));
+      const clash = await knex('cities').where({ code: patch.code }).whereNot('id', req.params.id).first();
+      if (clash) return res.status(409).json(err('DUPLICATE_CITY_CODE', `City code ${patch.code} is already used by ${clash.name}`));
+    }
     if (patch.center_lat != null || patch.center_lng != null) {
       const city = await knex('cities').where({ id: req.params.id }).first();
       if (!city) return res.status(404).json(err('NOT_FOUND', 'City not found'));
@@ -116,7 +139,7 @@ function createLocalityAdminRouter() {
         return res.status(400).json(err('OUT_OF_BOUNDS', `Coordinates must fall within India (lat ${INDIA_LAT.join('-')}, lng ${INDIA_LNG.join('-')})`));
       }
     }
-    if (patch.name) patch.slug = slugify(patch.name);
+    if (patch.name) patch.slug = citySlug(patch.name);
     patch.updated_at = knex.fn.now();
     const [row] = await knex('cities').where({ id: req.params.id }).update(patch).returning('*');
     if (!row) return res.status(404).json(err('NOT_FOUND', 'City not found'));

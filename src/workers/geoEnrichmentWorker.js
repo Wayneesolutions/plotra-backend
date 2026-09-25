@@ -12,6 +12,7 @@ const { resolveWithConsensus } = require('../services/geoConsensusService');
 const { mapplsGeocode } = require('../services/mapplsGeocodingService');
 const { createLocalityMatcher } = require('../services/locality/localityMatcher');
 const { buildGeocodeQuery, isLocalityCorroborated, isWeakLocation } = require('../services/geoReviewDecision');
+const { resolveCandidateCities, pickCityMatch } = require('../services/tenantCityService');
 
 // Locality Master — resolves the dealer's raw address TEXT (independent of
 // whatever lat/lng Google/Mappls landed on above) against a curated list of
@@ -193,35 +194,65 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   // Fully non-fatal and inert whenever there's no city_id yet (every
   // tenant that existed before this feature) or the city isn't live —
   // falls straight through to today's plain tenant-wide bias unchanged.
+  //
+  // Multi-city (migration 20260924_01): a tenant can operate in several
+  // cities and an agent can be limited to some of them. The pre-match runs
+  // against every candidate city (agent's cities, else the tenant's) and
+  // pickCityMatch decides which city this listing is in; that city is then
+  // used for the area bias, the post-geocode pin cross-check and the
+  // unmatched queue.
   let localityBiasBounds = null;
   let localityBiasName = null;
   let localityBiasCenter = null; // { lat, lng, radius } of the pre-matched area
-  if (tenantRow?.city_id) {
-    try {
-      const localityPreMatch = await localityMatcher.match({
-        cityId: tenantRow.city_id,
-        text: rawAddress,
-        lat: null,
-        lng: null,
-        record: false,
-      });
-      if (localityPreMatch.decision !== 'unmatched' && localityPreMatch.localityId) {
-        const matchedLocality = await knex('localities').where({ id: localityPreMatch.localityId }).first();
-        if (matchedLocality?.center_lat != null && matchedLocality?.center_lng != null) {
-          localityBiasBounds = boundsFromCircle(Number(matchedLocality.center_lat), Number(matchedLocality.center_lng), matchedLocality.radius_m);
-          localityBiasName = matchedLocality.name;
-          localityBiasCenter = {
-            lat: Number(matchedLocality.center_lat),
-            lng: Number(matchedLocality.center_lng),
-            radius: matchedLocality.radius_m || 1000,
-          };
-          console.log(`[Job ${job.id}] Locality Master pre-match: "${matchedLocality.name}" (${localityPreMatch.method}, ${localityPreMatch.confidence}) — biasing geocode to this area.`);
-        }
-      }
-    } catch (localityPreErr) {
-      console.error(`[Job ${job.id}] Locality Master pre-match failed (non-fatal):`, localityPreErr.message);
+  let candidateCities = [];
+  let listingCity = null; // chosen city row { id, name, center_lat, center_lng, bounds_radius_km }
+  try {
+    let agentUserId = listingData.assigned_agent_id || null;
+    if (draftId) {
+      const draftRow = await knex('agent_listing_drafts').where({ id: draftId }).first('user_id');
+      agentUserId = draftRow?.user_id || agentUserId;
     }
+    candidateCities = await resolveCandidateCities(knex, {
+      tenantId: listingData.tenant_id,
+      agentUserId: agentUserId || listingData.created_by || null,
+      legacyCityId: tenantRow?.city_id ?? null,
+    });
+
+    const perCity = [];
+    for (const city of candidateCities) {
+      const match = await localityMatcher.match({ cityId: city.id, text: rawAddress, lat: null, lng: null, record: false });
+      perCity.push({ city, match });
+    }
+    const picked = pickCityMatch(perCity, rawAddress);
+    listingCity = picked ? picked.city : null;
+    const localityPreMatch = picked ? picked.match : null;
+    if (candidateCities.length > 1 && listingCity) {
+      console.log(`[Job ${job.id}] Multi-city tenant — listing city: "${listingCity.name}" (candidates: ${candidateCities.map((c) => c.name).join(', ')}).`);
+    }
+
+    if (localityPreMatch && localityPreMatch.decision !== 'unmatched' && localityPreMatch.localityId) {
+      const matchedLocality = await knex('localities').where({ id: localityPreMatch.localityId }).first();
+      if (matchedLocality?.center_lat != null && matchedLocality?.center_lng != null) {
+        localityBiasBounds = boundsFromCircle(Number(matchedLocality.center_lat), Number(matchedLocality.center_lng), matchedLocality.radius_m);
+        localityBiasName = matchedLocality.name;
+        localityBiasCenter = {
+          lat: Number(matchedLocality.center_lat),
+          lng: Number(matchedLocality.center_lng),
+          radius: matchedLocality.radius_m || 1000,
+        };
+        console.log(`[Job ${job.id}] Locality Master pre-match: "${matchedLocality.name}" (${localityPreMatch.method}, ${localityPreMatch.confidence}) — biasing geocode to this area.`);
+      }
+    }
+  } catch (localityPreErr) {
+    console.error(`[Job ${job.id}] Locality Master pre-match failed (non-fatal):`, localityPreErr.message);
   }
+
+  // Multi-city tenant with no area match: bias to the chosen city instead
+  // of tenant_configs.geo_bias_bounds, which only ever covered the city the
+  // tenant was created with. Single-city tenants keep the configured bounds.
+  const cityBiasBounds = (candidateCities.length > 1 && listingCity?.center_lat != null)
+    ? boundsFromCircle(Number(listingCity.center_lat), Number(listingCity.center_lng), (listingCity.bounds_radius_km || 25) * 1000, 1)
+    : null;
 
   // Soft geographic bias toward wherever THIS tenant actually operates —
   // Google's `bounds` param *influences* ranking without hard-excluding
@@ -245,7 +276,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
   // too whenever this happens — same root cause, multiple symptoms.
   // A confident Locality Master pre-match wins over the plain tenant-wide
   // bounds — it's a tighter, curated-area-specific box, not a guess.
-  const geoBiasBounds = localityBiasBounds || config?.geo_bias_bounds || null;
+  const geoBiasBounds = localityBiasBounds || cityBiasBounds || config?.geo_bias_bounds || null;
 
   // pincode (optional, dealer-provided — see listingExtractionService.js)
   // is a much stronger signal than the tenant-level bounds bias: a bounds
@@ -659,7 +690,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     let localityCorroborated = false;
     try {
       localityResult = await localityMatcher.match({
-        cityId: tenantRow?.city_id ?? null,
+        cityId: listingCity?.id ?? tenantRow?.city_id ?? null,
         text: listingData.raw_address,
         lat,
         lng,
