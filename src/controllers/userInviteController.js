@@ -81,13 +81,23 @@ async function inviteTenantUser(req, res) {
  */
 async function listTenantUsers(req, res) {
   const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id } = req.user;
+  const { tenant_id, role, id: userId } = req.user;
 
   try {
-    const users = await knex('users')
+    let query = knex('users')
       .where({ tenant_id })
       .select('id', 'name', 'email', 'phone', 'role')
       .orderBy('name', 'asc');
+
+    // Privacy fix: an agent-role user previously got every team member's
+    // name/email/phone back (it fed the per-listing "WhatsApp contact for
+    // buyers" dropdown). Agents can't reassign listings anyway (see
+    // listingController.updateListing), so they only ever need their own row.
+    if (role === 'agent') {
+      query = query.where({ id: userId });
+    }
+
+    const users = await query;
 
     return res.status(200).json({ success: true, users });
   } catch (error) {
