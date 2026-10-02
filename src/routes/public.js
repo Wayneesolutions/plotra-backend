@@ -9,6 +9,8 @@ const { fetchTargetedAdPlacements, recordAdMetricEvent } = require('../controlle
 // Phase 7 — billing + rate limiting
 const { getPlans } = require('../controllers/billingController');
 const { publicWriteLimiter, publicReadLimiter } = require('../middleware/rateLimiter');
+// Blog — public read side of the standalone blog admin panel (routes/blogAdmin.js)
+const { listPublicPosts, getPublicPost } = require('../controllers/blogController');
 
 router.get('/ping', (req, res) => res.json({ message: 'Public API is live' }));
 
@@ -94,6 +96,16 @@ router.post('/ads/:id/event', publicWriteLimiter, recordAdMetricEvent);
  * @access  Public
  */
 router.get('/billing/plans', getPlans);
+
+/**
+ * @route   GET /api/v1/public/blog
+ * @desc    Blog index — ?tag, ?page, ?limit. Newest first, no post body.
+ * @route   GET /api/v1/public/blog/:slug
+ * @desc    One blog post with its body + meta title/description
+ * @access  Public
+ */
+router.get('/blog', publicReadLimiter, listPublicPosts);
+router.get('/blog/:slug', publicReadLimiter, getPublicPost);
 
 
 module.exports = router;
