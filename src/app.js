@@ -7,7 +7,8 @@ const publicRouter = require('./routes/public');
 const webhooksRouter = require('./routes/webhooks');
 const adminRouter = require('./routes/admin');
 const chatRouter = require('./routes/chat');
-const { servePropertyPreview } = require('./controllers/ogPreviewController');
+const blogAdminRouter = require('./routes/blogAdmin');
+const { servePropertyPreview, serveBlogPreview } = require('./controllers/ogPreviewController');
 
 const app = express();
 
@@ -42,6 +43,12 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // Non-crawler user-agents fall through via next() to the SPA.
 app.get('/p/:slug', servePropertyPreview);
 
+// Same idea for blog posts: crawlers hitting /blog/:slug get the post's meta
+// title / meta description / image; browsers fall through to the SPA. Only
+// takes effect where the web server forwards /blog/* to this API for crawler
+// user-agents, the same way it does for /p/*.
+app.get('/blog/:slug', serveBlogPreview);
+
 // Auth routes (login)
 app.use('/api/v1/auth', authRouter);
 
@@ -60,5 +67,9 @@ app.use('/api/v1/dashboard', dashboardRouter);
 
 // Super-admin routes (authGuard + adminGuard applied inside the router)
 app.use('/api/v1/admin', adminRouter);
+
+// Standalone blog admin panel — its own login + token, not connected to the
+// dealer dashboard or the super-admin panel (see routes/blogAdmin.js)
+app.use('/api/v1/blog-admin', blogAdminRouter);
 
 module.exports = app;
