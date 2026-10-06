@@ -297,7 +297,12 @@ async function approveWhatsappSignupRequest(req, res, knex, request, adminUserId
       throw e;
     }
 
-    const plan = await getPlan(knex, request.requested_plan);
+    // Looked up regardless of is_active on purpose: is_active only controls
+    // what the pricing page / plan pickers OFFER. The WhatsApp self-serve
+    // flow's own default plan (WHATSAPP_SIGNUP_DEFAULT_PLAN, 'tier1' if
+    // unset) must keep resolving even after that plan is hidden from the
+    // public pricing page — otherwise every WhatsApp signup approval 500s.
+    const plan = await knex('plans').where({ key: request.requested_plan }).first();
     if (!plan) {
       return res.status(500).json({
         error: { code: 'INTERNAL_ERROR', message: `Requested plan "${request.requested_plan}" does not exist.` }

@@ -4,6 +4,36 @@
  * serviceContext in routes/admin.js.
  */
 
+// Plan categories the pricing page groups by. NULL = ungrouped.
+const PLAN_CATEGORIES = ['basic', 'basic_with_leads'];
+
+function normalizeCategory(value) {
+  return value === '' || value === null || value === undefined ? null : value;
+}
+
+/**
+ * Validates the catalog/display fields (category, discount_percent,
+ * max_users, included_leads) when present. Returns an error message, or
+ * null if everything supplied is valid. Every field accepts null (unset).
+ */
+function validateCatalogFields(fields) {
+  const category = normalizeCategory(fields.category);
+  if (fields.category !== undefined && category !== null && !PLAN_CATEGORIES.includes(category)) {
+    return `category must be one of: ${PLAN_CATEGORIES.join(', ')}, or null.`;
+  }
+  const d = fields.discount_percent;
+  if (d !== undefined && d !== null && (!Number.isInteger(d) || d < 1 || d > 99)) {
+    return 'discount_percent must be a whole number from 1 to 99, or null.';
+  }
+  for (const name of ['max_users', 'included_leads']) {
+    const v = fields[name];
+    if (v !== undefined && v !== null && (!Number.isInteger(v) || v <= 0)) {
+      return `${name} must be a positive integer, or null.`;
+    }
+  }
+  return null;
+}
+
 async function listPlansAdmin(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   try {
@@ -45,6 +75,8 @@ async function updatePlan(req, res) {
     'label', 'price_inr', 'listing_limit', 'features', 'is_active', 'sort_order',
     'multi_agent_whatsapp', 'max_whatsapp_numbers',
     'dashboard_access', 'calling_access', 'monthly_listing_limit',
+    // Catalog/display fields (20261006_01).
+    'category', 'discount_percent', 'max_users', 'included_leads',
   ];
 
   const updates = {};
@@ -84,6 +116,12 @@ async function updatePlan(req, res) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'calling_access must be a boolean.' } });
   }
 
+  const catalogError = validateCatalogFields(updates);
+  if (catalogError) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: catalogError } });
+  }
+  if (updates.category !== undefined) updates.category = normalizeCategory(updates.category);
+
   if (updates.features !== undefined) {
     updates.features = JSON.stringify(updates.features);
   }
@@ -117,7 +155,13 @@ async function createPlan(req, res) {
     // defaulting false, so a freshly-created plan doesn't accidentally
     // lock its tenants out until someone explicitly restricts it.
     dashboard_access = true, calling_access = true, max_whatsapp_numbers = 1, monthly_listing_limit = null,
+    category = null, discount_percent = null, max_users = null, included_leads = null,
   } = req.body;
+
+  const catalogError = validateCatalogFields({ category, discount_percent, max_users, included_leads });
+  if (catalogError) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: catalogError } });
+  }
 
   if (!key || !label || !Number.isFinite(price_inr) || price_inr <= 0) {
     return res.status(400).json({
@@ -152,6 +196,10 @@ async function createPlan(req, res) {
         calling_access,
         max_whatsapp_numbers,
         monthly_listing_limit,
+        category: normalizeCategory(category),
+        discount_percent,
+        max_users,
+        included_leads,
       })
       .returning('*');
 
