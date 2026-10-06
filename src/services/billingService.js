@@ -17,6 +17,12 @@ async function listPlans(knex) {
     price_inr: r.price_inr,
     listing_limit: r.listing_limit,
     features: r.features,
+    // Catalog/display fields (20261006_01) — the pricing page groups by
+    // category and shows the discount badge, users and leads from these.
+    category: r.category,
+    discount_percent: r.discount_percent,
+    max_users: r.max_users,
+    included_leads: r.included_leads,
   }));
 }
 
