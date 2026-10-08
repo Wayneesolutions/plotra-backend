@@ -41,7 +41,7 @@ async function checkServiceWindow(threadId) {
 }
 
 const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
-  const { tenantId, threadId, leadId, phone, leadName, propertyTitle, messageBody, buttons } = job.data;
+  const { tenantId, threadId, leadId, phone, leadName, propertyTitle, messageBody, buttons, template } = job.data;
 
   console.log(`[Job ${job.id}] Dispatched delivery pipeline loop for Thread: ${threadId} -> Mobile: ${phone}`);
 
@@ -55,7 +55,42 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
   let bspPayload;
   let deliveryStatus = 'sent';
 
-  if (withinWindow && buttons?.length) {
+  if (template?.name) {
+    // Explicit template send — the caller already knows no service window
+    // can be open (e.g. callEnquiryService.js: the buyer phoned, they never
+    // messaged), so there is nothing to check; a template is the only thing
+    // Meta will accept as the first message. bodyParams fill {{1}}, {{2}}…
+    // in order. quickReplyPayload, when set, is attached to the template's
+    // first quick-reply button and comes back on the inbound webhook when
+    // the buyer taps it (messages[0].button.payload).
+    const components = [];
+    if (template.bodyParams?.length) {
+      components.push({
+        type: 'body',
+        parameters: template.bodyParams.map((text) => ({ type: 'text', text: String(text) })),
+      });
+    }
+    if (template.quickReplyPayload) {
+      components.push({
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '0',
+        parameters: [{ type: 'payload', payload: template.quickReplyPayload }],
+      });
+    }
+    bspPayload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: phone,
+      type: 'template',
+      template: {
+        name: template.name,
+        language: { code: template.lang || 'en' },
+        components,
+      },
+    };
+    deliveryStatus = 'template_sent';
+  } else if (withinWindow && buttons?.length) {
     // Meta Cloud API interactive-button message — up to 3 quick-reply
     // buttons (Meta's own limit), each { id, title } (title capped at 20
     // chars by Meta; not validated here since every caller so far

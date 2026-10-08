@@ -105,7 +105,7 @@ If is_property_search is false, set the other three fields to null.`;
  * since general_area is NULL on those — see the migration). Either filter
  * is skipped if the buyer didn't mention it.
  */
-async function findMatchingListings(knex, intent) {
+async function findMatchingListings(knex, intent, { tenantId } = {}) {
   let query = knex('listings')
     .join('tenants', 'listings.tenant_id', 'tenants.id')
     .where('listings.status', 'active')
@@ -123,6 +123,13 @@ async function findMatchingListings(knex, intent) {
     )
     .orderBy('listings.created_at', 'desc')
     .limit(MAX_RESULTS);
+
+  // Optional single-dealer scope — used by callEnquiryService.js for a call
+  // that came in on a dealer's own AI-calling number. The WhatsApp
+  // marketplace search above never passes this and stays cross-tenant.
+  if (tenantId) {
+    query = query.where('listings.tenant_id', tenantId);
+  }
 
   if (intent.propertyType) {
     query = query.whereRaw('LOWER(listings.property_type) = LOWER(?)', [intent.propertyType]);
@@ -215,4 +222,4 @@ async function handleBuyerSearch(knex, { incomingText, buyerPhone }) {
   return { replyText: formatSearchReply(listings, intent), matchCount: listings.length };
 }
 
-module.exports = { handleBuyerSearch };
+module.exports = { handleBuyerSearch, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl };

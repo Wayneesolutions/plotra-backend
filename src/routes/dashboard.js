@@ -13,6 +13,7 @@ const { getWebChatCode, regenerateWebChatCode } = require('../controllers/webCha
 const { listWhatsappNumbers, addWhatsappNumber, removeWhatsappNumber, setDefaultWhatsappNumber } = require('../controllers/whatsappNumberController');
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
+const { getCallEnquiries } = require('../controllers/callEnquiryController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
 // getLeads aliased to getOpsLeadInbox: leadsController.js's getLeads (tenant-wide
 // lead list, mounted at /leads below) and dealerOpsController.js's getLeads
@@ -211,6 +212,9 @@ router.get('/ops/leads/:id/messages', authGuard, tenantTransaction, getLeadMessa
 router.get('/ops/documents', authGuard, tenantTransaction, getDocuments);
 router.patch('/ops/documents/:id', authGuard, tenantTransaction, updateDocumentStatus);
 router.get('/ops/calls', authGuard, tenantTransaction, getCalls);
+// What each inbound AI-call buyer asked for + WhatsApp follow-up status
+// (callEnquiryService.js). Complements /ops/calls, which is the raw call log.
+router.get('/ops/call-enquiries', authGuard, tenantTransaction, getCallEnquiries);
 router.post('/ops/leads/:id/call', authGuard, tenantTransaction, triggerOutboundCall);
 router.get('/ops/visits', authGuard, tenantTransaction, getVisits);
 router.patch('/ops/visits/:id', authGuard, tenantTransaction, updateVisit);

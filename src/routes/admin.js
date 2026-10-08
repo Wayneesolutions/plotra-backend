@@ -33,6 +33,7 @@ const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../contr
 const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGeoReviewController');
 // NEW — marketplace buyer search lead-delivery tracking (Phase 1, no billing)
 const { getMarketplaceLeadsSummary } = require('../controllers/adminMarketplaceLeadsController');
+const { getCallEnquiriesAdmin } = require('../controllers/callEnquiryController');
 // NEW — agent payment/subscription system
 const {
   listPaymentSubmissions,
@@ -224,6 +225,14 @@ router.patch('/listings/:id/geo-review', approveGeoReview);
  *          Tracking only — Phase 1, no billing wired up yet.
  */
 router.get('/marketplace-leads', getMarketplaceLeadsSummary);
+
+/**
+ * @route   GET /api/v1/admin/call-enquiries
+ * @desc    Enquiries captured from inbound AI calls across every dealer AND
+ *          the shared Plotraa line, with a count per WhatsApp follow-up
+ *          status. ?days=30&status=template_sent&limit=50&offset=0
+ */
+router.get('/call-enquiries', getCallEnquiriesAdmin);
 
 /**
  * @route   GET /api/v1/admin/payment-submissions
