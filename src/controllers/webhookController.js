@@ -11,6 +11,7 @@ const { handleBuyerSearch } = require('../services/buyerSearchService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('../services/listingStatusCheckService');
 const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
+const { handleCallEnquiryReply } = require('../services/callEnquiryService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -82,7 +83,15 @@ function parseInboundPayload(body) {
     // type of property?" with a photo captioned "commercial property")
     // had that caption silently discarded. See handleInboundWhatsApp's
     // agent-intake routing below for how a caption is now used.
-    incomingText: value.messages?.[0]?.text?.body || value.messages?.[0]?.image?.caption || body.message_text || body.text,
+    // messages[0].button.text: a tap on a TEMPLATE's quick-reply button
+    // (type === 'button') — a different shape from the interactive
+    // button_reply below. Without it such a tap carried no text at all and
+    // was acked as a non-message event.
+    incomingText: value.messages?.[0]?.text?.body || value.messages?.[0]?.image?.caption || value.messages?.[0]?.button?.text || body.message_text || body.text,
+    // The payload we attached to that template button when sending it
+    // (see whatsappOutboundWorker.js's template branch) — `call_enquiry:<id>`
+    // for the AI-call listing follow-up.
+    templateButtonPayload: value.messages?.[0]?.button?.payload || null,
     // Image message (Meta Cloud API shape) — messages[0].type === 'image'
     // when present, with the actual bytes retrievable via a separate
     // media-id lookup (see agentIntakeController.js's downloadWhatsAppMedia).
@@ -145,7 +154,7 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng } = parseInboundPayload(req.body);
+  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng, templateButtonPayload } = parseInboundPayload(req.body);
 
   const hasLocation = locationLat != null && locationLng != null;
 
@@ -292,6 +301,27 @@ async function handleInboundWhatsApp(req, res) {
   // logic below with incomingText undefined.
   if (!incomingText) {
     return res.status(200).json({ success: true, warning: 'Acknowledged non-text buyer event.' });
+  }
+
+  // AI-call follow-up: this buyer phoned, the AI captured what they want,
+  // and we sent them the call-enquiry template ("we found N properties —
+  // tap to see them"). A tap on that button, or a plain "yes", is the reply
+  // that opens the 24h window — so the listing links can now go out as a
+  // normal message. Returns null (and changes nothing) for every message
+  // that isn't such a reply, so everything below runs exactly as before.
+  try {
+    const callEnquiryReply = await handleCallEnquiryReply(knex, {
+      phone,
+      incomingText: incomingText.trim(),
+      buttonPayload: templateButtonPayload,
+    });
+    if (callEnquiryReply) {
+      await enqueueAgentWhatsappSend({ tenantId: callEnquiryReply.tenantId, phone, messageBody: callEnquiryReply.replyText });
+      return res.status(200).json({ success: true, callEnquiryReply: true, matchCount: callEnquiryReply.matchCount });
+    }
+  } catch (callEnquiryErr) {
+    // Never let this optional step break the normal buyer flow.
+    console.error('Call enquiry reply handling failed (continuing with normal flow):', callEnquiryErr.message);
   }
 
   // Agent self-registration: a "join as agent" message (or a follow-up in

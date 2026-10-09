@@ -26,6 +26,7 @@
 // not tenant matching).
 const { listCalls, listInboundCalls } = require('./wayneRingService');
 const { normalizePhone } = require('../utils/phone');
+const { processCallEnquiry } = require('./callEnquiryService');
 
 const MATCH_WINDOW_HOURS = 6; // how long after an outbound call was triggered we'll still consider a WayneRing record a match
 
@@ -108,6 +109,42 @@ async function syncOutboundCalls(knex) {
 }
 
 /**
+ * WayneRing phoneNumberIds of the shared Plotraa line(s) — numbers that
+ * belong to the platform rather than to one dealer. A call on one of these
+ * has no tenant: it is the voice counterpart of a buyer messaging the
+ * shared WhatsApp number, matched across every dealer's listings
+ * (callEnquiryService.js). Without this, such a call could only land in
+ * wayne_ring_unmatched_calls.
+ */
+function platformInboundNumberIds() {
+  return new Set(
+    String(process.env.WAYNERING_PLATFORM_INBOUND_NUMBER_IDS || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+}
+
+// An inbound call with no endedAt is still in progress — unless it is this
+// old, in which case WayneRing never received Vapi's end-of-call report and
+// it will not change any more; sync it as-is rather than leave it out forever.
+const ABANDONED_CALL_MINUTES = 30;
+
+function isCallFinished(call, now = new Date()) {
+  if (call.endedAt) return true;
+  const started = new Date(call.startedAt || call.createdAt);
+  if (Number.isNaN(started.getTime())) return true; // no usable timestamps at all — nothing to wait for
+  return now.getTime() - started.getTime() > ABANDONED_CALL_MINUTES * 60000;
+}
+
+// WayneRing's InboundCall row names this field callerNumber (see
+// aivoicebackend prisma/schema.prisma). The older names are kept only as
+// defensive fallbacks.
+function callerNumberOf(call) {
+  return call.callerNumber || call.callerPhone || call.from || call.phone || null;
+}
+
+/**
  * WayneRing has no concept of Plotra tenants/leads at all — an inbound call
  * only reaches Plotra's DB by resolving which dealer's forwarded number it
  * came in on (tenant_configs.wayne_ring_inbound_number_id), then matching/
@@ -115,30 +152,60 @@ async function syncOutboundCalls(knex) {
  * a tenant, the call is NOT silently dropped — it's recorded in
  * wayne_ring_unmatched_calls for manual reconciliation, since ai_voice_calls
  * structurally requires a tenant_id (correctly, for every other row in it).
+ *
+ * Calls still in progress are skipped until they finish: writing the row
+ * mid-call recorded a null outcome and a null duration that no later sync
+ * ever corrected (the call was "already known" from then on), which also
+ * under-counted the tenant's calling minutes.
+ *
+ * Every finished call that resolves to a dealer or to the shared platform
+ * line is then handed to callEnquiryService (after this transaction
+ * commits — it makes a network call) to capture what the caller wanted and
+ * WhatsApp them matching listings.
  */
 async function syncInboundCalls(knex) {
-  return knex.transaction(async (trx) => {
+  const enquiryCandidates = [];
+
+  const result = await knex.transaction(async (trx) => {
     await trx.raw("SELECT set_config('app.is_service_context', 'true', true)");
 
     const calls = await listInboundCalls();
+    const platformNumberIds = platformInboundNumberIds();
     let created = 0;
     let unmatched = 0;
     let alreadyKnown = 0;
+    let inProgress = 0;
+    let platform = 0;
 
     for (const call of calls) {
       const providerCallId = String(call.id);
 
+      if (!isCallFinished(call)) { inProgress++; continue; }
+
       const existing = await trx('ai_voice_calls').where({ provider_call_id: providerCallId }).first();
-      if (existing) { alreadyKnown++; continue; }
+      if (existing) {
+        alreadyKnown++;
+        enquiryCandidates.push({ call, tenantId: existing.tenant_id, leadId: existing.lead_id });
+        continue;
+      }
       const existingUnmatched = await trx('wayne_ring_unmatched_calls').where({ provider_call_id: providerCallId }).first();
       if (existingUnmatched) { alreadyKnown++; continue; }
 
       const calledNumberId = call.phoneNumberId || call.toNumberId || call.numberId || null;
+
+      // Shared platform line: no tenant, no ai_voice_calls row (that table
+      // requires one) — the call_enquiries row is its record.
+      if (calledNumberId && platformNumberIds.has(String(calledNumberId))) {
+        platform++;
+        enquiryCandidates.push({ call, tenantId: null, leadId: null });
+        continue;
+      }
+
       const tenantConfig = calledNumberId
         ? await trx('tenant_configs').where({ wayne_ring_inbound_number_id: calledNumberId }).first()
         : null;
 
-      const callerPhoneRaw = call.callerPhone || call.from || call.phone;
+      const callerPhoneRaw = callerNumberOf(call);
 
       if (!tenantConfig) {
         await trx('wayne_ring_unmatched_calls').insert({
@@ -153,7 +220,13 @@ async function syncInboundCalls(knex) {
       }
 
       const callerPhone = normalizePhone(callerPhoneRaw);
-      let lead = await trx('leads').where({ tenant_id: tenantConfig.tenant_id, phone: callerPhone }).first();
+      // Withheld caller ID: `where({ phone: null })` used to match the first
+      // lead of ANY kind that happened to have no phone (a web-chat lead, an
+      // imported one…) and hang this call on it. Such calls now share one
+      // dedicated anonymous-caller lead per dealer instead.
+      let lead = callerPhone
+        ? await trx('leads').where({ tenant_id: tenantConfig.tenant_id, phone: callerPhone }).first()
+        : await trx('leads').where({ tenant_id: tenantConfig.tenant_id, source: 'ai_call_inbound' }).whereNull('phone').first();
       if (!lead) {
         [lead] = await trx('leads').insert({
           tenant_id: tenantConfig.tenant_id,
@@ -178,10 +251,37 @@ async function syncInboundCalls(knex) {
         synced_at: trx.fn.now(),
       });
       created++;
+      enquiryCandidates.push({ call, tenantId: tenantConfig.tenant_id, leadId: lead.id });
     }
 
-    return { created, unmatched, alreadyKnown };
+    return { created, unmatched, alreadyKnown, inProgress, platform };
   });
+
+  result.enquiries = await processEnquiryCandidates(knex, enquiryCandidates);
+  return result;
 }
 
-module.exports = { syncOutboundCalls, syncInboundCalls, MATCH_WINDOW_HOURS, TERMINAL_CALL_STATUSES };
+/**
+ * Runs callEnquiryService over the calls the sync just resolved. Each call
+ * is independent: one failure (e.g. the extraction API timing out) is
+ * logged and leaves that call unprocessed for the next tick — it never
+ * fails the sync, whose ai_voice_calls writes are already committed.
+ */
+async function processEnquiryCandidates(knex, candidates) {
+  const counts = {};
+  for (const candidate of candidates) {
+    let status;
+    try {
+      // Plain knex, not a transaction: this awaits the extraction API, and a
+      // pooled connection should not sit open across a network call.
+      ({ status } = await processCallEnquiry(knex, candidate));
+    } catch (err) {
+      console.error(`[wayneRingSync] call enquiry processing failed for call ${candidate.call?.id} (will retry next sync):`, err.message);
+      status = 'error';
+    }
+    if (status !== 'already_processed') counts[status] = (counts[status] || 0) + 1;
+  }
+  return counts;
+}
+
+module.exports = { syncOutboundCalls, syncInboundCalls, isCallFinished, callerNumberOf, platformInboundNumberIds, MATCH_WINDOW_HOURS, TERMINAL_CALL_STATUSES };
