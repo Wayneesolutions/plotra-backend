@@ -637,6 +637,7 @@ async function getTenantDetail(req, res) {
         'tenants.id', 'tenants.business_name', 'tenants.plan', 'tenants.status',
         'tenants.whatsapp_mode', 'tenants.subscription_status', 'tenants.current_period_end',
         'tenants.created_at',
+        'tenants.agent_rating', 'tenants.agent_experience_years', 'tenants.rera_certified',
         'plans.label as plan_label', 'plans.price_inr as plan_price_inr'
       )
       .where('tenants.id', id)
@@ -702,6 +703,9 @@ async function getTenantDetail(req, res) {
         subscriptionStatus: tenant.subscription_status,
         currentPeriodEnd: tenant.current_period_end,
         createdAt: tenant.created_at,
+        agentRating: tenant.agent_rating != null ? parseFloat(tenant.agent_rating) : null,
+        agentExperienceYears: tenant.agent_experience_years,
+        reraCertified: !!tenant.rera_certified,
         cities,
         primaryCode: cities[0]?.code || null,
       },
@@ -996,6 +1000,51 @@ async function updateTenant(req, res) {
 }
 
 /**
+ * PATCH /api/v1/admin/tenants/:id/agent-profile
+ * Body: { agent_rating?: number 0-5 | null, agent_experience_years?: int >= 0 | null,
+ *         rera_certified?: boolean }
+ * Public agent profile on property pages; rating is admin-set for now.
+ */
+async function updateTenantAgentProfile(req, res) {
+  const knex = req.dbTrx || req.app.get('db');
+  const { id } = req.params;
+  const { agent_rating, agent_experience_years, rera_certified } = req.body || {};
+  const patch = {};
+  const bad = (message) => res.status(400).json({ error: { code: 'VALIDATION_ERROR', message } });
+
+  if (agent_rating !== undefined) {
+    if (agent_rating === null) patch.agent_rating = null;
+    else {
+      const r = Number(agent_rating);
+      if (!Number.isFinite(r) || r < 0 || r > 5) return bad('Rating must be between 0 and 5.');
+      patch.agent_rating = Math.round(r * 10) / 10;
+    }
+  }
+  if (agent_experience_years !== undefined) {
+    if (agent_experience_years === null) patch.agent_experience_years = null;
+    else {
+      const y = Number(agent_experience_years);
+      if (!Number.isInteger(y) || y < 0 || y > 80) return bad('Experience must be a whole number of years (0-80).');
+      patch.agent_experience_years = y;
+    }
+  }
+  if (rera_certified !== undefined) {
+    if (typeof rera_certified !== 'boolean') return bad('rera_certified must be true or false.');
+    patch.rera_certified = rera_certified;
+  }
+  if (!Object.keys(patch).length) return bad('Nothing to update.');
+
+  try {
+    const n = await knex('tenants').where({ id }).update({ ...patch, updated_at: knex.fn.now() });
+    if (!n) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Tenant not found.' } });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to update agent profile:', error);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to update agent profile.' } });
+  }
+}
+
+/**
  * PUT /api/v1/admin/tenants/:id/cities
  * Body: { city_ids: number[], primary_city_id?: number }
  * New cities get a new city-wise code; removed cities keep their code
@@ -1064,6 +1113,7 @@ async function listPublicCities(req, res) {
 }
 
 module.exports = {
+  updateTenantAgentProfile,
   updateTenant,
   updateTenantCities,
   updateAgentCities,

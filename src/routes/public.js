@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getPublicListing, logVisit, capturePublicLead, updateListingLocation } = require('../controllers/publicListingController');
+const { submitSellerLead } = require('../controllers/sellerLeadController');
 const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
 const { submitAccessRequest, listPublicCities } = require('../controllers/adminController');
 // Phase 6 — monetization
@@ -61,6 +62,15 @@ router.get('/listings/:slug/builder-profile', publicReadLimiter, getPublicBuilde
  * @access  Public
  */
 router.post('/request-access', publicWriteLimiter, submitAccessRequest);
+
+/**
+ * @route   POST /api/v1/public/sell-property
+ * @desc    Visitors of the buyer site submit their own property for sale.
+ *          Lands in the super-admin seller-leads queue, which forwards it
+ *          to a dealer.
+ * @access  Public
+ */
+router.post('/sell-property', publicWriteLimiter, submitSellerLead);
 
 /**
  * @route   GET /api/v1/public/cities

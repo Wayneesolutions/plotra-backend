@@ -18,6 +18,7 @@ const {
   updateTenant,
   updateTenantCities,
   updateAgentCities,
+  updateTenantAgentProfile,
 } = require('../controllers/adminController');
 const {
   listAdPlacements,
@@ -33,6 +34,7 @@ const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../contr
 const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGeoReviewController');
 // NEW — marketplace buyer search lead-delivery tracking (Phase 1, no billing)
 const { getMarketplaceLeadsSummary } = require('../controllers/adminMarketplaceLeadsController');
+const { listSellerLeadsAdmin, assignSellerLead, updateSellerLead } = require('../controllers/sellerLeadController');
 const { getCallEnquiriesAdmin } = require('../controllers/callEnquiryController');
 // NEW — agent payment/subscription system
 const {
@@ -225,6 +227,25 @@ router.patch('/listings/:id/geo-review', approveGeoReview);
  *          Tracking only — Phase 1, no billing wired up yet.
  */
 router.get('/marketplace-leads', getMarketplaceLeadsSummary);
+
+/**
+ * @route   PATCH /api/v1/admin/tenants/:id/agent-profile
+ * @desc    Set the public agent profile shown on property pages.
+ *          Body: { agent_rating (0-5|null), agent_experience_years (int|null), rera_certified (bool) }
+ */
+router.patch('/tenants/:id/agent-profile', updateTenantAgentProfile);
+
+/**
+ * @route   GET /api/v1/admin/seller-leads
+ * @desc    "Sell your property" submissions from the public site. ?status=new|assigned|closed
+ * @route   PATCH /api/v1/admin/seller-leads/:id/assign
+ * @desc    Forward to a dealer. Body: { tenant_id, admin_notes? }
+ * @route   PATCH /api/v1/admin/seller-leads/:id
+ * @desc    Body: { status?: 'new'|'closed', admin_notes? }
+ */
+router.get('/seller-leads', listSellerLeadsAdmin);
+router.patch('/seller-leads/:id/assign', assignSellerLead);
+router.patch('/seller-leads/:id', updateSellerLead);
 
 /**
  * @route   GET /api/v1/admin/call-enquiries
