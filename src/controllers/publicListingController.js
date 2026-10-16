@@ -60,6 +60,9 @@ async function getPublicListing(req, res) {
         'listings.public_slug',
         'tenants.business_name as dealer_business_name',
         'tenants.whatsapp_number as dealer_whatsapp_number',
+        'tenants.agent_rating',
+        'tenants.agent_experience_years',
+        'tenants.rera_certified',
         'tenant_wa.whatsapp_number as dedicated_whatsapp_number',
         'assigned_agent.phone as assigned_agent_phone',
         'assigned_agent.name as assigned_agent_name',
@@ -157,6 +160,13 @@ async function getPublicListing(req, res) {
         businessName: listing.dealer_business_name,
         agentName: listing.assigned_agent_name || null,
         whatsappDigits: dealerWhatsappDigits || null
+      },
+      // Shown right after location/map on the property page. No name by
+      // design — rating, experience and RERA status only.
+      agentProfile: {
+        rating: listing.agent_rating != null ? parseFloat(listing.agent_rating) : null,
+        experienceYears: listing.agent_experience_years != null ? listing.agent_experience_years : null,
+        reraCertified: !!listing.rera_certified
       }
     });
 
