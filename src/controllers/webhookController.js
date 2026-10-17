@@ -7,7 +7,8 @@ const { handleAgentReceiptIntent, handleAgentReceiptPhoto } = require('./agentPa
 const { isReceiptSubmissionIntent, tryHandlePackageSelectionReply } = require('../services/agentPaymentService');
 const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNumberService');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
-const { handleBuyerSearch } = require('../services/buyerSearchService');
+const { handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply } = require('../services/buyerSearchService');
+const { routeAgentText } = require('../services/agentIntentService');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('../services/listingStatusCheckService');
 const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
@@ -38,6 +39,21 @@ const vocallmChatQueue = new Queue('vocallm-chat-processor', { connection: redis
  * no relevant listings found or the message isn't a property search.
  */
 async function searchDealerListings(knex, tenantId, incomingText) {
+  // Understand the buyer's message with the same model the marketplace
+  // search uses ("koi 200 gaj plot hai dugri side?", typos, Punjabi/Hindi),
+  // scoped to THIS dealer's inventory. If the model is unavailable or says
+  // it isn't a search, fall through to the original keyword check below.
+  try {
+    const intent = await extractBuyerIntent(incomingText);
+    if (intent) {
+      const matches = await findMatchingListings(knex, intent, { tenantId });
+      if (matches.length) return formatSearchReply(matches, intent);
+      // No exact match — still show what this dealer has rather than a dead end.
+    }
+  } catch (err) {
+    console.error('searchDealerListings: AI intent failed, using keyword fallback:', err.message);
+  }
+
   const text = incomingText.toLowerCase();
 
   // Quick intent check — must look like a property query, not a greeting.
@@ -267,12 +283,27 @@ async function handleInboundWhatsApp(req, res) {
       });
     }
 
+    // Natural-language routing (agentIntentService.js): figures out what a
+    // free-text message is actually asking for — "meri listings dikhao",
+    // "model town wala plot bik gaya", "plan kitne ka hai", "hello" — instead
+    // of feeding everything into listing intake. Falls back to the exact
+    // same intake call as before on any error/low confidence.
+    const intentDecision = await routeAgentText(knex, { agentUser, incomingText: incomingText.trim() });
+    if (intentDecision.handled) {
+      return res.status(200).json({ success: true, agentIntent: intentDecision.route });
+    }
+    if (intentDecision.delegate === 'receipt') {
+      return handleAgentReceiptIntent({ knex, agentUser, res });
+    }
+
     return handleAgentIntakeMessage({
       knex,
       agentUser,
       incomingText: incomingText.trim(),
       bspMessageId: bspThreadRef, // this field is the individual WhatsApp message id (see parseInboundPayload)
       res,
+      forceApproval: intentDecision.forceApproval,
+      forceNewListing: intentDecision.forceNewListing,
     });
   }
 

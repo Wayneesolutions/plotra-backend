@@ -222,4 +222,4 @@ async function handleBuyerSearch(knex, { incomingText, buyerPhone }) {
   return { replyText: formatSearchReply(listings, intent), matchCount: listings.length };
 }
 
-module.exports = { handleBuyerSearch, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl };
+module.exports = { handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl };

@@ -229,7 +229,14 @@ async function runWithLiveDraftRaceRetry(knex, txFn) {
  * already uses) — never inside it, since a worker could pick up the job
  * and read DB state before an uncommitted transaction is visible to it.
  */
-async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMessageId, res }) {
+async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMessageId, res, forceApproval = false, forceNewListing = false }) {
+  // forceApproval / forceNewListing come from agentIntentService.js's
+  // natural-language classifier (webhookController.js). They only WIDEN the
+  // existing exact/substring keyword checks below — e.g. "haan bilkul sahi
+  // hai, publish kar do" now counts as approval — and every downstream
+  // status guard (awaiting_approval lock, listing_id checks) still applies.
+  const isApproval = (text) => forceApproval || isApprovalReply(text);
+  const isNewListing = (text) => forceNewListing || isNewListingIntent(text);
   try {
     // Peek (no lock) at whether this agent currently has a draft sitting in
     // awaiting_approval. If so, and this isn't a plain "yes", we need to
@@ -243,7 +250,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
     // inside the transaction; this is discarded if the locked read finds
     // the status already moved on.
     let awaitingApprovalContext = null;
-    if (!isApprovalReply(incomingText)) {
+    if (!isApproval(incomingText)) {
       const draftPeek = await knex('agent_listing_drafts')
         .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id, status: 'awaiting_approval' })
         .first();
@@ -253,7 +260,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         // a new listing — no property details to extract, no point calling
         // the extraction API. isNewListingIntent uses substring matching on
         // phrases like "new listing", "naya property", "list something new".
-        if (isNewListingIntent(incomingText)) {
+        if (isNewListing(incomingText)) {
           awaitingApprovalContext = { hasInfo: false, differentProperty: false, isNewListingIntent: true };
         } else try {
           // Fetch the listing's current values FIRST and feed them to
@@ -363,7 +370,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       // listing linked to this draft, never treat it as new listing text.
       // Also handles pending (still geocoding) — tell agent to wait rather
       // than appending "yes" to accumulated_text and causing a broken loop.
-      if (isApprovalReply(incomingText) && draft.listing_id) {
+      if (isApproval(incomingText) && draft.listing_id) {
         const linkedListing = await trx('listings')
           .where({ id: draft.listing_id })
           .whereIn('status', ['awaiting_approval', 'pending'])
@@ -404,7 +411,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       }
 
       if (draft.status === 'awaiting_approval') {
-        if (isApprovalReply(incomingText)) {
+        if (isApproval(incomingText)) {
           await trx('agent_draft_messages').insert({
             draft_id: draft.id,
             direction: 'inbound',
@@ -561,7 +568,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       // draft has nothing in it yet (brand new, empty accumulated_text, no
       // listing) — there's nothing to protect from contamination, and
       // abandoning+recreating an empty draft would just be churn.
-      if (isNewListingIntent(incomingText) && (draft.accumulated_text || draft.listing_id)) {
+      if (isNewListing(incomingText) && (draft.accumulated_text || draft.listing_id)) {
         await trx('agent_listing_drafts')
           .where({ id: draft.id })
           .update({ status: 'abandoned', updated_at: trx.fn.now() });
