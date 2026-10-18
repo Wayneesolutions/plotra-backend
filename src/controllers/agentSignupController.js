@@ -27,6 +27,10 @@ const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { sendPackageSelectionPrompt } = require('../services/agentPaymentService');
 const { setAgentCities, CityValidationError } = require('../services/tenantCityService');
+const { resolveTenantForSignup } = require('../services/agentSignupService');
+// Lazy: assistantService pulls in the messaging queue; keeps this file's
+// load order unchanged.
+const handleWithAssistant = (...a) => require('../services/assistantService').handleWithAssistant(...a);
 
 // Same fail-fast producer config used throughout (webhookController.js,
 // agentIntakeController.js) — called from an inbound webhook request, not
@@ -97,25 +101,23 @@ async function enqueueSignupExtractJob(signupId) {
   }
 }
 
-/**
- * Independent copy of webhookController.js's buyer-path tenant resolution
- * (phone_number_id -> whatsapp_number -> oldest-active-tenant fallback).
- * Deliberately NOT extracted/shared from that file — the buyer path stays
- * completely untouched, at the cost of this small duplication.
- */
-async function resolveTenantForSignup(knex, { receivingPhoneNumberId, receivingNumber }) {
-  let tenant = null;
+// resolveTenantForSignup lives in agentSignupService.js (shared with the
+// conversational joining flow).
 
-  if (receivingPhoneNumberId) {
-    tenant = await knex('tenants').where({ phone_number_id: receivingPhoneNumberId, status: 'active' }).first();
-  }
-  if (!tenant && receivingNumber) {
-    tenant = await knex('tenants').where({ whatsapp_number: receivingNumber, status: 'active' }).first();
-  }
-  if (!tenant) {
-    tenant = await knex('tenants').where({ status: 'active' }).orderBy('created_at', 'asc').first();
-  }
-  return tenant;
+/**
+ * Sent the moment an agent is approved: what to do first, in their language.
+ * `credentials` only on the super-admin path (the owner path shows them to
+ * the owner instead). The package menu follows as a separate message.
+ */
+function buildAgentWelcomeMessage({ name, lang, credentials }) {
+  const login = credentials
+    ? (lang === 'en'
+        ? `\n\n*Dashboard login* (optional, at plotraa.com):\n📧 ${credentials.email}\n🔑 ${credentials.password}\nPlease change the password after your first login.`
+        : `\n\n*Dashboard login* (zaroori nahi, plotraa.com pe):\n📧 ${credentials.email}\n🔑 ${credentials.password}\nPehli baar login karke password badal lena.`)
+    : '';
+  return lang === 'en'
+    ? `✅ *Welcome to Plotraa, ${name}!* Your agent account is approved.\n\n*Your first listing, in 3 steps:*\n1. Send the property details here: area, type, size, price (text or a voice note 🎤)\n2. Share the exact location 📍 when asked\n3. Check the preview link and reply *"yes"* to publish\n\nNext, choose your plan from the message below. Any question, just ask here in your own words.${login}`
+    : `✅ *Plotraa mein swagat hai, ${name} ji!* Aapka agent account approve ho gaya hai.\n\n*Pehli listing, 3 steps mein:*\n1. Property ki details yahan bhejo: area, type, size, price (likh ke ya voice note 🎤)\n2. Pucchne pe exact location 📍 share karo\n3. Preview link check karke *"haan"* reply karo, listing live\n\nAb neeche wale message se apna plan chun lo. Koi bhi sawaal ho, yahin apne shabdon mein pooch lo.${login}`;
 }
 
 function buildStillPendingMessage(lang) {
@@ -143,6 +145,23 @@ async function handleAgentSignupMessage({ knex, phone, leadName, incomingText, r
     .first();
 
   if (!isTrigger && !existingSignup) return false; // not a signup conversation
+
+  // Conversational joining (assistantService.js + agentSignupService.js):
+  // answers questions asked mid-signup, collects name/area from whatever
+  // they say, and tells them exactly what's still needed. The step-by-step
+  // path below is only the fallback when the assistant is unavailable.
+  const assistantReply = await handleWithAssistant(knex, {
+    audience: 'visitor',
+    phone: normalizedPhone,
+    name: leadName && leadName !== 'Visitor' ? leadName : null,
+    text: incomingText,
+    receiving: { receivingPhoneNumberId, receivingNumber },
+    startSignup: isTrigger,
+  });
+  if (assistantReply.handled) {
+    res.status(200).json({ success: true, assistant: assistantReply.action });
+    return true;
+  }
 
   try {
     if (existingSignup && existingSignup.name && existingSignup.address) {
@@ -292,6 +311,16 @@ async function approveAgentSignup(req, res) {
         .update({ status: 'approved', updated_at: trx.fn.now() });
     });
 
+    try {
+      await enqueueAgentWhatsappSend({
+        tenantId: tenant_id,
+        phone: normalizedPhone,
+        messageBody: buildAgentWelcomeMessage({ name: signup.name, lang: detectReplyLanguage(signup.accumulated_text) }),
+      });
+    } catch (err) {
+      console.error('Failed to send agent welcome message (non-fatal):', err.message);
+    }
+
     // Payment system onboarding step — sends the package menu over
     // WhatsApp so the agent can pick one whenever they're ready. Best-effort:
     // this path doesn't send any other WhatsApp notification today (see
@@ -428,15 +457,12 @@ async function approveAgentSignupAdmin(req, res) {
       await trx('pending_agent_signups').where({ id }).update({ status: 'approved', updated_at: trx.fn.now() });
     });
 
-    // Notify agent via WhatsApp
-    const approvalMessage =
-      `✅ *Congratulations, ${signup.name}!*\n\n` +
-      `Your request to join as a Plotraa agent has been *approved*.\n\n` +
-      `You can now send property details to this number to create listings.\n\n` +
-      `*Your login credentials:*\n` +
-      `📧 Email: ${placeholderEmail}\n` +
-      `🔑 Password: ${tempPassword}\n\n` +
-      `Please change your password after first login at plotraa.com`;
+    // Notify agent via WhatsApp: welcome + first steps + login.
+    const approvalMessage = buildAgentWelcomeMessage({
+      name: signup.name,
+      lang: detectReplyLanguage(signup.accumulated_text),
+      credentials: { email: placeholderEmail, password: tempPassword },
+    });
 
     await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: normalizedPhone, messageBody: approvalMessage });
 
@@ -496,6 +522,7 @@ async function rejectAgentSignupAdmin(req, res) {
 }
 
 module.exports = {
+  buildAgentWelcomeMessage,
   handleAgentSignupMessage,
   listAgentSignups,
   approveAgentSignup,

@@ -462,6 +462,7 @@ async function handleInboundWhatsApp(req, res) {
       name: leadName && leadName !== 'Visitor' ? leadName : null,
       text: incomingText.trim(),
       tenantId: receivingDealer?.id || null,
+      receiving: { receivingPhoneNumberId, receivingNumber },
     });
     if (assistantReply.handled) {
       return res.status(200).json({ success: true, assistant: assistantReply.action });

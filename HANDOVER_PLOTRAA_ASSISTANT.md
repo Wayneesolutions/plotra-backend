@@ -14,6 +14,15 @@ A conversational WhatsApp assistant that talks like a person instead of sending 
 
 It only talks. Listing, approving, marking sold and payments stay with the existing handlers; the assistant tells people the exact words to send.
 
+### First message and joining (the most important part)
+- **First message from anyone** (even just "hi") on the Plotraa number gets a short welcome: what Plotraa is, and the three paths (dealer → just say you want to join; buyer → tell type/area/budget; owner → tell type/area/price). If the first message already shows what they want, it skips the menu and helps directly. A dealer's own number greets on behalf of that dealer.
+- **Joining is not tied to a keyword anymore.** "main property dealer hoon", "mujhe bhi listing daalni hai", "kaise judein?" all start it ("join as agent" still works). The assistant explains what happens next; the system (not the AI) adds the exact line of what's still needed: full name and the area/city they work in. Name/area are taken from whatever they say, read by the assistant and cross-checked by the existing signup extractor, so nobody is asked twice.
+- **Questions while joining are answered** ("kitna kharcha hai?", "kya karna padega?") and followed by a one-line reminder of what's still needed. Once both are in, they get "✅ Ho gaya! … team ko approval ke liye bhej diya" and the request appears in Admin → Agent Signups as before.
+- After submitting, the assistant knows the request is pending and answers accordingly (no restarting). A previously rejected applicant is handled kindly and routed to the team (support request) instead of a new signup.
+- **On approval** the agent gets a guided welcome in their language: the 3 steps for the first listing (details/voice note → location pin → "haan" on the preview), that they can ask anything in their own words, plus the dashboard login (super-admin path); the plan menu follows as before.
+- Fallback: if the AI is unavailable, the old step-by-step signup runs unchanged.
+- Not changed: the separate onboarding-number form (`WHATSAPP_ONBOARDING_NUMBER`, `whatsappSignupService.js`), used only if that env var is set.
+
 ### Rules built into the prompt (`src/assistant/plotraaKnowledge.js`)
 - Guide, not salesperson: answers what's asked, at most one gentle next step, no pressure or urgency.
 - Plans, prices and discounts come **live from the `plans` table** (same as the website/admin Plans tab). Everyone gets the same plans; it never invents or negotiates a discount, trial or refund.
@@ -38,8 +47,8 @@ Raised when an agent reports a problem/complaint or asks for a person, when a ne
 - Not changed: the "join as agent" signup flow (still step by step), lead threads with buyers who came from a listing link (existing listing AI), receipts, buttons, photos, pins.
 
 ## Files
-New: `src/services/assistantService.js`, `src/assistant/plotraaKnowledge.js`, `src/services/supportRequestService.js`, `src/controllers/supportRequestController.js`, migration `20261018_02_assistant_and_support_requests.js`, `test/assistantService.test.js`.
-Changed: `agentIntentService.js` (+ tests), `webhookController.js`, `agentMessagingService.js` (template passthrough), `emailService.js` (alert email), `routes/admin.js`, `.env.example`.
+New: `src/services/assistantService.js`, `src/assistant/plotraaKnowledge.js`, `src/services/agentSignupService.js`, `src/services/supportRequestService.js`, `src/controllers/supportRequestController.js`, migration `20261018_02_assistant_and_support_requests.js`, `test/assistantService.test.js`.
+Changed: `agentIntentService.js` (+ tests), `agentSignupController.js` (assistant-first joining, welcome on approval), `webhookController.js`, `agentMessagingService.js` (template passthrough), `emailService.js` (alert email), `routes/admin.js`, `.env.example`.
 Frontend: `src/components/AdminSupportRequests.jsx` (new), `AdminPanel.jsx` (tab).
 
 ## Config
@@ -62,9 +71,10 @@ Cost: one GPT-4o-mini call per assistant reply, roughly ₹0.05–0.15 (bigger p
 3. `pm2 restart all --update-env`. Deploy the frontend for the Support tab.
 
 ## What was verified
-- `npm test`: 107/107 (new: output parsing, plan formatting, no-hard-sell/same-price prompt rules, trial text, alert text, support-keyword fallback, new routing).
+- `npm test`: 111/111 (new: joining follow-ups, approval welcome, output parsing, plan formatting, no-hard-sell/same-price prompt rules, trial text, alert text, support-keyword fallback, new routing).
 - Full migration chain on an empty Postgres 16 (56) + `down`/`up` of the new one.
 - End to end against real Postgres + Redis with OpenAI mocked: agent question answered with live plans and their context; follow-up carries conversation memory; agent problem creates one support request and 2 template alerts; a repeat bumps it (count 2, upgraded to complaint) without re-alerting; an owner on the platform number via the webhook creates a seller lead; a dealer's customer asking for a call creates a lead for that dealer and no support alert; with the AI down, "call karo" still reaches the team while a plain question falls back to the old reply; admin list/detail(conversation)/contacted/closed.
+- Joining end to end (webhook → assistant → signup row → admin queue → approval): "hi" gets the welcome; "main property dealer hoon…" opens a signup and asks name + area in Hinglish; a bare name the AI missed is still captured by the extractor; a cost question mid-signup is answered with the area reminder; the area completes it ("Ho gaya!") and it shows in Admin → Agent Signups; a later "kab approve hoga?" isn't asked anything again; literal "join as agent" always starts; approval sends the 3-step welcome with login; a rejected applicant goes to support without a new signup.
 - Frontend `vite build`; Support tab rendered with sample data in headless Chromium.
 
 ## NOT verified
@@ -73,6 +83,6 @@ Cost: one GPT-4o-mini call per assistant reply, roughly ₹0.05–0.15 (bigger p
 - Support tab inside the real admin panel with a real login.
 
 ## Known limits / follow-ups
-- The "join as agent" signup itself is still a fixed step-by-step form; a question asked in the middle of signup is taken as an answer. Making signup conversational is the next step if wanted.
+- New agents are still filed under the receiving number's tenant, or the oldest active tenant on the shared number (unchanged behaviour); the super-admin reviews every request.
 - The assistant doesn't send follow-ups by itself (no unprompted messages), by design.
 - No automatic hand-back: after the team contacts someone, the assistant keeps answering their messages normally.

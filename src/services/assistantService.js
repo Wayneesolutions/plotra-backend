@@ -27,11 +27,12 @@ const { PRODUCT, RULES, offersText } = require('../assistant/plotraaKnowledge');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { normalizePhone } = require('../utils/phone');
 const { raiseSupportRequest } = require('./supportRequestService');
+const { advanceSignupFromAssistant, describeSignupState, findPendingSignup, isComplete } = require('./agentSignupService');
 
 const enqueueWhatsapp = (...a) => require('./agentMessagingService').enqueueAgentWhatsappSend(...a);
 
 const AUDIENCES = ['agent', 'visitor', 'buyer'];
-const ACTIONS = ['none', 'support', 'callback', 'seller_lead'];
+const ACTIONS = ['none', 'support', 'callback', 'seller_lead', 'start_signup'];
 const HISTORY_TURNS = 10;
 const HISTORY_WINDOW_HOURS = 48;
 const MAX_REPLY_CHARS = 1200;
@@ -118,7 +119,7 @@ async function loadAgentContext(knex, agentUser) {
   ].join('\n');
 }
 
-async function loadBuyerContext(knex, tenantId) {
+async function loadBuyerContext(knex, tenantId, { isFirstMessage } = {}) {
   const [tenant, listingCount, areas] = await Promise.all([
     knex('tenants').where({ id: tenantId }).first('business_name', 'agent_rating', 'agent_experience_years', 'rera_certified'),
     knex('listings').where({ tenant_id: tenantId, status: 'active' }).whereNull('deleted_at').count('id as n').first(),
@@ -129,15 +130,21 @@ async function loadBuyerContext(knex, tenantId) {
     'CONTEXT (this person messaged a DEALER\'s own WhatsApp number; they are most likely that dealer\'s customer)',
     `- Dealer: ${tenant?.business_name || '-'}; rating ${tenant?.agent_rating ?? 'not set'}, experience ${tenant?.agent_experience_years ?? 'not set'} years, RERA ${tenant?.rera_certified ? 'yes' : 'no'}`,
     `- Dealer has ${Number(listingCount?.n || 0)} live listings${areas.length ? `, mostly in: ${areas.map((a) => a.general_area).join(', ')}` : ''}.`,
+    isFirstMessage ? '- This is their FIRST message: greet them on behalf of the dealer and ask what they are looking for (type, area, budget), or if they want to sell.' : null,
     '- Help them describe what they want (type, area, budget, size) so matching listings can be sent, or take a call-back request for this dealer. Do not pitch Plotraa plans to them.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
-const VISITOR_CONTEXT = [
-  'CONTEXT (unknown number on the Plotraa platform WhatsApp)',
-  '- Could be a dealer/agent curious about Plotraa, a buyer looking for property, or an owner wanting to sell. Work out which from what they say; ask one short question if unclear.',
-  '- Dealers: explain honestly how it works and the plans if asked; to join they reply "join as agent". Buyers: ask what they need (type, area, budget). Owners: take property type, area/city and expected price.',
-].join('\n');
+async function loadVisitorContext(knex, { phone, name, isFirstMessage }) {
+  const signupState = await describeSignupState(knex, phone);
+  return [
+    'CONTEXT (unknown number on the Plotraa platform WhatsApp)',
+    isFirstMessage ? '- This is their FIRST message to Plotraa.' : null,
+    name ? `- Their WhatsApp profile name is "${name}" (may be a nickname; don't assume it's their full name).` : null,
+    signupState || '- Could be a dealer/agent curious about Plotraa or wanting to join, a buyer looking for property, or an owner wanting to sell. Work out which from what they say; ask one short question if unclear.',
+    '- Dealers: explain honestly how it works and the plans if asked, and help them join (action "start_signup"). Buyers: ask what they need (type, area, budget). Owners: take property type, area/city and expected price.',
+  ].filter(Boolean).join('\n');
+}
 
 async function loadHistory(knex, phone, audience) {
   const rows = await knex('assistant_messages')
@@ -170,10 +177,12 @@ ${contextText}
 
 Return ONLY JSON:
 {"reply": "the WhatsApp message to send",
+ "reply_language": "en" if they write plain English, otherwise "hi" (Hindi, Punjabi, Hinglish or any mix),
  "action": one of ${JSON.stringify(ACTIONS)},
  "support_kind": "problem" or "complaint" (only when action is "support"),
  "summary": "one line for the Plotraa team describing what this person needs" (required unless action is "none"),
- "seller": {"property_type": string|null, "city": string|null, "locality": string|null, "expected_price": string|null, "size_text": string|null} (only for "seller_lead")}`;
+ "seller": {"property_type": string|null, "city": string|null, "locality": string|null, "expected_price": string|null, "size_text": string|null} (only for "seller_lead"),
+ "signup": {"name": string|null, "area": string|null} (only for "start_signup"; only what they actually said)}`;
 }
 
 /** Pure (unit-tested): validates the model output. Returns null if unusable. */
@@ -190,12 +199,17 @@ function parseAssistantOutput(raw) {
         expected_price: str(parsed.seller.expected_price), size_text: str(parsed.seller.size_text),
       }
     : null;
+  const signup = parsed.signup && typeof parsed.signup === 'object'
+    ? { name: str(parsed.signup.name), area: str(parsed.signup.area) }
+    : null;
   return {
     reply,
     action,
     supportKind: parsed.support_kind === 'complaint' ? 'complaint' : 'problem',
     summary: str(parsed.summary),
+    replyLanguage: parsed.reply_language === 'en' || parsed.reply_language === 'hi' ? parsed.reply_language : null,
     seller,
+    signup,
   };
 }
 
@@ -281,11 +295,14 @@ function fallbackSupportReply(lang) {
  *   agentUser users row (audience 'agent')
  *   tenantId  the dealer whose number was messaged (audience 'buyer')
  *   name      WhatsApp profile name, when known
+ *   receiving { receivingPhoneNumberId, receivingNumber } of the inbound
+ *             message (audience 'visitor'), used to file a new joiner
+ *   startSignup  true when they used an explicit join phrase ("join as agent")
  *
  * Returns { handled: true, action } once a reply is queued, or
  * { handled: false } so the caller can use its old reply.
  */
-async function handleWithAssistant(knex, { audience, phone, text, name = null, agentUser = null, tenantId = null }) {
+async function handleWithAssistant(knex, { audience, phone, text, name = null, agentUser = null, tenantId = null, receiving = {}, startSignup = false }) {
   if (!AUDIENCES.includes(audience) || !text || !text.trim()) return { handled: false };
   const normalizedPhone = normalizePhone(agentUser?.phone || phone) || phone;
   const sendTenantId = agentUser?.tenant_id || tenantId || null;
@@ -301,11 +318,16 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
   }
 
   try {
+    // First contact ever with this number (no assistant chat in any role):
+    // the assistant opens with a short welcome and the three paths.
+    const isFirstMessage = audience !== 'agent'
+      && !(await knex('assistant_messages').where({ phone: normalizedPhone }).first('id'));
+
     const [plans, contextText, history] = await Promise.all([
       loadPlans(knex),
       audience === 'agent' ? loadAgentContext(knex, agentUser)
-        : audience === 'buyer' ? loadBuyerContext(knex, tenantId)
-          : Promise.resolve(VISITOR_CONTEXT),
+        : audience === 'buyer' ? loadBuyerContext(knex, tenantId, { isFirstMessage })
+          : loadVisitorContext(knex, { phone: normalizedPhone, name, isFirstMessage }),
       loadHistory(knex, normalizedPhone, audience),
     ]);
 
@@ -318,14 +340,38 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     const out = parseAssistantOutput(await callModel(messages));
     if (!out) throw new Error('unusable model output');
 
-    const action = await performAction(knex, out, { audience, phone: normalizedPhone, name, text, agentUser, tenantId });
+    let action = await performAction(knex, out, { audience, phone: normalizedPhone, name, text, agentUser, tenantId });
+    let reply = out.reply;
+
+    // Joining as an agent (platform number only). Starts on "start_signup";
+    // once a signup is open, every message goes through here so a name or
+    // area mentioned in passing is never lost. The system, not the model,
+    // adds the "still need X" / "request submitted" line.
+    if (audience === 'visitor') {
+      const convoLang = out.replyLanguage
+        || detectReplyLanguage([...history.filter((m) => m.role === 'user').map((m) => m.content), text].join(' '));
+      const signupStep = await advanceSignupFromAssistant(knex, {
+        phone: normalizedPhone,
+        text,
+        fields: out.signup || {},
+        lang: convoLang,
+        receiving,
+        start: out.action === 'start_signup' || startSignup,
+      });
+      if (signupStep) {
+        if (signupStep.followUp) reply = `${reply}\n\n${signupStep.followUp}`;
+        if (signupStep.justCompleted || out.action === 'start_signup' || startSignup || signupStep.followUp) {
+          action = signupStep.justCompleted ? 'signup_submitted' : 'signup';
+        }
+      }
+    }
 
     await knex('assistant_messages').insert([
       { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'inbound', body: String(text).slice(0, 4000) },
-      { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'outbound', body: out.reply, action },
+      { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'outbound', body: reply, action },
     ]);
 
-    await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: out.reply });
+    await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: reply });
     console.log('[Assistant] %s %s action=%s', audience, normalizedPhone, action);
     return { handled: true, action };
   } catch (err) {

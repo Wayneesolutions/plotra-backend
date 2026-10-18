@@ -78,3 +78,30 @@ test('buildAlertText gives the team everything to call back', () => {
   assert.match(text, /still blocked/);
   assert.match(text, /listing add nahi ho rahi/);
 });
+
+const { signupFollowUp } = require('../src/services/agentSignupService');
+
+test('parseAssistantOutput keeps start_signup and only stated signup fields', () => {
+  const out = parseAssistantOutput(JSON.stringify({ reply: 'Zaroor!', action: 'start_signup', signup: { name: ' Rajesh Kumar ', area: '' } }));
+  assert.strictEqual(out.action, 'start_signup');
+  assert.deepStrictEqual(out.signup, { name: 'Rajesh Kumar', area: null });
+  assert.strictEqual(parseAssistantOutput('{"reply":"hi"}').signup, null);
+});
+
+test('signupFollowUp asks only for what is missing, in the right language', () => {
+  assert.match(signupFollowUp({ name: null, address: null, lang: 'hi' }), /poora naam.*aur.*kis area\/city/);
+  assert.match(signupFollowUp({ name: 'Rajesh', address: null, lang: 'hi' }), /kis area\/city/);
+  assert.doesNotMatch(signupFollowUp({ name: 'Rajesh', address: null, lang: 'hi' }), /naam/);
+  assert.match(signupFollowUp({ name: null, address: 'Ludhiana', lang: 'en' }), /full name/);
+  assert.strictEqual(signupFollowUp({ name: 'A', address: 'B', lang: 'en' }), null);
+  const done = signupFollowUp({ name: 'Rajesh', address: 'Dugri, Ludhiana', justCompleted: true, lang: 'hi' });
+  assert.match(done, /Ho gaya/); assert.match(done, /Rajesh/); assert.match(done, /approval/);
+});
+
+test('system prompt explains flexible joining and the first-message welcome', () => {
+  const prompt = buildSystemPrompt({ audience: 'visitor', contextText: '', plansText: '' });
+  assert.match(prompt, /"start_signup"/);
+  assert.match(prompt, /in ANY wording/);
+  assert.match(prompt, /FIRST MESSAGE/);
+  assert.match(prompt, /Do NOT ask for their name or area yourself/);
+});
