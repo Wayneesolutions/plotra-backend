@@ -45,12 +45,16 @@ async function logAgentOutboundMessage(trx, { draftId, body }) {
  * first real caller. Omit for a normal text send, exactly as before this
  * parameter existed.
  */
-async function enqueueAgentWhatsappSend({ tenantId, phone, messageBody, buttons }) {
+async function enqueueAgentWhatsappSend({ tenantId, phone, messageBody, buttons, template }) {
   await whatsappOutboundQueue.add('send-agent-message', {
     tenantId,
     phone,
     messageBody,
     buttons,
+    // Optional { name, lang, bodyParams }: sends an approved template instead
+    // of free text (whatsappOutboundWorker.js's template branch). Used for
+    // support alerts to team numbers that may be outside the 24h window.
+    ...(template ? { template } : {}),
   }, {
     attempts: 3,
     backoff: { type: 'exponential', delay: 2000 },

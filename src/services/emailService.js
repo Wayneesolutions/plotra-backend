@@ -154,4 +154,18 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
-module.exports = { sendOnboardingEmail, sendPaymentReceiptEmail, sendPasswordResetEmail };
+function escapeHtml(text) {
+  return String(text || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * Team alert when someone needs a human (supportRequestService.js). `text` is
+ * the same plain-text alert sent on WhatsApp; rendered as pre-wrapped HTML.
+ */
+async function sendSupportAlertEmail({ to, subject, text }) {
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;white-space:pre-wrap">${escapeHtml(text).replace(/\*/g, '')}</div>
+<p style="font-family:Arial,sans-serif;font-size:13px"><a href="${APP_URL}/admin">Open the admin panel</a></p>`;
+  return send({ to, subject, html });
+}
+
+module.exports = { sendOnboardingEmail, sendPaymentReceiptEmail, sendPasswordResetEmail, sendSupportAlertEmail };

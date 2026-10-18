@@ -36,6 +36,7 @@ const extractBuyerIntent = (...a) => require('./buyerSearchService').extractBuye
 const findMatchingListings = (...a) => require('./buyerSearchService').findMatchingListings(...a);
 const formatPrice = (...a) => require('./buyerSearchService').formatPrice(...a);
 const buildPublicListingUrl = (...a) => require('./buyerSearchService').buildPublicListingUrl(...a);
+const handleWithAssistant = (...a) => require('./assistantService').handleWithAssistant(...a);
 
 const INTENTS = [
   'listing_info',   // property details, an answer to the bot's question, or a correction
@@ -47,14 +48,16 @@ const INTENTS = [
   'submit_payment', // has paid / wants to send a receipt
   'plan_info',      // asks about packages, price, due date, payment status
   'search_inventory', // looking for a property for a client
-  'help',           // how does this work / what can you do
+  'help',           // asks for the list of commands / what the bot can do
+  'question',       // a real question: how/why something works, what went wrong, what a plan includes
+  'support',        // has a problem, complaint, something not working, or wants to talk to a person
   'greeting',       // hi / hello / sat sri akal / thanks
   'other',          // anything else
 ];
 
 const NON_INTAKE_INTENTS = new Set([
   'my_listings', 'mark_sold', 'mark_available', 'submit_payment', 'plan_info',
-  'search_inventory', 'help', 'greeting', 'other',
+  'search_inventory', 'help', 'question', 'support', 'greeting', 'other',
 ]);
 
 // Confidence needed to route a message AWAY from the listing intake flow.
@@ -119,7 +122,9 @@ Intents:
 - submit_payment: says they have paid or want to send a receipt ("payment kar di", "screenshot bhejta hu").
 - plan_info: asks about packages, charges, due date, or their payment status.
 - search_inventory: looking for a property for a buyer/client ("koi 200 gaj plot hai dugri mein?").
-- help: asks how to use the service or what it can do.
+- help: just asks for the menu / what the bot can do ("help", "kya kya kar sakte ho").
+- question: asks HOW or WHY something works, what went wrong, or for an explanation ("pin kyun chahiye?", "preview link kahan hai?", "leads kaise milte hain?", "multi user plan mein kya milta hai?", "listing live kyun nahi hui?").
+- support: reports a problem or complaint, says something isn't working, is upset, or wants to talk to a person ("kuch nahi chal raha", "payment kar di par approve nahi hua", "call karo mujhe").
 - greeting: only a greeting/thanks/small talk.
 - other: none of the above.
 
@@ -202,7 +207,9 @@ function decideRoute(classification, ctx) {
     // With no listing in progress, "other" still shouldn't open an empty
     // listing draft — reply with help instead. Mid-draft, "other" goes to
     // intake so the existing flow can re-ask its question.
-    if (intent === 'other') return midDraft ? { route: 'intake' } : { route: 'help' };
+    // Idle "other" goes to the conversational assistant, which can actually
+    // talk instead of replying with the fixed menu.
+    if (intent === 'other') return midDraft ? { route: 'intake' } : { route: 'assistant' };
     if (intent === 'greeting' && midDraft) return { route: 'intake' };
     return { route: intent };
   }
@@ -443,6 +450,13 @@ async function routeAgentText(knex, { agentUser, incomingText }) {
         await replyPlanInfo(knex, agentUser, lang); break;
       case 'search_inventory':
         await replyInventorySearch(knex, agentUser, lang, incomingText); break;
+      case 'question':
+      case 'support':
+      case 'assistant': {
+        const answered = await handleWithAssistant(knex, { audience: 'agent', phone: agentUser.phone, text: incomingText, agentUser });
+        if (!answered.handled) await send(agentUser, pick(lang, COPY.help));
+        break;
+      }
       case 'greeting':
         await send(agentUser, pick(lang, COPY.greeting)(agentUser.name ? String(agentUser.name).split(' ')[0] : '')); break;
       case 'help':

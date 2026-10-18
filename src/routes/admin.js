@@ -35,6 +35,7 @@ const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGe
 // NEW — marketplace buyer search lead-delivery tracking (Phase 1, no billing)
 const { getMarketplaceLeadsSummary } = require('../controllers/adminMarketplaceLeadsController');
 const { listSellerLeadsAdmin, assignSellerLead, updateSellerLead } = require('../controllers/sellerLeadController');
+const { listSupportRequests, getSupportRequest, updateSupportRequest } = require('../controllers/supportRequestController');
 const { getCallEnquiriesAdmin } = require('../controllers/callEnquiryController');
 // NEW — agent payment/subscription system
 const {
@@ -246,6 +247,19 @@ router.patch('/tenants/:id/agent-profile', updateTenantAgentProfile);
 router.get('/seller-leads', listSellerLeadsAdmin);
 router.patch('/seller-leads/:id/assign', assignSellerLead);
 router.patch('/seller-leads/:id', updateSellerLead);
+
+/**
+ * @route   GET /api/v1/admin/support-requests
+ * @desc    People the WhatsApp assistant flagged as needing a human
+ *          (agent problems, call-back requests, complaints). ?status=open|contacted|closed
+ * @route   GET /api/v1/admin/support-requests/:id
+ * @desc    One request plus the recent WhatsApp conversation for context.
+ * @route   PATCH /api/v1/admin/support-requests/:id
+ * @desc    Body: { status?: 'open'|'contacted'|'closed', admin_notes? }
+ */
+router.get('/support-requests', listSupportRequests);
+router.get('/support-requests/:id', getSupportRequest);
+router.patch('/support-requests/:id', updateSupportRequest);
 
 /**
  * @route   GET /api/v1/admin/call-enquiries
