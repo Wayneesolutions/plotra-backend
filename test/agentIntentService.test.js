@@ -44,7 +44,15 @@ test('greeting / other do not hijack a listing in progress', () => {
   assert.deepEqual(decideRoute(c('greeting', 0.99), midDraft), { route: 'intake' });
   assert.deepEqual(decideRoute(c('other', 0.99), midDraft), { route: 'intake' });
   assert.deepEqual(decideRoute(c('greeting', 0.9), idle), { route: 'greeting' });
-  assert.deepEqual(decideRoute(c('other', 0.9), idle), { route: 'help' });
+  assert.deepEqual(decideRoute(c('other', 0.9), idle), { route: 'assistant' });
+});
+
+test('questions and problems go to the assistant, but need high confidence mid-draft', () => {
+  assert.deepEqual(decideRoute(c('question', 0.7), idle), { route: 'question' });
+  assert.deepEqual(decideRoute(c('support', 0.7), idle), { route: 'support' });
+  assert.deepEqual(decideRoute(c('question', 0.7), midDraft), { route: 'intake' });
+  assert.deepEqual(decideRoute(c('question', 0.85), midDraft), { route: 'question' });
+  assert.deepEqual(decideRoute(c('support', 0.9), midDraft), { route: 'support' });
 });
 
 test('parseClassification rejects junk and clamps confidence', () => {

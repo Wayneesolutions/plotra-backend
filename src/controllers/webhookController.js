@@ -14,6 +14,7 @@ const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('..
 const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
 const { handleCallEnquiryReply } = require('../services/callEnquiryService');
 const { transcribeVoiceNote, voiceNotUnderstoodMessage } = require('../services/voiceNoteService');
+const { handleWithAssistant } = require('../services/assistantService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -450,7 +451,24 @@ async function handleInboundWhatsApp(req, res) {
       }
     }
 
-    // Not a recognisable property query — send friendly intro.
+    // Not a search: let the Plotraa Assistant talk to them. On the platform
+    // number that's a dealer considering Plotraa, a buyer or an owner who
+    // wants to sell; on a dealer's own number it's that dealer's customer.
+    // It answers questions, takes call-back / sell requests, and falls back
+    // to the fixed intro below if it's unavailable.
+    const assistantReply = await handleWithAssistant(knex, {
+      audience: receivingDealer ? 'buyer' : 'visitor',
+      phone,
+      name: leadName && leadName !== 'Visitor' ? leadName : null,
+      text: incomingText.trim(),
+      tenantId: receivingDealer?.id || null,
+      receiving: { receivingPhoneNumberId, receivingNumber },
+    });
+    if (assistantReply.handled) {
+      return res.status(200).json({ success: true, assistant: assistantReply.action });
+    }
+
+    // Assistant unavailable: friendly fixed intro, as before.
     const lang = detectReplyLanguage(incomingText);
     const coldGreeting = lang === 'en'
       ? `Hi there! 👋 This number is for Plotraa property agents.\n\n• *Looking for a property?* Tell me the area and type (e.g. "plots in Ludhiana") and I'll show you available listings.\n• *Want to list properties as an agent?* Reply: *join as agent*`
