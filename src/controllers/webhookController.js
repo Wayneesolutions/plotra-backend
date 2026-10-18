@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
-const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin } = require('./agentIntakeController');
+const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia } = require('./agentIntakeController');
 const { handleAgentSignupMessage } = require('./agentSignupController');
 const { handleAgentReceiptIntent, handleAgentReceiptPhoto } = require('./agentPaymentController');
 const { isReceiptSubmissionIntent, tryHandlePackageSelectionReply } = require('../services/agentPaymentService');
@@ -13,6 +13,7 @@ const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('../services/listingStatusCheckService');
 const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
 const { handleCallEnquiryReply } = require('../services/callEnquiryService');
+const { transcribeVoiceNote, voiceNotUnderstoodMessage } = require('../services/voiceNoteService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -115,6 +116,11 @@ function parseInboundPayload(body) {
     // property photo, out of scope for now.
     mediaId: value.messages?.[0]?.image?.id || null,
     mediaMimeType: value.messages?.[0]?.image?.mime_type || null,
+    // Voice note / audio file (Meta Cloud API: messages[0].type === 'audio';
+    // `voice: true` marks a recorded voice note vs. a forwarded audio file).
+    // Transcribed into incomingText by handleInboundWhatsApp below.
+    audioId: value.messages?.[0]?.audio?.id || null,
+    audioMimeType: value.messages?.[0]?.audio?.mime_type || null,
     // Meta Cloud API quick-reply button tap: messages[0].type === 'interactive',
     // messages[0].interactive.button_reply.id — ids shaped `available:<listingId>`
     // / `sold:<listingId>` (PR #33 listing status check).
@@ -170,11 +176,32 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid webhook signature.' } });
   }
 
-  const { phone, leadName, incomingText, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng, templateButtonPayload } = parseInboundPayload(req.body);
+  const parsed = parseInboundPayload(req.body);
+  const { phone, leadName, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng, templateButtonPayload, audioId, audioMimeType } = parsed;
+  let { incomingText } = parsed;
 
   const hasLocation = locationLat != null && locationLng != null;
 
-  console.log('[Webhook] parsed phone=%s text=%s media=%s location=%s button=%s', phone || 'null', incomingText || 'null', mediaId || 'null', hasLocation ? `${locationLat},${locationLng}` : 'null', buttonReplyId || 'null');
+  // Voice notes (dealers and buyers): transcribe and treat the transcript as
+  // if it had been typed. Everything below (agent intake, intent routing,
+  // buyer search, lead threads) then works on it unchanged.
+  if (phone && audioId && !incomingText) {
+    const transcript = await transcribeVoiceNote({ mediaId: audioId, mimeType: audioMimeType, download: downloadWhatsAppMedia });
+    if (transcript) {
+      incomingText = transcript;
+    } else {
+      const sender = await knex('users').where({ phone: normalizePhone(phone) }).first();
+      let replyTenantId = sender?.tenant_id || null;
+      if (!sender) {
+        const dealer = await resolveTenantByReceivingNumber(knex, { phoneNumberId: receivingPhoneNumberId, whatsappNumber: receivingNumber }).catch(() => null);
+        replyTenantId = dealer?.id || null;
+      }
+      await enqueueAgentWhatsappSend({ tenantId: replyTenantId, phone, messageBody: voiceNotUnderstoodMessage('hi') });
+      return res.status(200).json({ success: true, voiceNote: 'not_understood' });
+    }
+  }
+
+  console.log('[Webhook] parsed phone=%s text=%s media=%s location=%s button=%s voice=%s', phone || 'null', incomingText || 'null', mediaId || 'null', hasLocation ? `${locationLat},${locationLng}` : 'null', buttonReplyId || 'null', audioId ? 'yes' : 'no');
 
   if (!phone || (!incomingText && !mediaId && !hasLocation && !buttonReplyId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on

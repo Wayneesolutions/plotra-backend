@@ -676,6 +676,24 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
       geoResolutionSource = 'google_only_no_mappls';
     }
 
+    // Agent's own WhatsApp location pin wins over every text-based source
+    // above (geocode, cache, Places, Mappls). The agent is standing at, or
+    // has chosen, the property; the address text is only ever a guess. The
+    // pin arrives here either from a pin shared before the listing existed
+    // (listingService.createListingRecord copies it on insert) or from an
+    // earlier pin on this same listing that a later address correction
+    // re-geocoded around. formattedAddress / generalArea still come from the
+    // address text, which is what the public page shows (area only).
+    const pinnedByAgent = listingData.location_source === 'agent_pin'
+      && listingData.agent_pin_lat != null && listingData.agent_pin_lng != null;
+    if (pinnedByAgent) {
+      lat = Number(listingData.agent_pin_lat);
+      lng = Number(listingData.agent_pin_lng);
+      lowConfidence = false;
+      geoResolutionSource = 'agent_whatsapp_pin';
+      console.log(`[Job ${job.id}] Using agent's WhatsApp location pin (${lat},${lng}) as the final location.`);
+    }
+
     // (Removed 2026-09-24: the super-admin geo-review gate that parked
     // non-house-level WhatsApp listings at status='pending_geo_review'. The
     // automatic pipeline now always sends the preview — see weakLocation
@@ -712,7 +730,7 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
     // Places) decides, and the agent always gets the preview. A weak result
     // additionally asks the agent for a WhatsApp location pin (below) and
     // keeps the "rough guess" warning on the preview.
-    const weakLocation = isWeakLocation({ googleIsHighPrecision, placesMatched, localityCorroborated });
+    const weakLocation = !pinnedByAgent && isWeakLocation({ googleIsHighPrecision, placesMatched, localityCorroborated });
     if (localityCorroborated) lowConfidence = false;
 
     // 2-4. Persist lat/lng/formatted_address, regenerate static satellite/
@@ -811,7 +829,10 @@ const geoWorker = new Worker('geo-enrichment', async (job) => {
         ? await knex('users').where({ id: draftForPinRequest.user_id }).first()
         : null;
 
-      if (agentForPinRequest) {
+      // Already asked for a pin at listing time (agentIntakeWorker.js) and
+      // the agent went ahead without one — don't nag a second time. The
+      // preview's "rough guess, drag the pin" warning still goes out.
+      if (agentForPinRequest && !draftForPinRequest.location_pin_requested_at) {
         const lang = await detectDraftLanguage(knex, draftId);
         const pinRequestBody = lang === 'en'
           ? "📍 We could only place this address approximately. Your preview link is on its way — if you can, also share the property's exact location: tap the ➕/attachment icon, choose *Location*, and drop a pin at the property. The map updates automatically."

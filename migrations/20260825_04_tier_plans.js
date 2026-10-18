@@ -26,6 +26,17 @@
  */
 
 exports.up = async function (knex) {
+  // Fresh-database fix: the rows below set plans.max_whatsapp_numbers, but
+  // that column is only created later (20260830_01_dedicated_whatsapp_numbers.js),
+  // so `migrate:latest` on an empty database stopped here. Create it now
+  // (same definition) when it's missing; 20260830_01 then skips adding it.
+  // Databases that already ran these migrations are unaffected.
+  if (!(await knex.schema.hasColumn('plans', 'max_whatsapp_numbers'))) {
+    await knex.schema.alterTable('plans', (table) => {
+      table.integer('max_whatsapp_numbers').notNullable().defaultTo(1);
+    });
+  }
+
   await knex('plans').insert([
     {
       key: 'tier1',

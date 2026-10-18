@@ -773,6 +773,92 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
  * it releases the listing straight to awaiting_approval instead of making
  * the agent wait on a review that a pin has already resolved.
  */
+/**
+ * A location pin that arrives before the listing row exists. Stored on the
+ * live draft (pending_pin_lat/lng) and handed to createListingRecord by
+ * agentIntakeWorker.js, which then skips its own "send the exact location"
+ * ask. If the agent already sent the address (we're waiting on exactly this
+ * pin), extraction is re-queued so the listing gets created straight away.
+ */
+async function holdPinOnDraft({ knex, agentUser, lat, lng, bspMessageId, res }) {
+  if (!agentUser.can_add_listing) {
+    const blockedBody = 'Your account has a payment pending, so new listings can\'t be added right now — your existing listings stay active. Reply "payment" to submit your receipt once paid.';
+    await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: blockedBody });
+    return res.status(200).json({ success: true, blocked: 'payment' });
+  }
+
+  const outcome = await runWithLiveDraftRaceRetry(knex, async (trx) => {
+    if (bspMessageId) {
+      const dup = await trx('agent_draft_messages')
+        .join('agent_listing_drafts', 'agent_draft_messages.draft_id', 'agent_listing_drafts.id')
+        .where('agent_listing_drafts.user_id', agentUser.id)
+        .andWhere('agent_draft_messages.bsp_message_id', bspMessageId)
+        .first();
+      if (dup) return { noop: true };
+    }
+
+    let draft = await trx('agent_listing_drafts')
+      .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
+      .whereIn('status', LIVE_STATUSES)
+      .forUpdate()
+      .first();
+
+    if (!draft) {
+      [draft] = await trx('agent_listing_drafts')
+        .insert({ tenant_id: agentUser.tenant_id, user_id: agentUser.id, status: 'collecting', accumulated_text: '' })
+        .returning(['id', 'status', 'listing_id', 'accumulated_text']);
+    }
+
+    await trx('agent_listing_drafts')
+      .where({ id: draft.id })
+      .update({ pending_pin_lat: lat, pending_pin_lng: lng, updated_at: trx.fn.now() });
+
+    await trx('agent_draft_messages').insert({
+      draft_id: draft.id,
+      direction: 'inbound',
+      body: `[location pin shared: ${lat},${lng}]`,
+      bsp_message_id: bspMessageId || null,
+    });
+
+    return {
+      draftId: draft.id,
+      hasDetails: Boolean(draft.accumulated_text && draft.accumulated_text.trim()),
+    };
+  });
+
+  if (outcome.noop) return res.status(200).json({ success: true, noop: true });
+
+  // A pin as the very first message has no words to detect a language from;
+  // use whatever this agent last wrote in any earlier listing instead of
+  // defaulting a Hinglish-speaking dealer to English.
+  let lang = await detectDraftLanguage(knex, outcome.draftId);
+  if (!outcome.hasDetails) {
+    const lastWords = await knex('agent_draft_messages')
+      .join('agent_listing_drafts', 'agent_draft_messages.draft_id', 'agent_listing_drafts.id')
+      .where('agent_listing_drafts.user_id', agentUser.id)
+      .andWhere('agent_draft_messages.direction', 'inbound')
+      .whereNot('agent_draft_messages.body', 'like', '[%')
+      .orderBy('agent_draft_messages.created_at', 'desc')
+      .first('agent_draft_messages.body');
+    if (lastWords) lang = detectReplyLanguage(lastWords.body);
+  }
+  const body = outcome.hasDetails
+    ? (lang === 'en'
+        ? '📍 Got the exact location, thanks! Creating your listing now, the preview link is coming.'
+        : '📍 Exact location mil gayi, shukriya! Listing ban rahi hai, preview link aa raha hai.')
+    : (lang === 'en'
+        ? '📍 Got the exact location! Now send the property details: address, type (plot/flat/kothi/commercial) and price.'
+        : '📍 Exact location mil gayi! Ab property ki details bhejein: address, type (plot/flat/kothi/commercial) aur price.');
+
+  await knex.transaction(async (trx) => { await logAgentOutboundMessage(trx, { draftId: outcome.draftId, body }); });
+  await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
+
+  // Address already in: this pin was the last thing we were waiting for.
+  if (outcome.hasDetails) await enqueueExtractJob(outcome.draftId);
+
+  return res.status(200).json({ success: true, pinHeldOnDraft: true });
+}
+
 async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId, res }) {
   try {
     // Most recently active draft with a listing already created — a
@@ -785,15 +871,15 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
       .orderBy('updated_at', 'desc')
       .first();
 
-    const lang = draft ? await detectDraftLanguage(knex, draft.id) : 'hi';
-
     if (!draft) {
-      const body = lang === 'en'
-        ? "I don't have a listing in progress to attach this location to. Start a new listing first, then share the pin."
-        : 'Abhi koi listing in-progress nahi hai jisse yeh location jode. Pehle naya listing shuru karein, phir pin share karein.';
-      await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
-      return res.status(200).json({ success: true, noop: true });
+      // No listing exists yet: this pin belongs to the listing being
+      // collected right now (agentIntakeWorker.js asks for it alongside the
+      // address), or it's the very first thing the agent sent. Hold it on the
+      // draft; createListingRecord copies it onto the listing at insert time.
+      return holdPinOnDraft({ knex, agentUser, lat, lng, bspMessageId, res });
     }
+
+    const lang = await detectDraftLanguage(knex, draft.id);
 
     const listing = await knex('listings').where({ id: draft.listing_id }).first();
     if (!listing) {

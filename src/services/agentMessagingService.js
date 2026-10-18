@@ -69,8 +69,12 @@ async function enqueueAgentWhatsappSend({ tenantId, phone, messageBody, buttons 
  */
 async function detectDraftLanguage(knex, draftId) {
   if (!draftId) return detectReplyLanguage(null);
+  // Skips our own bracketed markers ("[location pin shared: ...]"): they're
+  // logged as inbound but aren't the agent's words, and would otherwise flip
+  // a Hinglish conversation to English replies right after a pin.
   const lastInbound = await knex('agent_draft_messages')
     .where({ draft_id: draftId, direction: 'inbound' })
+    .whereNot('body', 'like', '[%')
     .orderBy('created_at', 'desc')
     .first();
   return detectReplyLanguage(lastInbound?.body);
