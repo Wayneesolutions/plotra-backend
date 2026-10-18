@@ -51,6 +51,33 @@ function buildPreviewLink(publicSlug) {
   return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
 }
 
+/**
+ * Asks the agent for the property's exact location as a WhatsApp location
+ * share, and explains the fallback: no pin is fine, the address gets placed
+ * on the map and the agent can drag the map on the preview link to fix it.
+ * "Send your current location" (a one-time pin) rather than "Share live
+ * location": the WhatsApp Cloud API doesn't deliver live-location shares to
+ * businesses, and a one-time pin carries the same coordinate.
+ */
+function buildLocationPinRequest(lang, { addressIsVague = false } = {}) {
+  if (lang === 'en') {
+    return [
+      '📍 Now send the property\'s *exact location*, so the map pin lands on the right house/plot:',
+      '• *At the property?* Tap ➕ / 📎 → *Location* → *Send your current location*.',
+      '• *Somewhere else?* Tap ➕ / 📎 → *Location*, move the map to the property, put the pin on the exact house/plot and send it.',
+      addressIsVague ? '\nIf you have a plot or house number, send that too.' : '',
+      '\nCan\'t share a location right now? No problem, reply *"no pin"*. We\'ll place it from the address, and on your preview link you can drag the map to move the pin to the right spot.',
+    ].filter(Boolean).join('\n');
+  }
+  return [
+    '📍 Ab property ki *exact location* bhejein, taaki map pe pin bilkul sahi ghar/plot pe lage:',
+    '• *Property pe ho?* ➕ / 📎 dabayein → *Location* → *Send your current location*.',
+    '• *Kahin aur ho?* ➕ / 📎 → *Location*, map ko khiska ke property tak le jaayein, pin ko sahi ghar/plot pe rakh ke bhej dein.',
+    addressIsVague ? '\nPlot ya house number pata ho to woh bhi bhej dein.' : '',
+    '\nAbhi location share nahi kar sakte? Koi baat nahi, *"pin nahi"* reply karein. Hum address se pin lagayenge, aur preview link pe aap map ko drag karke pin sahi jagah set kar sakte ho.',
+  ].filter(Boolean).join('\n');
+}
+
 function fieldQuestionsFor(lang) {
   return lang === 'en' ? FIELD_QUESTIONS_EN : FIELD_QUESTIONS_HI;
 }
@@ -180,40 +207,37 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       return { success: true, missing };
     }
 
-    // Before creating the listing, check if the address is too vague to
-    // geocode precisely. An address with no plot/door/unit number, no named
-    // building, and no pincode will at best return a neighbourhood centroid —
-    // exactly what causes the "pin is always a few meters off" problem.
-    // Ask once for a more specific address; on the next extraction pass,
-    // alreadyAskedPrecision = true and we proceed regardless of their reply
-    // (they may not have a number — don't block indefinitely).
-    const missingFields = (() => {
-      try {
-        const mf = draft.missing_fields;
-        if (!mf) return [];
-        return Array.isArray(mf) ? mf : JSON.parse(mf);
-      } catch { return []; }
-    })();
-    const alreadyAskedPrecision = missingFields.includes('address_precision_asked');
-    const addressHasNumber = /\d/.test(extracted.raw_address || '');
-    const needsPrecision = !alreadyAskedPrecision && !addressHasNumber && !extracted.building_name && !extracted.pincode;
-
-    if (needsPrecision) {
+    // Location pin step. Every WhatsApp listing now asks for the property's
+    // exact location (a WhatsApp location share) once, alongside the
+    // address, before the listing is created. A pin is the most reliable
+    // location signal we have; the address text is only ever a guess (see
+    // geoEnrichmentWorker.js, which lets a pin win over every geocode).
+    //
+    // - Pin already shared (any time, even before the address): skip the
+    //   ask and create the listing with it.
+    // - Not asked yet: ask now (folding in the old "add a plot/door number"
+    //   nudge when the address has none), and wait for the reply.
+    // - Asked already: go ahead with whatever we have. Never block forever;
+    //   an agent who can't share a pin fixes it by dragging the map on the
+    //   preview link instead (the ask message explains that).
+    const hasPendingPin = draft.pending_pin_lat != null && draft.pending_pin_lng != null;
+    if (!hasPendingPin && !draft.location_pin_requested_at) {
+      const addressHasNumber = /\d/.test(extracted.raw_address || '');
+      const addressIsVague = !addressHasNumber && !extracted.building_name && !extracted.pincode;
       await knex('agent_listing_drafts').where({ id: draftId }).update({
         status: 'collecting',
         extracted_fields: JSON.stringify(extracted),
-        missing_fields: JSON.stringify(['address_precision_asked']),
+        missing_fields: JSON.stringify(['location_pin_asked']),
+        location_pin_requested_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });
       const lang = await detectDraftLanguage(knex, draftId);
-      const precisionBody = lang === 'en'
-        ? `For an accurate map pin, please add a plot or door number to your address.\n\nE.g. *"Plot No. 142-B, Ranjit Avenue, Amritsar"* or *"H.No. 74, Guru Nanak Nagar, Ludhiana"*\n\nIf you don't have one, reply *"no number"* and we'll continue with the current address.`
-        : `Map pin bilkul sahi jagah lagane ke liye, plot ya door number add karein.\n\nJaise: *"Plot No. 142-B, Ranjit Avenue, Amritsar"* ya *"H.No. 74, Guru Nanak Nagar, Ludhiana"*\n\nAgar number nahi pata, to *"number nahi"* reply karein aur hum aage badhenge.`;
+      const pinAskBody = buildLocationPinRequest(lang, { addressIsVague });
       await knex.transaction(async (trx) => {
-        await logAgentOutboundMessage(trx, { draftId, body: precisionBody });
+        await logAgentOutboundMessage(trx, { draftId, body: pinAskBody });
       });
-      await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: precisionBody });
-      return { success: true, awaitingPrecision: true };
+      await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: pinAskBody });
+      return { success: true, awaitingLocationPin: true };
     }
 
     await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'creating', updated_at: knex.fn.now() });
@@ -233,10 +257,14 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         description: extracted.description,
         buildingName: extracted.building_name,
         hasHouseNumber: extracted.has_house_number,
+        agentPinLat: hasPendingPin ? draft.pending_pin_lat : null,
+        agentPinLng: hasPendingPin ? draft.pending_pin_lng : null,
       });
 
       await knex('agent_listing_drafts').where({ id: draftId }).update({
         listing_id: newListing.id,
+        pending_pin_lat: null,
+        pending_pin_lng: null,
         status: 'enriching', // geo-enrichment is now running in the background (geoEnrichmentWorker.js)
         extracted_fields: JSON.stringify(extracted),
         missing_fields: null,
@@ -434,3 +462,4 @@ agentIntakeWorker.on('failed', async (job, err) => {
 });
 
 module.exports = agentIntakeWorker;
+module.exports.buildLocationPinRequest = buildLocationPinRequest;

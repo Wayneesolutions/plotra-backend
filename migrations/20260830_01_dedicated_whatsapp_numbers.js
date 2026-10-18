@@ -24,7 +24,9 @@
  * and the automated callback follow-up.
  */
 exports.up = async function (knex) {
-  await knex.schema.alterTable('plans', (table) => {
+  // Already there on a fresh database (20260825_04_tier_plans.js creates it
+  // first so its inserts work); only add it when missing.
+  if (!(await knex.schema.hasColumn('plans', 'max_whatsapp_numbers'))) await knex.schema.alterTable('plans', (table) => {
     // How many buyer-facing WhatsApp numbers a tenant on this plan may
     // register. Every plan gets at least 1 — connecting a dealer's own
     // number was never meant to be a paid-tier gate (see the phase3

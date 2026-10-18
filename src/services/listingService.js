@@ -99,6 +99,12 @@ async function createListingRecord(knex, {
   buildingName,
   hasHouseNumber,
   assignedAgentId,
+  // A WhatsApp location pin the agent shared before this listing existed
+  // (agent_listing_drafts.pending_pin_lat/lng). Written onto the row at
+  // insert time, NOT in a follow-up update, so geoEnrichmentWorker.js (queued
+  // at the bottom of this function) can never run before it's there.
+  agentPinLat,
+  agentPinLng,
 }) {
   if (!title || !rawAddress || !propertyType) {
     const err = new Error('Title, raw address, and property type are required fields.');
@@ -162,6 +168,9 @@ async function createListingRecord(knex, {
       building_name: buildingName ? buildingName.trim() : null,
       has_house_number: hasHouseNumber === true || hasHouseNumber === false ? hasHouseNumber : null,
       assigned_agent_id: validatedAgentId,
+      ...(Number.isFinite(Number(agentPinLat)) && Number.isFinite(Number(agentPinLng)) && agentPinLat != null && agentPinLng != null
+        ? { location_source: 'agent_pin', agent_pin_lat: Number(agentPinLat), agent_pin_lng: Number(agentPinLng), pin_manually_corrected: true }
+        : {}),
       public_slug: publicSlug,
       status: 'pending' // Remains 'pending' until the background geocoder confirms coordinates
     })
