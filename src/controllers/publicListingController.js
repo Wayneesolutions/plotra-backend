@@ -4,7 +4,7 @@ const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { provideValidationFeedback } = require('../services/addressValidation');
-const { getFrontView } = require('../services/frontViewService');
+const { getFrontView, getStreetViewPano } = require('../services/frontViewService');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -125,14 +125,26 @@ async function getPublicListing(req, res) {
 
     // Live listings are buyer-facing: no exact coordinates and no raw
     // satellite/street image URLs (those carry the exact point and our API
-    // key). Buyers get one still, blurred front view of the property
-    // instead (GET /listings/:slug/front-view.jpg, see frontViewService.js).
+    // key). Buyers get a street-view panorama locked to the one spot facing
+    // the property (panorama id + heading only; see frontViewService.js), so
+    // they can look around the house but not walk away from it.
     // Before approval the dealer still gets everything, to check the pin.
     const isLive = listing.status === 'active';
     const hasLocation = listing.lat != null && listing.lng != null;
     const publicMedia = media
       ? (isLive ? { photo_urls: media.photo_urls || [] } : media)
       : null;
+
+    let streetView = null;
+    if (isLive && hasLocation) {
+      try {
+        const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
+        const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+        streetView = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+      } catch (svErr) {
+        console.error('Street view lookup failed (page renders without it):', svErr.message);
+      }
+    }
 
     // 5. Structure data matching the verified success protocol
     return res.status(200).json({
@@ -166,7 +178,7 @@ async function getPublicListing(req, res) {
         public_slug: listing.public_slug
       },
       media: publicMedia,
-      frontViewUrl: isLive && hasLocation ? `/api/v1/public/listings/${encodeURIComponent(listing.public_slug)}/front-view.jpg` : null,
+      streetView,
       landmarks: landmarks || [],
       localIntelligence,
       dealer: {
