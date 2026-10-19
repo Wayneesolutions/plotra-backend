@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getPublicListing, logVisit, capturePublicLead, updateListingLocation, getListingFrontView } = require('../controllers/publicListingController');
+const { getPublicListing, logVisit, capturePublicLead, updateListingLocation, updateBlurRegions, getListingFrontView } = require('../controllers/publicListingController');
 const { submitSellerLead } = require('../controllers/sellerLeadController');
 const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
 const { submitAccessRequest, listPublicCities } = require('../controllers/adminController');
@@ -54,6 +54,14 @@ router.post('/listings/:slug/lead', publicWriteLimiter, capturePublicLead);
  * @access  Public, same reasoning as the routes above.
  */
 router.patch('/listings/:slug/location', publicWriteLimiter, updateListingLocation);
+
+/**
+ * @route   PATCH /api/v1/public/listings/:slug/blur-regions
+ * @desc    Dealer marks signboards / house number on the front of the
+ *          property to be blurred on the live street view. Pre-approval only.
+ * @access  Public, same reasoning as the location route above.
+ */
+router.patch('/listings/:slug/blur-regions', publicWriteLimiter, updateBlurRegions);
 
 /**
  * @route   GET /api/v1/public/listings/:slug/builder-profile
