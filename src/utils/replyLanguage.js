@@ -80,26 +80,6 @@ function detectReplyLanguage(text) {
   return 'en';
 }
 
-/**
- * Language of ONE message: 'hi' (Hindi/Punjabi/Hinglish), 'en', or null when
- * the message is too short or has too little signal to tell ("ok", "1",
- * "Dugri"). Callers use the current message first and fall back to the
- * conversation's language only on null, so an English question in the middle
- * of a Hinglish chat gets an English answer.
- */
-function detectMessageLanguage(text) {
-  const t = String(text || '');
-  if (!t.trim()) return null;
-  if (DEVANAGARI_OR_GURMUKHI.test(t)) return 'hi';
-  const words = normalizeWords(t).filter((w) => /[a-z]/.test(w));
-  if (words.length === 0) return null;
-  const strong = words.filter((w) => HINGLISH_MARKERS.has(w) && !WEAK_MARKERS.has(w)).length;
-  if (strong >= 1) return 'hi';
-  // No Hinglish marker: three or more plain words is clearly English; one or
-  // two words could be a name, an area or a "yes".
-  return words.length >= 3 ? 'en' : null;
-}
-
 // English counterparts to listingExtractionService.js's FIELD_QUESTIONS,
 // which is Hindi/Hinglish-only and shared between the web chat and
 // WhatsApp agent-intake flow. Originally lived only in webChatController.js
@@ -113,4 +93,4 @@ const FIELD_QUESTIONS_EN = {
   title: 'Give me a short title for this listing.',
 };
 
-module.exports = { detectReplyLanguage, detectMessageLanguage, FIELD_QUESTIONS_EN };
+module.exports = { detectReplyLanguage, FIELD_QUESTIONS_EN };

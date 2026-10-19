@@ -47,18 +47,6 @@ async function findLastRejectedSignup(knex, phone) {
     .first('updated_at');
 }
 
-/**
- * Someone who was joining as a dealer then says they want to SELL their own
- * property is an owner, not a dealer applicant: close the open request so the
- * team doesn't review it and the assistant stops asking for name/area.
- * Returns the number of requests cancelled.
- */
-async function cancelPendingSignup(knex, phone) {
-  return knex('pending_agent_signups')
-    .where({ phone: normalizePhone(phone) || phone, status: 'pending' })
-    .update({ status: 'cancelled', updated_at: knex.fn.now() });
-}
-
 function isComplete(signup) {
   return Boolean(signup && signup.name && signup.address);
 }
@@ -165,7 +153,6 @@ async function describeSignupState(knex, phone) {
 module.exports = {
   resolveTenantForSignup,
   findPendingSignup,
-  cancelPendingSignup,
   advanceSignupFromAssistant,
   describeSignupState,
   signupFollowUp,

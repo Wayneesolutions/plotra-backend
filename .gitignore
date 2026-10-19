@@ -10,9 +10,3 @@ client/node_modules/
 # OS/editor cruft
 .DS_Store
 .vscode/
-
-# Server-side backups and scratch files must never be committed
-.env.bak
-.env.save*
-*.bak
-*.bak-*
