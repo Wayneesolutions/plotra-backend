@@ -24,11 +24,11 @@
 
 const axios = require('axios');
 const { PRODUCT, RULES, offersText } = require('../assistant/plotraaKnowledge');
-const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { detectReplyLanguage, detectMessageLanguage } = require('../utils/replyLanguage');
 const { normalizePhone } = require('../utils/phone');
 const { looksLikeSellerIntent, extractSellerHints } = require('../utils/sellerIntent');
 const { raiseSupportRequest } = require('./supportRequestService');
-const { advanceSignupFromAssistant, describeSignupState, findPendingSignup, isComplete } = require('./agentSignupService');
+const { advanceSignupFromAssistant, cancelPendingSignup, describeSignupState, findPendingSignup, isComplete } = require('./agentSignupService');
 
 const enqueueWhatsapp = (...a) => require('./agentMessagingService').enqueueAgentWhatsappSend(...a);
 
@@ -251,17 +251,27 @@ async function createDealerLead(knex, { tenantId, phone, name, source }) {
 }
 
 async function createSellerLead(knex, { phone, name, seller, summary }) {
-  const dup = await knex('seller_leads').where({ phone, status: 'new' })
-    .where('created_at', '>=', knex.raw("NOW() - INTERVAL '1 day'")).first('id');
-  if (dup) return dup.id;
-  const [row] = await knex('seller_leads').insert({
-    name: name || 'WhatsApp contact',
-    phone,
+  const fields = {
     property_type: seller?.property_type?.slice(0, 50) || null,
     city: seller?.city?.slice(0, 100) || null,
     locality: seller?.locality?.slice(0, 255) || null,
     expected_price: seller?.expected_price?.slice(0, 100) || null,
     size_text: seller?.size_text?.slice(0, 100) || null,
+  };
+  const dup = await knex('seller_leads').where({ phone, status: 'new' })
+    .where('created_at', '>=', knex.raw("NOW() - INTERVAL '1 day'")).first('*');
+  if (dup) {
+    // The same owner adding details ("Dugri mein hai", then "1.5 crore") updates
+    // the open lead instead of being ignored: only blanks are filled in.
+    const patch = {};
+    for (const [k, v] of Object.entries(fields)) if (v && !dup[k]) patch[k] = v;
+    if (Object.keys(patch).length) await knex('seller_leads').where({ id: dup.id }).update({ ...patch, updated_at: knex.fn.now() });
+    return dup.id;
+  }
+  const [row] = await knex('seller_leads').insert({
+    name: name || 'WhatsApp contact',
+    phone,
+    ...fields,
     description: summary ? `Via WhatsApp assistant: ${summary}`.slice(0, 2000) : 'Via WhatsApp assistant',
     source: 'whatsapp',
   }).returning(['id']);
@@ -291,6 +301,34 @@ async function performAction(knex, out, { audience, phone, name, text, agentUser
       return 'seller_lead';
     default:
       return 'none';
+  }
+}
+
+function fallbackSellerReply(lang) {
+  return lang === 'en'
+    ? '🙏 Thank you. A verified local dealer will contact you on this number about selling your property. Please also tell us the property type, area and expected price if you have not already.'
+    : '🙏 Dhanyavaad. Ek verified local dealer aapse isi number pe property bechne ke liye sampark karega. Property ka type, area aur expected price bhi bata dijiye agar abhi tak nahi bataya.';
+}
+
+/**
+ * Seller message handled WITHOUT the model (assistant off, or it failed): the
+ * lead is still saved and any open dealer signup closed, so an owner is never
+ * lost because of an outage. Returns true when handled.
+ */
+async function handleSellerWithoutModel(knex, { audience, phone, name, text, tenantId, lang }) {
+  if (audience === 'agent' || !looksLikeSellerIntent(text)) return false;
+  try {
+    if (audience === 'buyer' && tenantId) {
+      await createDealerLead(knex, { tenantId, phone, name, source: 'whatsapp_seller' });
+    } else {
+      await cancelPendingSignup(knex, phone);
+      await createSellerLead(knex, { phone, name, seller: extractSellerHints(text), summary: `Owner wants to sell: ${String(text).slice(0, 200)}` });
+    }
+    await enqueueWhatsapp({ tenantId: tenantId || null, phone, messageBody: fallbackSellerReply(lang) });
+    return true;
+  } catch (err) {
+    console.error('[Assistant] seller fallback failed:', err.message);
+    return false;
   }
 }
 
@@ -328,6 +366,9 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
       await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: fallbackSupportReply(lang) }).catch(() => {});
       return { handled: true, action: 'support' };
     }
+    if (await handleSellerWithoutModel(knex, { audience, phone: normalizedPhone, name, text, tenantId, lang })) {
+      return { handled: true, action: 'seller_lead' };
+    }
     return { handled: false };
   }
 
@@ -345,8 +386,11 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
       loadHistory(knex, normalizedPhone, audience),
     ]);
 
+    // The language of THIS message decides the reply; earlier turns only break
+    // a tie when the message is too short to tell ("ok", "Dugri").
+    const msgLang = detectMessageLanguage(text);
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), langHint: detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' ')) }) },
+      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), langHint: msgLang || detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' ')) }) },
       ...history,
       { role: 'user', content: String(text).slice(0, 2000) },
     ];
@@ -357,7 +401,8 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // Deterministic safety net: an owner saying they want to sell must become
     // a seller lead even when the model picked another action (it used to
     // answer "bechni hai" with a buyer reply, or treat it as dealer joining).
-    const isSellerMessage = audience !== 'agent' && !startSignup && looksLikeSellerIntent(text);
+    const isSellerMessage = audience !== 'agent' && !startSignup
+      && (looksLikeSellerIntent(text) || out.action === 'seller_lead');
     if (isSellerMessage && out.action !== 'seller_lead') {
       const hints = extractSellerHints(text);
       out.action = 'seller_lead';
@@ -374,6 +419,13 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     let action = await performAction(knex, out, { audience, phone: normalizedPhone, name, text, agentUser, tenantId });
     let reply = out.reply;
 
+    // An owner selling their own property is not a dealer applicant: close
+    // any open join request (it used to stay open and swallow the seller).
+    if (isSellerMessage && audience === 'visitor') {
+      const cancelled = await cancelPendingSignup(knex, normalizedPhone);
+      if (cancelled) console.log('[Assistant] cancelled %d open signup(s) for seller %s', cancelled, normalizedPhone);
+    }
+
     // Joining as an agent (platform number only). Starts on "start_signup";
     // once a signup is open, every message goes through here so a name or
     // area mentioned in passing is never lost. The system, not the model,
@@ -381,7 +433,8 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // A selling message is never a joining message, so no "still need your
     // name/area" line is appended to a seller's reply.
     if (audience === 'visitor' && !isSellerMessage) {
-      const convoLang = out.replyLanguage
+      const convoLang = msgLang
+        || out.replyLanguage
         || detectReplyLanguage([...history.filter((m) => m.role === 'user').map((m) => m.content), text].join(' '));
       const signupStep = await advanceSignupFromAssistant(knex, {
         phone: normalizedPhone,
@@ -413,6 +466,9 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
       await raiseSupportRequest(knex, { phone: normalizedPhone, name: name || agentUser?.name, audience, kind: 'problem', lastMessage: text, tenantId: sendTenantId, userId: agentUser?.id || null });
       await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: fallbackSupportReply(lang) }).catch(() => {});
       return { handled: true, action: 'support' };
+    }
+    if (await handleSellerWithoutModel(knex, { audience, phone: normalizedPhone, name, text, tenantId, lang })) {
+      return { handled: true, action: 'seller_lead' };
     }
     return { handled: false };
   }

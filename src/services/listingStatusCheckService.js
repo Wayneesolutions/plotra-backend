@@ -37,15 +37,18 @@ function buildButtons(listingId) {
   ];
 }
 
-async function sendStatusCheckPrompt(knex, listing, { isReminder = false } = {}) {
+async function sendStatusCheckPrompt(knex, listing, { isReminder = false, send = enqueueAgentWhatsappSend } = {}) {
+  // Always the CURRENT users row (never a phone remembered elsewhere), so a
+  // renamed/changed number is picked up on the very next check.
   const agent = await getResponsibleAgent(knex, listing);
-  if (!agent) return false;
+  if (!agent || !agent.phone) return false;
+  console.log('[StatusCheck] listing %s -> user %s (%s)%s', listing.id, agent.id, agent.phone, isReminder ? ' [reminder]' : '');
 
   const body = isReminder
     ? `⏰ Reminder: is "${listing.title}" still for sale? Please confirm below.`
     : `📋 Quick check-in: is "${listing.title}" still for sale?`;
 
-  await enqueueAgentWhatsappSend({
+  await send({
     tenantId: listing.tenant_id,
     phone: agent.phone,
     messageBody: body,
@@ -116,7 +119,7 @@ async function handleSoldConfirmation(knex, { listingId, agentUser }) {
  * Worker handler for the same testability reason as PR 2's
  * processReminderCycle.
  */
-async function processMonthlyStatusChecks(knex) {
+async function processMonthlyStatusChecks(knex, { send } = {}) {
   const listings = await knex('listings').where({ status: 'active' }).whereNull('deleted_at');
 
   let checksSent = 0;
@@ -135,7 +138,7 @@ async function processMonthlyStatusChecks(knex) {
     const daysSinceAnchor = daysSince(anchor);
 
     if (!listing.status_check_sent_at || daysSinceAnchor >= CYCLE_DAYS) {
-      const sent = await sendStatusCheckPrompt(knex, listing);
+      const sent = await sendStatusCheckPrompt(knex, listing, { send });
       if (sent) checksSent++;
       continue; // fresh cycle just started — nothing else to evaluate this run
     }
@@ -145,7 +148,7 @@ async function processMonthlyStatusChecks(knex) {
     if (answeredThisCycle) continue;
 
     if (daysSinceAnchor >= REMINDER_AFTER_DAYS && !listing.status_check_reminder_sent_at) {
-      const sent = await sendStatusCheckPrompt(knex, listing, { isReminder: true });
+      const sent = await sendStatusCheckPrompt(knex, listing, { isReminder: true, send });
       if (sent) remindersSent++;
     }
 
@@ -174,6 +177,7 @@ async function processMonthlyStatusChecks(knex) {
 
 module.exports = {
   processMonthlyStatusChecks,
+  sendStatusCheckPrompt,
   handleStillAvailableConfirmation,
   handleSoldConfirmation,
   getResponsibleAgent,
