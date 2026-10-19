@@ -6,6 +6,8 @@
 // (paymentReminderWorker.js), so the cycle-day math and package-menu
 // formatting live in exactly one place.
 const { enqueueAgentWhatsappSend } = require('./agentMessagingService');
+// Lazy: keeps this file's load order unchanged.
+const raiseSupportRequest = (...a) => require('./supportRequestService').raiseSupportRequest(...a);
 
 // Exact-match keywords (same convention as agentReplyIntent.js's
 // APPROVAL_KEYWORDS) — deliberately a Set of whole normalized phrases, not
@@ -60,17 +62,17 @@ async function sendPackageSelectionPrompt(knex, { tenantId, phone }) {
     await enqueueAgentWhatsappSend({
       tenantId,
       phone,
-      messageBody: "You're approved! 🎉 Payment plan setup is still being finalized on our end — we'll message you shortly with package options. You can already send property details to list them in the meantime.",
+      messageBody: "You're approved! 🎉 Payment plan setup is still being finalized on our end — we'll message you shortly with plan options. You can already send property details to list them in the meantime.",
     });
     return;
   }
 
-  const body = `📦 *Choose your agent package* — reply with its number:\n\n${formatPackageMenu(packages)}\n\nYou can list properties either way; this just sets up your payment plan.`;
+  const body = `📦 *Choose your plan* — reply with its number:\n\n${formatPackageMenu(packages)}\n\nYou can list properties either way; this just sets up your payment plan.`;
   await enqueueAgentWhatsappSend({ tenantId, phone, messageBody: body });
 }
 
 /**
- * Claims a bare numeric reply ("1", "2", ...) as a package selection —
+ * Claims a bare numeric reply ("1", "2", ...) as a plan selection —
  * only when this agent hasn't already picked one. Returns false (does
  * nothing) for anything that isn't a plain 1-2 digit number, or that
  * doesn't match an active package's current position in the menu, so a
@@ -90,9 +92,25 @@ async function tryHandlePackageSelectionReply(knex, { agentUser, incomingText })
 
   await knex('users').where({ id: agentUser.id }).update({ package_id: chosen.id, updated_at: knex.fn.now() });
 
-  const body = chosen.qr_code_url
-    ? `✅ *${chosen.name}* package selected — ₹${chosen.amount_inr}/month.\n\nScan this QR to pay:\n${chosen.qr_code_url}\n\nOnce paid, send a photo of your payment receipt any time (or just type "payment") to confirm it with us.`
-    : `✅ *${chosen.name}* package selected — ₹${chosen.amount_inr}/month. Your QR code will be shared shortly.`;
+  let body;
+  if (chosen.qr_code_url) {
+    body = `✅ *${chosen.name}* plan selected — ₹${chosen.amount_inr}/month.\n\nScan this QR to pay:\n${chosen.qr_code_url}\n\nOnce paid, send a photo of your payment receipt any time (or just type "payment") to confirm it with us.`;
+  } else {
+    // No QR image is set for this plan yet. Don't promise "shortly" and then
+    // go silent: tell the team so they send the QR, and say so honestly.
+    console.warn(`[agentPaymentService] Plan "${chosen.name}" (${chosen.id}) has no qr_code_url; agent ${agentUser.phone} selected it.`);
+    await raiseSupportRequest(knex, {
+      phone: agentUser.phone,
+      name: agentUser.name,
+      audience: 'agent',
+      kind: 'problem',
+      summary: `Selected the "${chosen.name}" plan but it has no payment QR set. Please send the QR / payment details.`,
+      lastMessage: trimmed,
+      tenantId: agentUser.tenant_id,
+      userId: agentUser.id,
+    }).catch((err) => console.error('[agentPaymentService] could not raise QR support request:', err.message));
+    body = `✅ *${chosen.name}* plan selected — ₹${chosen.amount_inr}/month.\n\nThe payment QR for this plan isn't ready yet. I've told the Plotraa team and they will send it to you on this chat. You can list properties in the meantime.`;
+  }
   await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
   return true;
 }

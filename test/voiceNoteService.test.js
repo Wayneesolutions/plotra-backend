@@ -77,6 +77,17 @@ test('cleanTranscript drops silence filler and keeps real speech', () => {
   assert.strictEqual(cleanTranscript('ਮਾਡਲ ਟਾਊਨ'), 'ਮਾਡਲ ਟਾਊਨ');
 });
 
+test('prompt has no example sentence and silence echoes of it are dropped', () => {
+  const { TRANSCRIBE_PROMPT } = require('../src/services/voiceNoteService');
+  assert.ok(!/200 gaj ki kothi hai/i.test(TRANSCRIBE_PROMPT), 'no example listing in the prompt');
+  // The exact sentence the old prompt made the model hallucinate on silence.
+  assert.strictEqual(cleanTranscript('Model Town Ludhiana mein 200 gaj ki kothi hai, 1.2 crore, 3 BHK, corner plot.'), null);
+  // A vocabulary list read back is also an echo.
+  assert.strictEqual(cleanTranscript('Shabd: gaj, marla, kanal, kothi, makaan, plot, flat, BHK, lakh, crore.'), null);
+  // Real speech that merely uses the same words is kept.
+  assert.strictEqual(cleanTranscript('Mere paas Dugri mein 10 marla ka plot hai, 85 lakh'), 'Mere paas Dugri mein 10 marla ka plot hai, 85 lakh');
+});
+
 test('fileNameFor maps WhatsApp audio types', () => {
   assert.strictEqual(fileNameFor('audio/ogg; codecs=opus'), 'voice.ogg');
   assert.strictEqual(fileNameFor('audio/mpeg'), 'voice.mp3');

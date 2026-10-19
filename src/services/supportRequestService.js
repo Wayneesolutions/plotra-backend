@@ -65,6 +65,13 @@ async function sendAlerts(knex, request, { businessName } = {}) {
   const results = { whatsapp: 0, email: 0 };
 
   const templateName = process.env.SUPPORT_ALERT_TEMPLATE_NAME;
+  if (!alertPhones().length) {
+    console.warn('[support] SUPPORT_ALERT_PHONES is empty: no WhatsApp alert sent (email only).');
+  } else if (!templateName) {
+    // Free text only reaches a number that messaged us in the last 24h, so
+    // without an approved template the team can silently miss an alert.
+    console.warn('[support] SUPPORT_ALERT_TEMPLATE_NAME is not set: WhatsApp alerts are free text and may not be delivered. Create the Meta template (see HANDOVER_2026-10-18_SESSION.md section 4).');
+  }
   for (const phone of alertPhones()) {
     try {
       await enqueueWhatsapp({

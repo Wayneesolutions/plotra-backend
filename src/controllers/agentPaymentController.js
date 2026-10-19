@@ -64,6 +64,24 @@ async function handleAgentReceiptPhoto({ knex, agentUser, mediaId, mediaMimeType
     // Clear the flag even on failure — same rationale as the docstring
     // above, a stuck flag is worse than asking the agent to resend.
     await knex('users').where({ id: agentUser.id }).update({ awaiting_receipt_submission: false, updated_at: knex.fn.now() }).catch(() => {});
+    // Never leave the agent in silence (this used to return without a
+    // message, so a failed upload looked like the bot ignoring the receipt).
+    // Tell them what to do, and tell the team so the payment is not lost.
+    await enqueueAgentWhatsappSend({
+      tenantId: agentUser.tenant_id,
+      phone: agentUser.phone,
+      messageBody: "⚠️ I couldn't save your receipt photo. Please type *payment* and send it again. I've also told the Plotraa team so your payment isn't missed.",
+    }).catch(() => {});
+    await require('../services/supportRequestService').raiseSupportRequest(knex, {
+      phone: agentUser.phone,
+      name: agentUser.name,
+      audience: 'agent',
+      kind: 'problem',
+      summary: `Payment receipt photo could not be saved (${String(error.message).slice(0, 120)}). Ask them to resend or record the payment manually.`,
+      lastMessage: 'payment receipt photo',
+      tenantId: agentUser.tenant_id,
+      userId: agentUser.id,
+    });
     return res.status(200).json({ success: true, trackingError: error.message });
   }
 }

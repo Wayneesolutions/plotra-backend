@@ -26,6 +26,7 @@ const axios = require('axios');
 const { PRODUCT, RULES, offersText } = require('../assistant/plotraaKnowledge');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { normalizePhone } = require('../utils/phone');
+const { looksLikeSellerIntent, extractSellerHints } = require('../utils/sellerIntent');
 const { raiseSupportRequest } = require('./supportRequestService');
 const { advanceSignupFromAssistant, describeSignupState, findPendingSignup, isComplete } = require('./agentSignupService');
 
@@ -37,6 +38,17 @@ const HISTORY_TURNS = 10;
 const HISTORY_WINDOW_HOURS = 48;
 const MAX_REPLY_CHARS = 1200;
 const LIVE_DRAFT_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'awaiting_approval'];
+
+// Plain-language reason a listing in this status is not live, handed to the
+// model so it explains the real cause instead of guessing (it used to blame
+// the location pin, which never blocks publishing).
+const LISTING_STATUS_MEANING = {
+  awaiting_approval: 'the preview was sent; the listing goes live as soon as the dealer replies "haan" / "yes". The location pin is NOT the reason.',
+  pending_geo_review: 'the Plotraa team is checking the location and will notify the dealer once approved (sending the exact location pin also resolves it).',
+  pending: 'the listing is still being prepared; the next message from the bot says what is needed.',
+  unconfirmed: 'the dealer has not confirmed the listing yet.',
+  active: 'the listing is already live.',
+};
 
 function isAssistantEnabled() {
   return String(process.env.PLOTRAA_ASSISTANT || 'on').toLowerCase() !== 'off';
@@ -100,6 +112,7 @@ async function loadAgentContext(knex, agentUser) {
     const listing = draft.listing_id ? await knex('listings').where({ id: draft.listing_id }).first('status', 'title', 'public_slug') : null;
     draftLines = [
       `Listing in progress: draft status "${draft.status}"${listing ? `, listing "${listing.title}" status "${listing.status}"` : ', listing not created yet'}.`,
+      listing && LISTING_STATUS_MEANING[listing.status] ? `Meaning: ${LISTING_STATUS_MEANING[listing.status]}` : null,
       draft.missing_fields ? `Bot is waiting for: ${JSON.stringify(draft.missing_fields)}.` : null,
       draft.location_pin_requested_at && !draft.listing_id ? 'Bot asked for the exact location pin (they can reply "pin nahi" to skip).' : null,
       'Recent listing conversation (newest last):',
@@ -111,7 +124,7 @@ async function loadAgentContext(knex, agentUser) {
   return [
     'CONTEXT (this person is a registered agent)',
     `- Name: ${agentUser.name || '-'}; business: ${tenant?.business_name || '-'}`,
-    `- Plan: ${pkg ? `${pkg.name} (${formatInr(pkg.amount_inr)}/month)` : 'no package chosen yet'}; payment status: ${agentUser.payment_status || '-'}${pendingReceipt ? ' (a receipt is waiting for team review)' : ''}`,
+    `- Plan: ${pkg ? `${pkg.name} (${formatInr(pkg.amount_inr)}/month)` : 'no plan chosen yet'}; payment status: ${agentUser.payment_status || '-'}${pendingReceipt ? ' (a receipt is waiting for team review)' : ''}`,
     `- Can add new listings: ${agentUser.can_add_listing ? 'yes' : 'NO (payment pending; existing listings stay live)'}`,
     `- Their listings by status: ${Object.keys(byStatus).length ? JSON.stringify(byStatus) : 'none yet'}`,
     `- Public profile: rating ${tenant?.agent_rating ?? 'not set'}, experience ${tenant?.agent_experience_years ?? 'not set'} years, RERA ${tenant?.rera_certified ? 'yes' : 'no'}`,
@@ -156,7 +169,7 @@ async function loadHistory(knex, phone, audience) {
 
 // ------------------------------------------------------------------ model
 
-function buildSystemPrompt({ audience, contextText, plansText }) {
+function buildSystemPrompt({ audience, contextText, plansText, langHint = null }) {
   const audienceNote = {
     agent: 'You are talking to a registered Plotraa agent. Be their friendly, patient assistant and guide.',
     visitor: 'You are talking to someone new on the Plotraa WhatsApp number.',
@@ -174,6 +187,7 @@ ${plansText}
 ${offersText()}
 
 ${contextText}
+${langHint === 'hi' ? '\nLANGUAGE: the person writes Hindi/Hinglish/Punjabi. Reply in Hinglish (Roman script) or in the script they used, NOT in English.' : langHint === 'en' ? '\nLANGUAGE: the person writes English. Reply in English.' : ''}
 
 Return ONLY JSON:
 {"reply": "the WhatsApp message to send",
@@ -332,13 +346,30 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     ]);
 
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans) }) },
+      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), langHint: detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' ')) }) },
       ...history,
       { role: 'user', content: String(text).slice(0, 2000) },
     ];
 
     const out = parseAssistantOutput(await callModel(messages));
     if (!out) throw new Error('unusable model output');
+
+    // Deterministic safety net: an owner saying they want to sell must become
+    // a seller lead even when the model picked another action (it used to
+    // answer "bechni hai" with a buyer reply, or treat it as dealer joining).
+    const isSellerMessage = audience !== 'agent' && !startSignup && looksLikeSellerIntent(text);
+    if (isSellerMessage && out.action !== 'seller_lead') {
+      const hints = extractSellerHints(text);
+      out.action = 'seller_lead';
+      out.seller = {
+        property_type: out.seller?.property_type || hints.property_type,
+        city: out.seller?.city || null,
+        locality: out.seller?.locality || null,
+        expected_price: out.seller?.expected_price || hints.expected_price,
+        size_text: out.seller?.size_text || hints.size_text,
+      };
+      out.summary = out.summary || `Owner wants to sell: ${String(text).slice(0, 200)}`;
+    }
 
     let action = await performAction(knex, out, { audience, phone: normalizedPhone, name, text, agentUser, tenantId });
     let reply = out.reply;
@@ -347,7 +378,9 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // once a signup is open, every message goes through here so a name or
     // area mentioned in passing is never lost. The system, not the model,
     // adds the "still need X" / "request submitted" line.
-    if (audience === 'visitor') {
+    // A selling message is never a joining message, so no "still need your
+    // name/area" line is appended to a seller's reply.
+    if (audience === 'visitor' && !isSellerMessage) {
       const convoLang = out.replyLanguage
         || detectReplyLanguage([...history.filter((m) => m.role === 'user').map((m) => m.content), text].join(' '));
       const signupStep = await advanceSignupFromAssistant(knex, {
@@ -391,4 +424,5 @@ module.exports = {
   formatPlansForPrompt,
   looksLikeSupportRequest,
   buildSystemPrompt,
+  LISTING_STATUS_MEANING,
 };

@@ -14,6 +14,7 @@ const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('..
 const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
 const { handleCallEnquiryReply } = require('../services/callEnquiryService');
 const { transcribeVoiceNote, voiceNotUnderstoodMessage } = require('../services/voiceNoteService');
+const { looksLikeSellerIntent } = require('../utils/sellerIntent');
 const { handleWithAssistant } = require('../services/assistantService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
@@ -432,7 +433,12 @@ async function handleInboundWhatsApp(req, res) {
       whatsappNumber: receivingNumber,
     });
 
-    if (!receivingDealer) {
+    // An owner saying they want to SELL ("kothi bechni hai 1.5 crore") looks
+    // like a buyer search (area + type + price) but must reach the assistant
+    // so a seller lead is created, not get other people's listings back.
+    const isSellerMessage = looksLikeSellerIntent(incomingText);
+
+    if (!receivingDealer && !isSellerMessage) {
       // Shared platform number: try marketplace search first.
       const searchResult = await handleBuyerSearch(knex, { incomingText: incomingText.trim(), buyerPhone: phone });
       if (searchResult) {
@@ -443,7 +449,7 @@ async function handleInboundWhatsApp(req, res) {
 
     // Cold contact on a dealer's number: try to answer as a listing search
     // before falling back to the generic greeting.
-    if (receivingDealer) {
+    if (receivingDealer && !isSellerMessage) {
       const searchReply = await searchDealerListings(knex, receivingDealer.id, incomingText);
       if (searchReply) {
         await enqueueAgentWhatsappSend({ tenantId: receivingDealer.id, phone, messageBody: searchReply });
