@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getPublicListing, logVisit, capturePublicLead, updateListingLocation } = require('../controllers/publicListingController');
+const { getPublicListing, logVisit, capturePublicLead, updateListingLocation, getListingFrontView } = require('../controllers/publicListingController');
 const { submitSellerLead } = require('../controllers/sellerLeadController');
 const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
 const { submitAccessRequest, listPublicCities } = require('../controllers/adminController');
@@ -21,6 +21,14 @@ router.get('/ping', (req, res) => res.json({ message: 'Public API is live' }));
  * @access  Public
  */
 router.get('/listings/:slug', publicReadLimiter, getPublicListing);
+
+/**
+ * @route   GET /api/v1/public/listings/:slug/front-view.jpg
+ * @desc    Still front view of a LIVE listing, everything but the property
+ *          blurred (frontViewService.js). 404 = not live / no street imagery.
+ * @access  Public
+ */
+router.get('/listings/:slug/front-view.jpg', publicReadLimiter, getListingFrontView);
 
 /**
  * @route   POST /api/v1/public/listings/:slug/visit

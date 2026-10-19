@@ -4,6 +4,7 @@ const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { provideValidationFeedback } = require('../services/addressValidation');
+const { getFrontView } = require('../services/frontViewService');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -122,6 +123,17 @@ async function getPublicListing(req, res) {
       listing.assigned_agent_phone || listing.creator_phone || listing.dedicated_whatsapp_number || listing.dealer_whatsapp_number || process.env.WHATSAPP_SHARED_NUMBER
     );
 
+    // Live listings are buyer-facing: no exact coordinates and no raw
+    // satellite/street image URLs (those carry the exact point and our API
+    // key). Buyers get one still, blurred front view of the property
+    // instead (GET /listings/:slug/front-view.jpg, see frontViewService.js).
+    // Before approval the dealer still gets everything, to check the pin.
+    const isLive = listing.status === 'active';
+    const hasLocation = listing.lat != null && listing.lng != null;
+    const publicMedia = media
+      ? (isLive ? { photo_urls: media.photo_urls || [] } : media)
+      : null;
+
     // 5. Structure data matching the verified success protocol
     return res.status(200).json({
       success: true,
@@ -144,8 +156,8 @@ async function getPublicListing(req, res) {
         // general_area computation) is documented, intentional behavior
         // (geoEnrichmentWorker.js: "already-shared links are unaffected").
         general_area: listing.general_area,
-        lat: listing.lat != null ? parseFloat(listing.lat) : null,
-        lng: listing.lng != null ? parseFloat(listing.lng) : null,
+        lat: !isLive && listing.lat != null ? parseFloat(listing.lat) : null,
+        lng: !isLive && listing.lng != null ? parseFloat(listing.lng) : null,
         price: listing.price,
         plot_area: listing.plot_area,
         property_type: listing.property_type,
@@ -153,7 +165,8 @@ async function getPublicListing(req, res) {
         status: listing.status,
         public_slug: listing.public_slug
       },
-      media: media || null,
+      media: publicMedia,
+      frontViewUrl: isLive && hasLocation ? `/api/v1/public/listings/${encodeURIComponent(listing.public_slug)}/front-view.jpg` : null,
       landmarks: landmarks || [],
       localIntelligence,
       dealer: {
@@ -531,4 +544,40 @@ async function updateListingLocation(req, res) {
   }
 }
 
-module.exports = { getPublicListing, logVisit, capturePublicLead, updateListingLocation };
+/**
+ * GET /api/v1/public/listings/:slug/front-view.jpg
+ * One still photo from the street, facing the property, with everything
+ * except the property blurred (frontViewService.js). Live listings only.
+ * 404 when the listing isn't live or Google has no street imagery nearby;
+ * the page then simply doesn't show the section.
+ */
+async function getListingFrontView(req, res) {
+  const knex = req.app.get('db');
+  try {
+    const listing = await knex('listings')
+      .where({ public_slug: req.params.slug, status: 'active' })
+      .first('id', 'tenant_id', 'lat', 'lng');
+    if (!listing || listing.lat == null || listing.lng == null) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No front view for this listing.' } });
+    }
+    const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
+    const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+
+    const image = await getFrontView({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+    if (!image) {
+      res.set('Cache-Control', 'public, max-age=3600');
+      return res.status(404).json({ error: { code: 'NO_IMAGERY', message: 'No street imagery near this property.' } });
+    }
+    res.set({
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'public, max-age=21600',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return res.status(200).send(image);
+  } catch (error) {
+    console.error('Front view failed:', error.message);
+    return res.status(502).json({ error: { code: 'FRONT_VIEW_FAILED', message: 'Could not load the front view.' } });
+  }
+}
+
+module.exports = { getListingFrontView, getPublicListing, logVisit, capturePublicLead, updateListingLocation };
