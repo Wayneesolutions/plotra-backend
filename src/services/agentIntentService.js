@@ -374,7 +374,7 @@ async function replyPlanInfo(knex, agentUser, lang) {
   if (!packages.length) {
     return send(agentUser, lang === 'en' ? "Plan details will be shared with you shortly." : 'Plan ki details aapko jaldi bhej di jayengi.');
   }
-  return send(agentUser, `📦 ${lang === 'en' ? 'Choose a package — reply with its number' : 'Package chuniye — number reply karein'}:\n\n${formatPackageMenu(packages)}`);
+  return send(agentUser, `📦 ${lang === 'en' ? 'Choose a plan — reply with its number' : 'Plan chuniye — number reply karein'}:\n\n${formatPackageMenu(packages)}`);
 }
 
 /**

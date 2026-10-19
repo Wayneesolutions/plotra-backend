@@ -20,11 +20,38 @@ const FALLBACK_MODEL = 'whisper-1';
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const TIMEOUT_MS = Number(process.env.VOICE_TRANSCRIBE_TIMEOUT_MS) || 25000;
 
+// Keep this a plain vocabulary list. Never put a full example sentence in it:
+// on silence or noise the model echoes the prompt back as the "transcript",
+// and an example sentence then turns into a fake property listing.
 const TRANSCRIBE_PROMPT = [
-  'Property dealer aur customer ki WhatsApp voice note. Punjabi, Hindi, Hinglish ya English.',
-  'Roman script mein likho (Hinglish), jaise: "Model Town Ludhiana mein 200 gaj ki kothi hai, 1.2 crore, 3 BHK, corner plot".',
+  'Property dealer aur customer ki WhatsApp voice note. Punjabi, Hindi, Hinglish ya English. Roman script mein likho.',
   'Shabd: gaj, marla, kanal, kothi, makaan, plot, flat, BHK, lakh, crore, registry, NOC, Dugri, Sarabha Nagar, BRS Nagar, Pakhowal Road, Ferozepur Road, Mohali, Kharar, Zirakpur.',
 ].join(' ');
+
+// Sentences earlier versions of the prompt contained; models still echo them
+// on silence, so they stay on the block list even though they were removed.
+const LEGACY_PROMPT_ECHOES = [
+  'model town ludhiana mein 200 gaj ki kothi hai 1.2 crore 3 bhk corner plot',
+];
+
+function normalizeForEcho(text) {
+  // Keep the dot only inside numbers ("1.2"); sentence-final dots must not
+  // stop "crore." matching "crore registry".
+  return String(text || '').toLowerCase()
+    .replace(/[^\p{L}\p{N}.]+/gu, ' ')
+    .replace(/(?<!\d)\.|\.(?!\d)/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+const NORMALIZED_PROMPT = normalizeForEcho(TRANSCRIBE_PROMPT);
+
+/** True when the "transcript" is just the prompt (or part of it) read back. */
+function isPromptEcho(text) {
+  const t = normalizeForEcho(text);
+  if (t.length < 8) return false;
+  if (NORMALIZED_PROMPT.includes(t)) return true;
+  return LEGACY_PROMPT_ECHOES.some((e) => t.includes(e) || e.includes(t));
+}
 
 function isVoiceEnabled() {
   return String(process.env.VOICE_NOTES || 'on').toLowerCase() !== 'off' && Boolean(process.env.OPENAI_API_KEY);
@@ -50,6 +77,7 @@ function cleanTranscript(text) {
   const letters = t.replace(/[^\p{L}\p{N}]/gu, '');
   if (letters.length < 2) return null;
   if (/^(thank you|thanks for watching|you)[.!]?$/i.test(t)) return null;
+  if (isPromptEcho(t)) return null;
   return t;
 }
 
@@ -130,4 +158,4 @@ function voiceNotUnderstoodMessage(lang) {
     : '🎤 Maaf kijiye, voice note samajh nahi aaya. Thoda dheere dobara bhejein, ya message type kar dein.';
 }
 
-module.exports = { transcribeVoiceNote, voiceNotUnderstoodMessage, cleanTranscript, fileNameFor, isVoiceEnabled };
+module.exports = { transcribeVoiceNote, voiceNotUnderstoodMessage, cleanTranscript, isPromptEcho, fileNameFor, isVoiceEnabled, TRANSCRIBE_PROMPT };

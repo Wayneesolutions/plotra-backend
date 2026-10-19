@@ -105,3 +105,28 @@ test('system prompt explains flexible joining and the first-message welcome', ()
   assert.match(prompt, /FIRST MESSAGE/);
   assert.match(prompt, /Do NOT ask for their name or area yourself/);
 });
+
+test('sellerIntent flags owners selling, not buyers searching', () => {
+  const { looksLikeSellerIntent, extractSellerHints } = require('../src/utils/sellerIntent');
+  assert.ok(looksLikeSellerIntent('meri Dugri wali kothi bechni hai 1.5 crore'));
+  assert.ok(looksLikeSellerIntent('Mujhe apna plot bechna hai'));
+  assert.ok(looksLikeSellerIntent('I want to sell my house in Model Town'));
+  assert.ok(!looksLikeSellerIntent('plots for sale in Dugri under 80 lakh'));
+  assert.ok(!looksLikeSellerIntent('Dugri mein 200 gaj plot chahiye'));
+  const h = extractSellerHints('meri Dugri wali kothi bechni hai 1.5 crore, 200 gaj');
+  assert.deepStrictEqual(h, { property_type: 'Villa', expected_price: '1.5 crore', size_text: '200 gaj' });
+});
+
+test('detectReplyLanguage treats Hinglish selling/joining messages as Hindi', () => {
+  const { detectReplyLanguage } = require('../src/utils/replyLanguage');
+  assert.strictEqual(detectReplyLanguage('meri Dugri wali kothi bechni hai 1.5 crore'), 'hi');
+  assert.strictEqual(detectReplyLanguage('main dealer hoon, judna hai'), 'hi');
+  assert.strictEqual(detectReplyLanguage('Plot in Model Town, Ludhiana, pincode 141001, 45 lakh'), 'en');
+  assert.strictEqual(detectReplyLanguage('I want to join as a dealer in Ludhiana'), 'en');
+});
+
+test('listing status meanings never blame the location pin', () => {
+  const { LISTING_STATUS_MEANING } = require('../src/services/assistantService');
+  assert.match(LISTING_STATUS_MEANING.awaiting_approval, /haan|yes/);
+  assert.match(LISTING_STATUS_MEANING.awaiting_approval, /pin is NOT the reason/);
+});

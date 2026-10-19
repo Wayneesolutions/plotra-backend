@@ -35,7 +35,20 @@ const HINGLISH_MARKERS = new Set([
   'dijiye', 'dena', 'batao', 'bata', 'bhej', 'bhejo', 'accha', 'achha',
   'bahut', 'zyada', 'thoda', 'abhi', 'yeh', 'ye', 'woh', 'wo', 'mera', 'meri',
   'aapka', 'aapki', 'aap', 'apna', 'makan', 'ghar', 'dukaan',
+  // Selling / joining / everyday verbs and pronouns (a single "hai" in a long
+  // Hinglish sentence used to leave it classified as English).
+  'bechni', 'bechna', 'bechne', 'bikau', 'kothi', 'zameen', 'judna', 'judein', 'jud', 'kaise', 'kaisa',
+  'kitne', 'kab', 'kahan', 'kaun', 'kyunki', 'lekin', 'par', 'mein', 'me', 'ko', 'ka', 'ki', 'ke',
+  'mujhe', 'mere', 'main', 'hum', 'humein', 'humara', 'tum', 'tumhara', 'karna', 'karni', 'karne',
+  'chahta', 'chahti', 'chahte', 'chahta', 'raha', 'rahi', 'rahe', 'diya', 'gaya', 'gayi', 'hua',
+  'bhi', 'toh', 'to', 'aur', 'sirf', 'ab', 'phir', 'jaldi', 'paise', 'rupaye', 'dikhao', 'dikha',
+  'bhejna', 'dekhna', 'milega', 'milegi', 'lena', 'dena', 'wale', 'waala', 'nhi', 'hn', 'ji',
 ]);
+
+// Words that are Hinglish markers only in combination (they are also common
+// short English words: "me", "to", "par", "ab", "ji", "ho" ...), so they count
+// for the ratio rule but never decide the language on their own.
+const WEAK_MARKERS = new Set(['me', 'to', 'par', 'ab', 'ji', 'ho', 'ha', 'jud', 'ke', 'ka', 'ki', 'ko', 'hum', 'tum', 'raha', 'main']);
 
 function normalizeWords(text) {
   return String(text || '')
@@ -56,10 +69,13 @@ function detectReplyLanguage(text) {
   const words = normalizeWords(text);
   if (words.length === 0) return 'en';
 
-  const markerCount = words.filter((w) => HINGLISH_MARKERS.has(w)).length;
-  // Require actual signal, not just one incidental match in a long
-  // English sentence — at least ~20% of words, or 2+ marker words outright.
-  if (markerCount >= 2 || (words.length <= 5 && markerCount >= 1)) return 'hi';
+  const markers = words.filter((w) => HINGLISH_MARKERS.has(w));
+  const strong = markers.filter((w) => !WEAK_MARKERS.has(w)).length;
+  // Require actual signal, not just one incidental match in a long English
+  // sentence: 2+ strong markers, one strong marker in a short message, or
+  // marker words making up a fifth of the message.
+  if (strong >= 2 || (words.length <= 5 && strong >= 1)) return 'hi';
+  if (strong >= 1 && markers.length / words.length >= 0.2) return 'hi';
 
   return 'en';
 }
