@@ -4,7 +4,7 @@ const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { provideValidationFeedback } = require('../services/addressValidation');
-const { getFrontView, getStreetViewPano } = require('../services/frontViewService');
+const { getFrontView, getStreetViewPano, sanitizeBlurRegions, blurRegionsForPano } = require('../services/frontViewService');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -59,6 +59,7 @@ async function getPublicListing(req, res) {
         'listings.description',
         'listings.status',
         'listings.public_slug',
+        'listings.front_blur',
         'tenants.business_name as dealer_business_name',
         'tenants.whatsapp_number as dealer_whatsapp_number',
         'tenants.agent_rating',
@@ -136,11 +137,14 @@ async function getPublicListing(req, res) {
       : null;
 
     let streetView = null;
-    if (isLive && hasLocation) {
+    // Pre-approval too (not only live): the dealer marks signboards to hide on
+    // exactly this panorama, so the editor and the buyer's view agree.
+    if (hasLocation) {
       try {
         const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
         const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
-        streetView = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+        const pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+        streetView = pano ? { ...pano, blurRegions: blurRegionsForPano(listing.front_blur, pano.panoId) } : null;
       } catch (svErr) {
         console.error('Street view lookup failed (page renders without it):', svErr.message);
       }
@@ -557,6 +561,54 @@ async function updateListingLocation(req, res) {
 }
 
 /**
+ * PATCH /api/v1/public/listings/:slug/blur-regions
+ * Body: { panoId, regions: [{ heading, pitch, width, height }] }
+ * The dealer marks signboards / a house number on the front of the property
+ * to be blurred for buyers. Pre-approval only (same rule as the location pin:
+ * hard-blocked once the listing is live). `panoId` must be the panorama the
+ * page is showing, so areas drawn on a stale view are rejected.
+ */
+async function updateBlurRegions(req, res) {
+  const knex = req.app.get('db');
+  const { slug } = req.params;
+  const { panoId, regions } = req.body || {};
+
+  if (typeof panoId !== 'string' || !panoId || !Array.isArray(regions)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'panoId and regions are required.' } });
+  }
+
+  try {
+    const listing = await knex('listings').where({ public_slug: slug }).first('id', 'tenant_id', 'status', 'lat', 'lng');
+    if (!listing) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'This property listing is not available.' } });
+    }
+    if (listing.status === 'active') {
+      return res.status(409).json({ error: { code: 'ALREADY_PUBLISHED', message: 'This listing is already live, so the hidden areas can no longer be changed this way.' } });
+    }
+    if (listing.lat == null || listing.lng == null) {
+      return res.status(409).json({ error: { code: 'NO_LOCATION', message: 'Set the location first.' } });
+    }
+
+    const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
+    const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+    const pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+    if (!pano || pano.panoId !== panoId) {
+      return res.status(409).json({ error: { code: 'STALE_VIEW', message: 'The street view changed. Reload the page and mark the areas again.' } });
+    }
+
+    const clean = sanitizeBlurRegions(regions);
+    await knex('listings').where({ id: listing.id }).update({
+      front_blur: clean.length ? JSON.stringify({ panoId, regions: clean }) : null,
+      updated_at: knex.fn.now(),
+    });
+    return res.status(200).json({ success: true, blurRegions: clean });
+  } catch (error) {
+    console.error('Failed to save blur regions:', error.message);
+    return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Could not save. Please try again.' } });
+  }
+}
+
+/**
  * GET /api/v1/public/listings/:slug/front-view.jpg
  * One still photo from the street, facing the property, with everything
  * except the property blurred (frontViewService.js). Live listings only.
@@ -592,4 +644,4 @@ async function getListingFrontView(req, res) {
   }
 }
 
-module.exports = { getListingFrontView, getPublicListing, logVisit, capturePublicLead, updateListingLocation };
+module.exports = { getListingFrontView, getPublicListing, logVisit, capturePublicLead, updateListingLocation, updateBlurRegions };
