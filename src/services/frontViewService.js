@@ -219,10 +219,26 @@ function sanitizeBlurRegions(input) {
   return out;
 }
 
+/**
+ * Pure: the panorama the dealer actually drew the blur areas on, while the
+ * pin hasn't moved. Google's "nearest panorama" can change between requests
+ * (new imagery, another server process), and a different panorama would drop
+ * the saved areas and show signboards unblurred, so buyers get the saved one.
+ * Returns { panoId, heading } or null (caller looks the panorama up as usual).
+ */
+function savedPanoView(saved, lat, lng) {
+  if (!saved || typeof saved.panoId !== 'string' || !saved.panoId) return null;
+  const heading = Number(saved.heading);
+  const sLat = Number(saved.lat); const sLng = Number(saved.lng);
+  if (![heading, sLat, sLng, Number(lat), Number(lng)].every(Number.isFinite)) return null;
+  if (Math.abs(sLat - Number(lat)) > 1e-6 || Math.abs(sLng - Number(lng)) > 1e-6) return null;
+  return { panoId: saved.panoId, heading: Math.round(heading) };
+}
+
 /** Pure: the saved areas apply only to the panorama they were drawn on. */
 function blurRegionsForPano(saved, panoId) {
   if (!saved || !panoId || saved.panoId !== panoId) return [];
   return sanitizeBlurRegions(saved.regions);
 }
 
-module.exports = { getFrontView, getStreetViewPano, sanitizeBlurRegions, blurRegionsForPano, MAX_BLUR_REGIONS, blurAllButProperty, focusMaskSvg, bearing, _cache: cache, _panoCache: panoCache };
+module.exports = { getFrontView, getStreetViewPano, savedPanoView, sanitizeBlurRegions, blurRegionsForPano, MAX_BLUR_REGIONS, blurAllButProperty, focusMaskSvg, bearing, _cache: cache, _panoCache: panoCache };

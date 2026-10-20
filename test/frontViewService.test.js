@@ -139,3 +139,12 @@ test('saved blur areas apply only to the panorama they were drawn on', () => {
   assert.deepStrictEqual(blurRegionsForPano(saved, 'PANO_B'), [], 'location changed, so the view changed: areas ignored');
   assert.deepStrictEqual(blurRegionsForPano(null, 'PANO_A'), []);
 });
+
+test('savedPanoView keeps the panorama the blur was drawn on while the pin is unchanged', () => {
+  const { savedPanoView } = require('../src/services/frontViewService');
+  const saved = { panoId: 'abc', heading: 123.4, lat: 30.9, lng: 75.85, regions: [] };
+  assert.deepEqual(savedPanoView(saved, '30.900000', 75.85), { panoId: 'abc', heading: 123 });
+  assert.equal(savedPanoView(saved, 30.9005, 75.85), null, 'pin moved');
+  assert.equal(savedPanoView({ panoId: 'abc', regions: [] }, 30.9, 75.85), null, 'older saves without heading/coords');
+  assert.equal(savedPanoView(null, 30.9, 75.85), null);
+});

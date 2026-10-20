@@ -25,7 +25,7 @@ const TIMEOUT_MS = Number(process.env.VOICE_TRANSCRIBE_TIMEOUT_MS) || 25000;
 // and an example sentence then turns into a fake property listing.
 const TRANSCRIBE_PROMPT = [
   'Property dealer aur customer ki WhatsApp voice note. Punjabi, Hindi, Hinglish ya English. Roman script mein likho.',
-  'Shabd: gaj, marla, kanal, kothi, makaan, plot, flat, BHK, lakh, crore, registry, NOC, Dugri, Sarabha Nagar, BRS Nagar, Pakhowal Road, Ferozepur Road, Mohali, Kharar, Zirakpur.',
+  'Shabd: gaj, marla, kanal, kothi, makaan, plot, flat, BHK, lakh, crore, registry, NOC.',
 ].join(' ');
 
 // Sentences earlier versions of the prompt contained; models still echo them
@@ -53,6 +53,22 @@ function isPromptEcho(text) {
   return LEGACY_PROMPT_ECHOES.some((e) => t.includes(e) || e.includes(t));
 }
 
+// Words that appear in the prompt's vocabulary list, plus a few connectors.
+// A short transcript made only of these words and no number ("Plot in
+// Sarabha Nagar", "plot flat kothi") is the model reading the prompt back on
+// silence or noise, not a dealer speaking.
+const PROMPT_VOCAB = new Set(normalizeForEcho(`${TRANSCRIBE_PROMPT} in at`).split(' ').filter(Boolean));
+const VOCAB_ONLY_MAX_WORDS = 6;
+const VOCAB_ONLY_MAX_SECONDS = 10;
+
+function isVocabularyOnly(text, durationSec = null) {
+  if (durationSec != null && durationSec >= VOCAB_ONLY_MAX_SECONDS) return false;
+  const t = normalizeForEcho(text);
+  if (!t || /\d/.test(t)) return false;
+  const words = t.split(' ');
+  return words.length <= VOCAB_ONLY_MAX_WORDS && words.every((w) => PROMPT_VOCAB.has(w));
+}
+
 function isVoiceEnabled() {
   return String(process.env.VOICE_NOTES || 'on').toLowerCase() !== 'off' && Boolean(process.env.OPENAI_API_KEY);
 }
@@ -78,6 +94,7 @@ function cleanTranscript(text, { durationSec = null } = {}) {
   if (letters.length < 2) return null;
   if (/^(thank you|thanks for watching|you)[.!]?$/i.test(t)) return null;
   if (isPromptEcho(t)) return null;
+  if (isVocabularyOnly(t, durationSec)) return null;
   if (FILLER_ONLY.test(t)) return null;
   if (isUnclearShortClip(t, durationSec)) return null;
   return t;
@@ -203,4 +220,4 @@ function voiceNotUnderstoodMessage(lang) {
     : '🎤 Maaf kijiye, voice note samajh nahi aaya. Thoda dheere dobara bhejein, ya message type kar dein.';
 }
 
-module.exports = { transcribeVoiceNote, voiceNotUnderstoodMessage, cleanTranscript, isPromptEcho, oggOpusDurationSeconds, fileNameFor, isVoiceEnabled, TRANSCRIBE_PROMPT };
+module.exports = { isVocabularyOnly, transcribeVoiceNote, voiceNotUnderstoodMessage, cleanTranscript, isPromptEcho, oggOpusDurationSeconds, fileNameFor, isVoiceEnabled, TRANSCRIBE_PROMPT };
