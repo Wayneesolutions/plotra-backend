@@ -143,4 +143,54 @@ async function getFrontView({ listingId, lat, lng, apiKey, fetchImpl = axios.get
   return out;
 }
 
-module.exports = { getFrontView, blurAllButProperty, focusMaskSvg, bearing, _cache: cache };
+// ---- Live street view (look around the house, no walking away) -----------
+//
+// Buyers get Google's interactive panorama locked to the one camera spot that
+// faces the property (the page loads it by panorama id and heading; it never
+// receives the property's own coordinates). The browser stops them walking
+// down the street and limits how far they can turn, so they can look up,
+// down and along the front of the house but not around the neighbourhood.
+// Street View *metadata* requests are free; the result is cached per listing.
+const panoCache = new Map(); // key -> { at, value | null }
+
+function panoCacheGet(key) {
+  const hit = panoCache.get(key);
+  if (!hit) return undefined;
+  if (Date.now() - hit.at > CACHE_TTL_MS) { panoCache.delete(key); return undefined; }
+  return hit.value;
+}
+function panoCacheSet(key, value) {
+  if (panoCache.size >= CACHE_MAX) panoCache.delete(panoCache.keys().next().value);
+  panoCache.set(key, { at: Date.now(), value });
+}
+
+/**
+ * Returns { panoId, heading } for the panorama nearest the property, with the
+ * heading pointing at the property, or null when Google has no outdoor
+ * imagery within 60 m.
+ */
+async function getStreetViewPano({ listingId, lat, lng, apiKey, fetchImpl = axios.get }) {
+  if (!apiKey || lat == null || lng == null) return null;
+  const nLat = Number(lat);
+  const nLng = Number(lng);
+  const key = `${listingId}:${nLat.toFixed(6)},${nLng.toFixed(6)}`;
+  const cached = panoCacheGet(key);
+  if (cached !== undefined) return cached;
+
+  const meta = await fetchImpl('https://maps.googleapis.com/maps/api/streetview/metadata', {
+    params: { location: `${nLat},${nLng}`, radius: 60, source: 'outdoor', key: apiKey },
+    timeout: 8000,
+  });
+  if (meta.data?.status !== 'OK' || !meta.data?.pano_id || !meta.data?.location) {
+    panoCacheSet(key, null);
+    return null;
+  }
+  const value = {
+    panoId: meta.data.pano_id,
+    heading: Math.round(bearing(meta.data.location.lat, meta.data.location.lng, nLat, nLng)),
+  };
+  panoCacheSet(key, value);
+  return value;
+}
+
+module.exports = { getFrontView, getStreetViewPano, blurAllButProperty, focusMaskSvg, bearing, _cache: cache, _panoCache: panoCache };

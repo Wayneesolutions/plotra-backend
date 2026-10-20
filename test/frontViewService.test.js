@@ -85,3 +85,31 @@ test('getFrontView returns null when there is no street imagery or no key', asyn
   assert.strictEqual(n, 1, '"no imagery" is cached too');
   assert.strictEqual(await getFrontView({ listingId: 'L3', lat: 1, lng: 2, apiKey: null, fetchImpl }), null);
 });
+
+test('getStreetViewPano returns the panorama id and a heading toward the property, and caches it', async () => {
+  const { getStreetViewPano, _panoCache } = require('../src/services/frontViewService');
+  _panoCache.clear();
+  let calls = 0;
+  const fetchImpl = async (url, opts) => {
+    calls += 1;
+    assert.match(url, /streetview\/metadata$/);
+    assert.strictEqual(opts.params.source, 'outdoor');
+    // Camera 0.001 degrees south of the property: it must face north (heading ~0).
+    return { data: { status: 'OK', pano_id: 'PANO123', location: { lat: 30.9, lng: 75.85 } } };
+  };
+  const a = await getStreetViewPano({ listingId: 'l1', lat: 30.901, lng: 75.85, apiKey: 'k', fetchImpl });
+  assert.deepStrictEqual(a, { panoId: 'PANO123', heading: 0 });
+  await getStreetViewPano({ listingId: 'l1', lat: 30.901, lng: 75.85, apiKey: 'k', fetchImpl });
+  assert.strictEqual(calls, 1, 'second call served from cache');
+});
+
+test('getStreetViewPano returns null with no imagery or no key, and never exposes coordinates', async () => {
+  const { getStreetViewPano, _panoCache } = require('../src/services/frontViewService');
+  _panoCache.clear();
+  const none = async () => ({ data: { status: 'ZERO_RESULTS' } });
+  assert.strictEqual(await getStreetViewPano({ listingId: 'l2', lat: 1, lng: 1, apiKey: 'k', fetchImpl: none }), null);
+  assert.strictEqual(await getStreetViewPano({ listingId: 'l3', lat: 1, lng: 1, apiKey: '', fetchImpl: none }), null);
+  const ok = async () => ({ data: { status: 'OK', pano_id: 'P', location: { lat: 1, lng: 1.001 } } });
+  const v = await getStreetViewPano({ listingId: 'l4', lat: 1, lng: 1, apiKey: 'k', fetchImpl: ok });
+  assert.deepStrictEqual(Object.keys(v).sort(), ['heading', 'panoId']);
+});
