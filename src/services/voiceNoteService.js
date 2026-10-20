@@ -71,14 +71,51 @@ function fileNameFor(mimeType) {
  * Trims and sanity-checks a transcript. Returns null for empty output or for
  * the filler a speech model emits on silence ("Thank you.", "...").
  */
-function cleanTranscript(text) {
+function cleanTranscript(text, { durationSec = null } = {}) {
   const t = String(text || '').replace(/\s+/g, ' ').trim();
   if (!t) return null;
   const letters = t.replace(/[^\p{L}\p{N}]/gu, '');
   if (letters.length < 2) return null;
   if (/^(thank you|thanks for watching|you)[.!]?$/i.test(t)) return null;
   if (isPromptEcho(t)) return null;
+  if (FILLER_ONLY.test(t)) return null;
+  if (isUnclearShortClip(t, durationSec)) return null;
   return t;
+}
+
+// Speech models turn breaths and room noise into polite filler. Never a real message.
+const FILLER_ONLY = /^(?:(?:uh+|um+|hmm+|mm+|ah+|oh+|one (?:sec|second|moment)|just (?:a )?(?:sec|second|moment)|wait(?: a (?:sec|second|moment))?|bye|okay then)[.!?,\s]*)+$/i;
+
+// A very short clip that produced one or two words is almost always noise.
+// Real one-word answers people do send by voice (yes/no/hello) stay valid.
+const SHORT_CLIP_SECONDS = Number(process.env.VOICE_SHORT_CLIP_SECONDS) || 3;
+const MIN_CLIP_SECONDS = Number(process.env.VOICE_MIN_CLIP_SECONDS) || 0.6;
+const SHORT_VALID = /^(?:haan|han|ha|haanji|yes|yeah|yep|no|nahi|nahin|nhi|ok|okay|theek hai|thik hai|sahi hai|hello|hi|hey|namaste|sat sri akal|sat shri akal|ji|ji haan|done|ho gaya|bik gaya|sold|pin nahi)[.!?,\s]*$/i;
+
+function isUnclearShortClip(text, durationSec) {
+  if (durationSec == null || durationSec >= SHORT_CLIP_SECONDS) return false;
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  if (words.length > 2) return false;
+  return !SHORT_VALID.test(String(text).trim());
+}
+
+/**
+ * Length in seconds of an Ogg/Opus clip (WhatsApp voice notes), read from the
+ * last Ogg page's granule position (Opus always counts in 48 kHz samples).
+ * Returns null for any other container or if it can't be read.
+ */
+function oggOpusDurationSeconds(buffer) {
+  try {
+    if (!buffer || buffer.length < 27 || buffer.toString('latin1', 0, 4) !== 'OggS') return null;
+    const idx = buffer.lastIndexOf('OggS');
+    if (idx < 0 || idx + 14 > buffer.length) return null;
+    const granule = buffer.readBigUInt64LE(idx + 6);
+    if (granule === 0xFFFFFFFFFFFFFFFFn) return null;
+    const seconds = Number(granule) / 48000;
+    return Number.isFinite(seconds) && seconds > 0 && seconds < 3600 ? seconds : null;
+  } catch {
+    return null;
+  }
 }
 
 async function callTranscription({ buffer, mimeType, model, fetchImpl }) {
@@ -127,6 +164,14 @@ async function transcribeVoiceNote({ mediaId, mimeType, download, fetchImpl = fe
       return null;
     }
 
+    // Clips shorter than a fraction of a second are a stray tap, not speech:
+    // don't pay for them or risk a hallucinated sentence.
+    const durationSec = oggOpusDurationSeconds(buffer);
+    if (durationSec != null && durationSec < MIN_CLIP_SECONDS) {
+      console.log(`[voice] ${mediaId} -> too short (${durationSec.toFixed(2)}s), treated as unclear`);
+      return null;
+    }
+
     const model = process.env.VOICE_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe';
     let text;
     try {
@@ -142,8 +187,8 @@ async function transcribeVoiceNote({ mediaId, mimeType, download, fetchImpl = fe
       }
     }
 
-    const transcript = cleanTranscript(text);
-    console.log(`[voice] ${mediaId} -> ${transcript ? JSON.stringify(transcript.slice(0, 120)) : 'no usable speech'}`);
+    const transcript = cleanTranscript(text, { durationSec });
+    console.log(`[voice] ${mediaId} (${durationSec != null ? `${durationSec.toFixed(1)}s` : 'length unknown'}) -> ${transcript ? JSON.stringify(transcript.slice(0, 120)) : 'no usable speech'}`);
     return transcript;
   } catch (err) {
     console.error(`[voice] transcription failed for ${mediaId}:`, err.message);
@@ -158,4 +203,4 @@ function voiceNotUnderstoodMessage(lang) {
     : '🎤 Maaf kijiye, voice note samajh nahi aaya. Thoda dheere dobara bhejein, ya message type kar dein.';
 }
 
-module.exports = { transcribeVoiceNote, voiceNotUnderstoodMessage, cleanTranscript, isPromptEcho, fileNameFor, isVoiceEnabled, TRANSCRIBE_PROMPT };
+module.exports = { transcribeVoiceNote, voiceNotUnderstoodMessage, cleanTranscript, isPromptEcho, oggOpusDurationSeconds, fileNameFor, isVoiceEnabled, TRANSCRIBE_PROMPT };
