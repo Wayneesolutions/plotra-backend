@@ -193,4 +193,36 @@ async function getStreetViewPano({ listingId, lat, lng, apiKey, fetchImpl = axio
   return value;
 }
 
-module.exports = { getFrontView, getStreetViewPano, blurAllButProperty, focusMaskSvg, bearing, _cache: cache, _panoCache: panoCache };
+// ---- Dealer-chosen blur areas ----------------------------------------------
+const MAX_BLUR_REGIONS = 8;
+
+/**
+ * Pure (unit-tested): validates the areas a dealer marked. Each is
+ * { heading 0-360, pitch -90..90, width 2..80, height 2..80 } in degrees,
+ * the centre and size of the area in the panorama. Returns a clean array
+ * (never throws); anything malformed is dropped, extras beyond the limit too.
+ */
+function sanitizeBlurRegions(input) {
+  if (!Array.isArray(input)) return [];
+  const num = (v) => (typeof v === 'number' ? v : parseFloat(v));
+  const round1 = (n) => Math.round(n * 10) / 10;
+  const out = [];
+  for (const r of input) {
+    if (out.length >= MAX_BLUR_REGIONS) break;
+    if (!r || typeof r !== 'object') continue;
+    const heading = num(r.heading); const pitch = num(r.pitch);
+    const width = num(r.width); const height = num(r.height);
+    if (![heading, pitch, width, height].every(Number.isFinite)) continue;
+    if (pitch < -90 || pitch > 90 || width < 2 || width > 80 || height < 2 || height > 80) continue;
+    out.push({ heading: round1(((heading % 360) + 360) % 360), pitch: round1(pitch), width: round1(width), height: round1(height) });
+  }
+  return out;
+}
+
+/** Pure: the saved areas apply only to the panorama they were drawn on. */
+function blurRegionsForPano(saved, panoId) {
+  if (!saved || !panoId || saved.panoId !== panoId) return [];
+  return sanitizeBlurRegions(saved.regions);
+}
+
+module.exports = { getFrontView, getStreetViewPano, sanitizeBlurRegions, blurRegionsForPano, MAX_BLUR_REGIONS, blurAllButProperty, focusMaskSvg, bearing, _cache: cache, _panoCache: panoCache };

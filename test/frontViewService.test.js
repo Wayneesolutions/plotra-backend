@@ -113,3 +113,29 @@ test('getStreetViewPano returns null with no imagery or no key, and never expose
   const v = await getStreetViewPano({ listingId: 'l4', lat: 1, lng: 1, apiKey: 'k', fetchImpl: ok });
   assert.deepStrictEqual(Object.keys(v).sort(), ['heading', 'panoId']);
 });
+
+test('sanitizeBlurRegions keeps valid areas, drops malformed ones, caps the count and wraps heading', () => {
+  const { sanitizeBlurRegions, MAX_BLUR_REGIONS } = require('../src/services/frontViewService');
+  assert.deepStrictEqual(sanitizeBlurRegions('nope'), []);
+  assert.deepStrictEqual(sanitizeBlurRegions([
+    { heading: 370.04, pitch: 5.55, width: 10, height: 6 },   // valid, heading wraps
+    { heading: 10, pitch: 5, width: 1, height: 6 },           // too small
+    { heading: 10, pitch: 120, width: 10, height: 6 },        // pitch out of range
+    { heading: 'x', pitch: 5, width: 10, height: 6 },         // not a number
+    null,
+    { heading: '90', pitch: '-4', width: '12', height: '8' }, // numeric strings are fine
+  ]), [
+    { heading: 10, pitch: 5.6, width: 10, height: 6 },
+    { heading: 90, pitch: -4, width: 12, height: 8 },
+  ]);
+  const many = Array.from({ length: 20 }, () => ({ heading: 1, pitch: 1, width: 5, height: 5 }));
+  assert.strictEqual(sanitizeBlurRegions(many).length, MAX_BLUR_REGIONS);
+});
+
+test('saved blur areas apply only to the panorama they were drawn on', () => {
+  const { blurRegionsForPano } = require('../src/services/frontViewService');
+  const saved = { panoId: 'PANO_A', regions: [{ heading: 10, pitch: 0, width: 10, height: 6 }] };
+  assert.strictEqual(blurRegionsForPano(saved, 'PANO_A').length, 1);
+  assert.deepStrictEqual(blurRegionsForPano(saved, 'PANO_B'), [], 'location changed, so the view changed: areas ignored');
+  assert.deepStrictEqual(blurRegionsForPano(null, 'PANO_A'), []);
+});
