@@ -26,6 +26,7 @@
 //    webhookController.js).
 const axios = require('axios');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { quickAgentIntent } = require('../utils/agentQuickIntent');
 
 // Required lazily: agentMessagingService opens a BullMQ/Redis connection at
 // load time, which would keep the pure-function unit tests from exiting.
@@ -419,7 +420,17 @@ async function routeAgentText(knex, { agentUser, incomingText }) {
   let classification = null;
   try {
     ctx = await loadAgentContext(knex, agentUser);
-    classification = await classifyAgentMessage(incomingText, ctx);
+    // Clear-cut messages (an address, a payment problem, "support number?",
+    // "discount?") are settled without the model so an old open draft can't
+    // swallow them or the model can't misread them.
+    const quick = quickAgentIntent(incomingText, { draftOpen: Boolean(ctx.draftStatus) });
+    if (quick === 'listing_info') {
+      classification = { intent: 'listing_info', confidence: 1, listingHint: null, replyLanguage: null };
+    } else if (quick) {
+      classification = { intent: quick, confidence: 1, listingHint: null, replyLanguage: null };
+    } else {
+      classification = await classifyAgentMessage(incomingText, ctx);
+    }
     decision = decideRoute(classification, ctx);
   } catch (err) {
     console.error('agentIntentService: routing failed, using intake flow:', err.message);

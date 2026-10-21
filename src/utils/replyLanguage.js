@@ -100,6 +100,14 @@ function detectMessageLanguage(text) {
   return words.length >= 3 ? 'en' : null;
 }
 
+/** 'gurmukhi' | 'devanagari' | 'roman', by the script of the message. */
+function detectScript(text) {
+  const t = String(text || '');
+  if (/[\u0A00-\u0A7F]/.test(t)) return 'gurmukhi';
+  if (/[\u0900-\u097F]/.test(t)) return 'devanagari';
+  return 'roman';
+}
+
 // English counterparts to listingExtractionService.js's FIELD_QUESTIONS,
 // which is Hindi/Hinglish-only and shared between the web chat and
 // WhatsApp agent-intake flow. Originally lived only in webChatController.js
@@ -113,4 +121,4 @@ const FIELD_QUESTIONS_EN = {
   title: 'Give me a short title for this listing.',
 };
 
-module.exports = { detectReplyLanguage, detectMessageLanguage, FIELD_QUESTIONS_EN };
+module.exports = { detectReplyLanguage, detectMessageLanguage, detectScript, FIELD_QUESTIONS_EN };

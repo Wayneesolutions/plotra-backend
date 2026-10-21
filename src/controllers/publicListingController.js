@@ -4,7 +4,7 @@ const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { provideValidationFeedback } = require('../services/addressValidation');
-const { getFrontView, getStreetViewPano, sanitizeBlurRegions, blurRegionsForPano } = require('../services/frontViewService');
+const { getFrontView, getStreetViewPano, savedPanoView, sanitizeBlurRegions, blurRegionsForPano } = require('../services/frontViewService');
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -141,9 +141,12 @@ async function getPublicListing(req, res) {
     // exactly this panorama, so the editor and the buyer's view agree.
     if (hasLocation) {
       try {
-        const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
-        const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
-        const pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+        let pano = savedPanoView(listing.front_blur, listing.lat, listing.lng);
+        if (!pano) {
+          const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
+          const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+          pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+        }
         streetView = pano ? { ...pano, blurRegions: blurRegionsForPano(listing.front_blur, pano.panoId) } : null;
       } catch (svErr) {
         console.error('Street view lookup failed (page renders without it):', svErr.message);
@@ -578,7 +581,7 @@ async function updateBlurRegions(req, res) {
   }
 
   try {
-    const listing = await knex('listings').where({ public_slug: slug }).first('id', 'tenant_id', 'status', 'lat', 'lng');
+    const listing = await knex('listings').where({ public_slug: slug }).first('id', 'tenant_id', 'status', 'lat', 'lng', 'front_blur');
     if (!listing) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'This property listing is not available.' } });
     }
@@ -592,13 +595,17 @@ async function updateBlurRegions(req, res) {
     const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
     const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
     const pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
-    if (!pano || pano.panoId !== panoId) {
+    // The page may be showing the panorama saved with earlier areas rather
+    // than Google's current nearest one; either is valid for this pin.
+    const shown = savedPanoView(listing.front_blur, listing.lat, listing.lng);
+    const view = shown && shown.panoId === panoId ? shown : pano;
+    if (!view || view.panoId !== panoId) {
       return res.status(409).json({ error: { code: 'STALE_VIEW', message: 'The street view changed. Reload the page and mark the areas again.' } });
     }
 
     const clean = sanitizeBlurRegions(regions);
     await knex('listings').where({ id: listing.id }).update({
-      front_blur: clean.length ? JSON.stringify({ panoId, regions: clean }) : null,
+      front_blur: clean.length ? JSON.stringify({ panoId, heading: view.heading, lat: Number(listing.lat), lng: Number(listing.lng), regions: clean }) : null,
       updated_at: knex.fn.now(),
     });
     return res.status(200).json({ success: true, blurRegions: clean });

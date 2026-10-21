@@ -24,7 +24,7 @@
 
 const axios = require('axios');
 const { PRODUCT, RULES, offersText } = require('../assistant/plotraaKnowledge');
-const { detectReplyLanguage, detectMessageLanguage } = require('../utils/replyLanguage');
+const { detectReplyLanguage, detectMessageLanguage, detectScript } = require('../utils/replyLanguage');
 const { normalizePhone } = require('../utils/phone');
 const { looksLikeSellerIntent, extractSellerHints } = require('../utils/sellerIntent');
 const { raiseSupportRequest } = require('./supportRequestService');
@@ -169,7 +169,7 @@ async function loadHistory(knex, phone, audience) {
 
 // ------------------------------------------------------------------ model
 
-function buildSystemPrompt({ audience, contextText, plansText, langHint = null }) {
+function buildSystemPrompt({ audience, contextText, plansText, langHint = null, script = null }) {
   const audienceNote = {
     agent: 'You are talking to a registered Plotraa agent. Be their friendly, patient assistant and guide.',
     visitor: 'You are talking to someone new on the Plotraa WhatsApp number.',
@@ -187,7 +187,11 @@ ${plansText}
 ${offersText()}
 
 ${contextText}
-${langHint === 'hi' ? '\nLANGUAGE: the person writes Hindi/Hinglish/Punjabi. Reply in Hinglish (Roman script) or in the script they used, NOT in English.' : langHint === 'en' ? '\nLANGUAGE: the person writes English. Reply in English.' : ''}
+${langHint === 'hi'
+    ? (script === 'gurmukhi' ? '\nLANGUAGE: the person writes Punjabi in Gurmukhi. Reply in simple, natural everyday Punjabi in Gurmukhi, NOT in English.'
+      : script === 'devanagari' ? '\nLANGUAGE: the person writes Hindi in Devanagari. Reply in Hindi in Devanagari, NOT in English.'
+        : '\nLANGUAGE: the person writes Hinglish in Roman script. Reply in Roman-script Hinglish only: no Gurmukhi, no Devanagari, not English.')
+    : langHint === 'en' ? '\nLANGUAGE: the person writes English. Reply in English only.' : ''}
 
 Return ONLY JSON:
 {"reply": "the WhatsApp message to send",
@@ -390,7 +394,7 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // a tie when the message is too short to tell ("ok", "Dugri").
     const msgLang = detectMessageLanguage(text);
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), langHint: msgLang || detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' ')) }) },
+      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), script: detectScript(text), langHint: msgLang || detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' ')) }) },
       ...history,
       { role: 'user', content: String(text).slice(0, 2000) },
     ];
