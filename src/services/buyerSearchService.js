@@ -36,14 +36,11 @@ const MAX_RESULTS = 8;
  * existed, rather than risk misfiring a "no properties found" reply to
  * something that was never a search.
  *
- * property_type and area are the only hard filters used downstream —
- * size (e.g. "200 gaz") is intentionally NOT filtered on in this version.
- * plot_area is a free-text field ("250 Sq Yards", "10 Marla") on listings,
- * so a strict numeric filter would silently drop real matches over unit
- * differences; size is only echoed back in the reply text so the buyer
- * can see what was searched for. A proper numeric plot-size column/filter
- * is a reasonable follow-up once there's real search volume to tune it
- * against.
+ * property_type and area are SQL filters. Size ("200 gaj", "10 marla") is
+ * applied afterwards in code (see parsePlotSize / sizeMatches): plot_area is
+ * free text on listings ("250 Sq Yards", "10 Marla"), so both sides are
+ * converted to square yards before comparing, which keeps unit differences
+ * ("gaj" vs "sq yd") from dropping real matches.
  */
 async function extractBuyerIntent(incomingText) {
   const systemPrompt = `You classify inbound WhatsApp messages to a real estate marketplace's shared number.
@@ -95,6 +92,51 @@ If is_property_search is false, set the other three fields to null.`;
   }
 }
 
+
+// ---------------------------------------------------------------- plot size
+
+// Square yards per unit. gaj/gaz are the same as a square yard; a Punjab marla
+// is 272.25 sq ft (30.25 sq yd) and a kanal is 20 marla. BHK is a flat size,
+// not a plot area, so it never parses.
+const SQ_YD_PER_UNIT = [
+  [/^(?:gaj|gaz|gajj|sq\.?\s*y(?:ar)?d?s?|square\s*y(?:ar)?d?s?|yards?|yds?)$/i, 1],
+  [/^(?:sq\.?\s*f(?:ee)?t\.?|sqft|square\s*f(?:ee)?t)$/i, 1 / 9],
+  [/^(?:marla|marle)$/i, 30.25],
+  [/^(?:kanal|kanaal)$/i, 605],
+];
+const SIZE_RE = /(\d+(?:[.,]\d+)?)\s*(gaj|gaz|gajj|sq\.?\s*y(?:ar)?d?s?|square\s*y(?:ar)?d?s?|yards?|yds?|sq\.?\s*f(?:ee)?t\.?|sqft|square\s*f(?:ee)?t|marla|marle|kanal|kanaal)\b/i;
+const SIZE_TOLERANCE = 0.1; // listings say "200" for 195-210 yard plots
+
+/** Pure (unit-tested): "200 gaj" / "10 Marla" / "1200 sq ft" -> square yards, or null. */
+function parsePlotSize(text) {
+  const m = String(text || '').match(SIZE_RE);
+  if (!m) return null;
+  const value = Number(m[1].replace(',', '.'));
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = SQ_YD_PER_UNIT.find(([re]) => re.test(m[2].trim()));
+  return unit ? value * unit[1] : null;
+}
+
+/**
+ * Pure (unit-tested): 'match' / 'mismatch' / 'unknown' for one listing. A
+ * listing whose size can't be read is 'unknown' (kept, after the matches),
+ * never silently treated as a match.
+ */
+function sizeMatches(wantedText, listingText) {
+  const wanted = parsePlotSize(wantedText);
+  if (!wanted) return 'match'; // nothing (parseable) was asked for
+  const have = parsePlotSize(listingText);
+  if (!have) return 'unknown';
+  return Math.abs(have - wanted) / wanted <= SIZE_TOLERANCE ? 'match' : 'mismatch';
+}
+
+/** Pure: keeps matching sizes first, then unknown ones; drops known mismatches. */
+function filterBySize(listings, sizeText) {
+  if (!parsePlotSize(sizeText)) return listings;
+  const verdicts = listings.map((l) => ({ l, v: sizeMatches(sizeText, l.plot_area) }));
+  return [...verdicts.filter((x) => x.v === 'match'), ...verdicts.filter((x) => x.v === 'unknown')].map((x) => x.l);
+}
+
 /**
  * Cross-tenant match — deliberately no tenant_id filter. status='active'
  * only (never a pending/awaiting-approval/geo-review listing — those
@@ -122,7 +164,8 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
       'listings.tenant_id'
     )
     .orderBy('listings.created_at', 'desc')
-    .limit(MAX_RESULTS);
+    // With a size to apply, over-fetch: most rows are filtered out in code.
+    .limit(parsePlotSize(intent.sizeText) ? MAX_RESULTS * 12 : MAX_RESULTS);
 
   // Optional single-dealer scope — used by callEnquiryService.js for a call
   // that came in on a dealer's own AI-calling number. The WhatsApp
@@ -144,7 +187,8 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
     });
   }
 
-  return query;
+  const rows = await query;
+  return filterBySize(rows, intent.sizeText).slice(0, MAX_RESULTS);
 }
 
 function buildPublicListingUrl(publicSlug) {
@@ -165,7 +209,7 @@ function formatPrice(price) {
  */
 function formatSearchReply(listings, intent) {
   if (listings.length === 0) {
-    const what = [intent.propertyType, intent.area].filter(Boolean).join(' in ');
+    const what = [intent.sizeText, intent.propertyType, intent.area].filter(Boolean).join(' · ');
     return `Sorry, no matching properties found right now${what ? ` for "${what}"` : ''}. We'll keep an eye out — feel free to try a different area or property type.`;
   }
 
@@ -222,4 +266,4 @@ async function handleBuyerSearch(knex, { incomingText, buyerPhone }) {
   return { replyText: formatSearchReply(listings, intent), matchCount: listings.length };
 }
 
-module.exports = { handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl };
+module.exports = { parsePlotSize, sizeMatches, filterBySize, handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl };

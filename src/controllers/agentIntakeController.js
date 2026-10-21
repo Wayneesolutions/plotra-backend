@@ -74,6 +74,7 @@ const redisConnection = {
 };
 const agentIntakeQueue = new Queue('agent-listing-intake', { connection: redisConnection });
 
+const { isDifferentProperty } = require('../utils/addressMatch');
 const LIVE_STATUSES = ['collecting', 'extracting', 'creating', 'enriching', 'awaiting_approval'];
 
 // Short delay so a few rapid-fire agent messages collapse into one GPT
@@ -149,43 +150,6 @@ function buildNeedsCorrectionDetailMessage(lang) {
  */
 function hasNoExtractableInfo(fields) {
   return Object.values(fields).every((v) => v === null || v === undefined || String(v).trim() === '');
-}
-
-function normalizeAddressText(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-/**
- * Heuristic for "this message is about a different property" vs. "this is
- * a correction to the one already awaiting approval." Deliberately loose:
- * treats one address/building name as a match for another if either
- * contains the other once normalized (so "DLF Chandigarh One" still
- * matches "DLF Chandigarh One, Tower 3", and "Sector 45 Mohali" matches
- * "sector-45, Mohali!!"). Only called when the new message actually stated
- * a raw_address/building name — if there's nothing to compare, this
- * assumes it's the same property rather than guessing.
- *
- * Building name is checked first and, when both sides have one, decides
- * the result on its own — two different buildings in the same city
- * ("Agi Flats, Ludhiana" vs. an existing "Hero Homes, Ludhiana" draft)
- * would otherwise both contain the shared "ludhiana" substring and be
- * wrongly read as the same property if only raw_address were compared.
- */
-function isDifferentProperty(newFields, existingListing) {
-  const newBuilding = normalizeAddressText(newFields.building_name);
-  const existingBuilding = normalizeAddressText(existingListing.building_name);
-  if (newBuilding && existingBuilding) {
-    return !newBuilding.includes(existingBuilding) && !existingBuilding.includes(newBuilding);
-  }
-
-  const a = normalizeAddressText(newFields.raw_address);
-  const b = normalizeAddressText(existingListing.raw_address);
-  if (!a || !b) return false;
-  if (a === b) return false;
-  return !a.includes(b) && !b.includes(a);
 }
 
 // Fix 1's confirmed root cause (found via prod BullMQ/DB evidence): the

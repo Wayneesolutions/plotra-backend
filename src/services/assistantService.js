@@ -23,12 +23,13 @@
 // clearly asks for help still raises a support request.
 
 const axios = require('axios');
-const { PRODUCT, RULES, offersText } = require('../assistant/plotraaKnowledge');
+const { PRODUCT, RULES, offersText, PUBLIC_SITE } = require('../assistant/plotraaKnowledge');
 const { detectReplyLanguage, detectMessageLanguage, detectScript } = require('../utils/replyLanguage');
 const { normalizePhone } = require('../utils/phone');
 const { looksLikeSellerIntent, extractSellerHints } = require('../utils/sellerIntent');
 const { raiseSupportRequest } = require('./supportRequestService');
-const { advanceSignupFromAssistant, cancelPendingSignup, describeSignupState, findPendingSignup, isComplete } = require('./agentSignupService');
+const { advanceSignupFromAssistant, cancelPendingSignup, describeSignupState } = require('./agentSignupService');
+const { looksLikeKnownQuestion } = require('../utils/agentQuickIntent');
 
 const enqueueWhatsapp = (...a) => require('./agentMessagingService').enqueueAgentWhatsappSend(...a);
 
@@ -56,13 +57,22 @@ function isAssistantEnabled() {
 
 // Used only when the model is unavailable: a message that obviously asks
 // for a person/help still reaches the team instead of getting lost.
-const SUPPORT_PATTERNS = [
+// STRONG patterns are a request or a problem on their own; WEAK ones ("help",
+// "support", "team") also appear in plain questions ("support number?"), so
+// they only count when the message is not a question.
+const STRONG_SUPPORT_PATTERNS = [
   /\b(call|phone)\s*(me|kar|karo|kariye|karna)\b/i, /\bcall\s*back\b/i, /\bbaat\s*kar(ni|na|wao|o)?\b/i,
   /\b(problem|issue|complaint|shikayat|dikkat|pareshani|galti)\b/i, /\b(not|nahi|nhi)\s*(working|chal|ho\s*raha|aa\s*raha)\b/i,
-  /\b(help|madad|sahayata)\b/i, /\b(team|support|customer\s*care)\b/i, /\brefund\b/i,
+  /\brefund\b/i,
 ];
+const WEAK_SUPPORT_PATTERNS = [/\b(help|madad|sahayata)\b/i, /\b(team|support|customer\s*care)\b/i];
+const QUESTION_SHAPE = /\?|\b(?:kya|kaise|kitna|kitne|kab|kahan|number|no)\b/i;
+
 function looksLikeSupportRequest(text) {
-  return SUPPORT_PATTERNS.some((re) => re.test(String(text || '')));
+  const t = String(text || '');
+  if (STRONG_SUPPORT_PATTERNS.some((re) => re.test(t))) return true;
+  if (looksLikeKnownQuestion(t) || QUESTION_SHAPE.test(t)) return false;
+  return WEAK_SUPPORT_PATTERNS.some((re) => re.test(t));
 }
 
 // ------------------------------------------------------------------ context
@@ -336,6 +346,31 @@ async function handleSellerWithoutModel(knex, { audience, phone, name, text, ten
   }
 }
 
+/** Pure (unit-tested): an informational question with no problem or call request in it. */
+function isPlainQuestion(text) {
+  const t = String(text || '');
+  if (STRONG_SUPPORT_PATTERNS.some((re) => re.test(t))) return false;
+  return looksLikeKnownQuestion(t) || (/\?/.test(t) && !looksLikeSellerIntent(t));
+}
+
+// A discount question is answered in a line or two; models pad it with the
+// plan list. Trims at a sentence/line end so it never stops mid-word.
+const DISCOUNT_QUESTION = /(?:discount|offer|coupon|trial|chhoot|chhut|sasta|ਡਿਸਕਾਊਂਟ|ਡਿਸਕਾਉਂਟ|ਛੋਟ|ਆਫਰ|ਆਫ਼ਰ|डिस्काउंट|छूट|ऑफर)/i;
+const SHORT_REPLY_CHARS = 280;
+function capShortReply(reply, text) {
+  if (!DISCOUNT_QUESTION.test(String(text || '')) || reply.length <= SHORT_REPLY_CHARS) return reply;
+  const head = reply.slice(0, SHORT_REPLY_CHARS);
+  const cut = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('. '), head.lastIndexOf('। '), head.lastIndexOf('! '), head.lastIndexOf('? '));
+  return (cut > 80 ? head.slice(0, cut + 1) : head.replace(/\s+\S*$/, '…')).trim();
+}
+
+/** Website form offered next to the WhatsApp path, by who the visitor turned out to be. */
+function visitorFormLine({ action, lang }) {
+  if (action === 'start_signup') return lang === 'en' ? `🌐 Prefer a form? Apply at ${PUBLIC_SITE}/request-access` : `🌐 Form pasand hai? Yahan apply karein: ${PUBLIC_SITE}/request-access`;
+  if (action === 'seller_lead') return lang === 'en' ? `🌐 You can also list your property at ${PUBLIC_SITE}/sell-property` : `🌐 Aap yahan bhi apni property daal sakte hain: ${PUBLIC_SITE}/sell-property`;
+  return null;
+}
+
 function fallbackSupportReply(lang) {
   return lang === 'en'
     ? "🙏 Got it. I've told the Plotraa team, someone will contact you on this number shortly."
@@ -376,6 +411,7 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     return { handled: false };
   }
 
+  let supportRaised = false;
   try {
     // First contact ever with this number (no assistant chat in any role):
     // the assistant opens with a short welcome and the three paths.
@@ -402,6 +438,14 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     const out = parseAssistantOutput(await callModel(messages));
     if (!out) throw new Error('unusable model output');
 
+    // A plain question ("support number?", "upgrade kaise karu?") is answered,
+    // never ticketed, even when the model picked "support" for it. A real
+    // problem or call request in the same text keeps the ticket.
+    if ((out.action === 'support' || out.action === 'callback') && isPlainQuestion(text)) {
+      console.log('[Assistant] %s %s plain question, not raising %s', audience, normalizedPhone, out.action);
+      out.action = 'none';
+    }
+
     // Deterministic safety net: an owner saying they want to sell must become
     // a seller lead even when the model picked another action (it used to
     // answer "bechni hai" with a buyer reply, or treat it as dealer joining).
@@ -421,7 +465,8 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     }
 
     let action = await performAction(knex, out, { audience, phone: normalizedPhone, name, text, agentUser, tenantId });
-    let reply = out.reply;
+    supportRaised = action === 'support';
+    let reply = capShortReply(out.reply, text);
 
     // An owner selling their own property is not a dealer applicant: close
     // any open join request (it used to stay open and swallow the seller).
@@ -440,11 +485,16 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
       const convoLang = msgLang
         || out.replyLanguage
         || detectReplyLanguage([...history.filter((m) => m.role === 'user').map((m) => m.content), text].join(' '));
+      // A first message that is only a name and a working area (often Gurmukhi)
+      // is a dealer joining even if the model left the action at "none".
+      const gaveNameAndArea = Boolean(out.signup?.name && out.signup?.area) && out.action === 'none';
+      if (gaveNameAndArea) out.action = 'start_signup';
       const signupStep = await advanceSignupFromAssistant(knex, {
         phone: normalizedPhone,
         text,
         fields: out.signup || {},
         lang: convoLang,
+        script: detectScript(text),
         receiving,
         start: out.action === 'start_signup' || startSignup,
       });
@@ -454,18 +504,39 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
           action = signupStep.justCompleted ? 'signup_submitted' : 'signup';
         }
       }
+      // Dealers also get the web form, once, when they start joining.
+      if (signupStep && !signupStep.justCompleted && (out.action === 'start_signup' || startSignup) && !history.some((m) => m.role === 'assistant' && m.content.includes('/request-access'))) {
+        const line = visitorFormLine({ action: 'start_signup', lang: convoLang });
+        if (line) reply = `${reply}\n\n${line}`;
+      }
+    }
+    if (audience === 'visitor' && isSellerMessage && !history.some((m) => m.role === 'assistant' && m.content.includes('/sell-property'))) {
+      const line = visitorFormLine({ action: 'seller_lead', lang: msgLang || out.replyLanguage || lang });
+      if (line) reply = `${reply}\n\n${line}`;
     }
 
-    await knex('assistant_messages').insert([
-      { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'inbound', body: String(text).slice(0, 4000) },
-      { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'outbound', body: reply, action },
-    ]);
-
+    // The reply goes out FIRST. Bookkeeping after this point must never stop
+    // the person getting their answer (or make the catch below raise the
+    // support request a second time).
     await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: reply });
+    try {
+      await knex('assistant_messages').insert([
+        { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'inbound', body: String(text).slice(0, 4000) },
+        { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'outbound', body: reply, action },
+      ]);
+    } catch (logErr) {
+      console.error('[Assistant] could not save chat history (reply already sent):', logErr.message);
+    }
     console.log('[Assistant] %s %s action=%s', audience, normalizedPhone, action);
     return { handled: true, action };
   } catch (err) {
     console.error('[Assistant] failed, caller falls back:', err.message);
+    // Already raised before the failure: don't raise it again, and the caller
+    // must not send its own reply on top of ours.
+    if (supportRaised) {
+      await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: fallbackSupportReply(lang) }).catch(() => {});
+      return { handled: true, action: 'support' };
+    }
     if (audience === 'agent' && looksLikeSupportRequest(text)) {
       await raiseSupportRequest(knex, { phone: normalizedPhone, name: name || agentUser?.name, audience, kind: 'problem', lastMessage: text, tenantId: sendTenantId, userId: agentUser?.id || null });
       await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: fallbackSupportReply(lang) }).catch(() => {});
@@ -483,6 +554,8 @@ module.exports = {
   parseAssistantOutput,
   formatPlansForPrompt,
   looksLikeSupportRequest,
+  isPlainQuestion,
+  capShortReply,
   buildSystemPrompt,
   LISTING_STATUS_MEANING,
 };

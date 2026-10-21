@@ -64,13 +64,20 @@ function isComplete(signup) {
 }
 
 /** Pure (unit-tested): the line appended to the assistant's reply. */
-function signupFollowUp({ name, address, justCompleted, lang }) {
+function signupFollowUp({ name, address, justCompleted, lang, script = 'roman' }) {
+  const pa = script === 'gurmukhi' && lang !== 'en';
   if (justCompleted) {
+    if (pa) return `✅ ਹੋ ਗਿਆ! ਤੁਹਾਡੀ ਜੁੜਨ ਦੀ ਬੇਨਤੀ (ਨਾਮ: *${name}*, ਇਲਾਕਾ: *${address}*) Plotraa ਟੀਮ ਨੂੰ ਮਨਜ਼ੂਰੀ ਲਈ ਭੇਜ ਦਿੱਤੀ ਹੈ। ਮਨਜ਼ੂਰ ਹੁੰਦੇ ਹੀ ਇਸੇ ਨੰਬਰ 'ਤੇ ਸੁਨੇਹਾ ਆਵੇਗਾ, ਫਿਰ ਪਲਾਨ ਚੁਣ ਕੇ ਆਪਣੀ ਪਹਿਲੀ ਪ੍ਰਾਪਰਟੀ ਭੇਜੋ।`;
     return lang === 'en'
       ? `✅ Done! Your request to join (Name: *${name}*, Area: *${address}*) has gone to the Plotraa team for approval. You'll get a message on this number once it's approved; then pick a plan and send your first property.`
       : `✅ Ho gaya! Aapka join request (Naam: *${name}*, Area: *${address}*) Plotraa team ko approval ke liye bhej diya hai. Approve hote hi isi number pe message aayega, phir plan chunke apni pehli property bhej sakte ho.`;
   }
   const need = [];
+  if (pa) {
+    if (!name) need.push('ਤੁਹਾਡਾ *ਪੂਰਾ ਨਾਮ*');
+    if (!address) need.push('ਤੁਸੀਂ *ਕਿਹੜੇ ਇਲਾਕੇ/ਸ਼ਹਿਰ ਵਿੱਚ ਕੰਮ ਕਰਦੇ ਹੋ*');
+    return need.length ? `📝 ਜੁੜਨ ਲਈ ਬੱਸ ${need.join(' ਅਤੇ ')} ਦੱਸ ਦਿਓ।` : null;
+  }
   if (!name) need.push(lang === 'en' ? 'your *full name*' : 'aapka *poora naam*');
   if (!address) need.push(lang === 'en' ? 'the *area/city you work in*' : 'aap *kis area/city mein kaam karte ho*');
   if (!need.length) return null;
@@ -90,7 +97,7 @@ function clean(value, max) {
  * assistant read from the conversation ({ name, area }). Returns
  * { signup, followUp, justCompleted } or null when there's nothing to do.
  */
-async function advanceSignupFromAssistant(knex, { phone, text, fields = {}, lang, receiving = {}, start = false }) {
+async function advanceSignupFromAssistant(knex, { phone, text, fields = {}, lang, script = 'roman', receiving = {}, start = false }) {
   const normalizedPhone = normalizePhone(phone) || phone;
   let signup = await findPendingSignup(knex, normalizedPhone);
   if (!signup && !start) return null;
@@ -143,7 +150,7 @@ async function advanceSignupFromAssistant(knex, { phone, text, fields = {}, lang
   return {
     signup,
     justCompleted,
-    followUp: signupFollowUp({ name: signup.name, address: signup.address, justCompleted, lang }),
+    followUp: signupFollowUp({ name: signup.name, address: signup.address, justCompleted, lang, script }),
   };
 }
 
