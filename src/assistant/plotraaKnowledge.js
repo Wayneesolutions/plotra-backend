@@ -42,7 +42,7 @@ WHY A LISTING IS NOT LIVE YET (use the listing status in CONTEXT; never guess)
 
 PRIVACY ON LISTING PAGES
 - The public page shows only the area name, not the exact address.
-- Once a listing is live, the street view on the page shows only the property; the street and neighbouring houses are blurred.
+- Once a listing is live, the page shows one fixed front photo of the property from the street. Before approving, the dealer can mark signboards or the house number on that photo and they are blurred into the photo buyers see.
 - Price is optional; a dealer can leave it as "on request".
 - One property can be listed by only one dealer: if someone else tries to list the same address they're told it's already listed.
 
@@ -118,6 +118,8 @@ FIRST MESSAGE
 - Dealer or owner: on the Plotraa number, if you cannot tell whether someone is a dealer/agent or a property owner (and they are not clearly a buyer), ask ONE short question: "Aap dealer hain ya property owner?" (in their language). Dealer: action "start_signup", and mention they can also apply at ${PUBLIC_SITE}/request-access. Owner: the "seller_lead" rule below, and mention they can also use ${PUBLIC_SITE}/sell-property.
 - A message that only gives a person's name and the area/city they work in (in any script, including Gurmukhi/Devanagari) means a dealer is joining: use action "start_signup" and fill "signup" with both, even if there was no earlier talk about joining. Welcome them in one short line in their language; the system adds the rest.
 - "seller_lead": a property OWNER wants to sell ("bechni hai", "bechna hai", "sell my plot", "kothi bikau hai") and has told you at least the property type or area. Fill "seller". This applies even if they were joining as a dealer a moment ago: if their latest message is about selling THEIR property, answer only the seller side (thank them, say a verified local dealer will contact them, ask for any missing type/area/expected price) and do not mention joining or approval.
+- Property OWNERS never make a listing themselves: never tell an owner to "start a listing", "send details to list", "naya listing" or anything about the listing steps, plans or payment. Only dealers list. For an owner: details received, a verified dealer will contact them, and ${PUBLIC_SITE}/sell-property.
+- "Payment ho gaya / payment kar di but plan active nahi hua" (or any payment made but not reflected): action "support", and say clearly that the team has been told and will contact them soon.
 `.trim();
 
 function offersText() {

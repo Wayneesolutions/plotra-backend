@@ -29,7 +29,11 @@ const { normalizePhone } = require('../utils/phone');
 const { looksLikeSellerIntent, extractSellerHints } = require('../utils/sellerIntent');
 const { raiseSupportRequest } = require('./supportRequestService');
 const { advanceSignupFromAssistant, cancelPendingSignup, describeSignupState } = require('./agentSignupService');
-const { looksLikeKnownQuestion } = require('../utils/agentQuickIntent');
+const { looksLikeKnownQuestion, looksLikePaymentProblem } = require('../utils/agentQuickIntent');
+const {
+  replyMatchesScript, isShortDiscountQuestion, discountSummary, hardCapReply,
+  paymentProblemReply, supportConfirmLine, mentionsTeamContact, sellerConfirmReply,
+} = require('../utils/fixedReplies');
 
 const enqueueWhatsapp = (...a) => require('./agentMessagingService').enqueueAgentWhatsappSend(...a);
 
@@ -179,6 +183,15 @@ async function loadHistory(knex, phone, audience) {
 
 // ------------------------------------------------------------------ model
 
+/** The LANGUAGE line for the prompt (also repeated after the chat history). */
+function languageInstruction(langHint, script) {
+  if (script === 'gurmukhi') return 'LANGUAGE: the person\'s LATEST message is Punjabi in Gurmukhi. Reply in simple, natural everyday Punjabi in Gurmukhi, NOT in English or Roman script.';
+  if (script === 'devanagari') return 'LANGUAGE: the person\'s LATEST message is Hindi in Devanagari. Reply in Hindi in Devanagari, NOT in English or Roman script.';
+  if (langHint === 'hi') return 'LANGUAGE: the person\'s LATEST message is in Roman script (Hinglish). Reply in Roman-script Hinglish only. Do NOT use Gurmukhi or Devanagari letters at all, even if earlier messages in this chat were in Gurmukhi/Devanagari.';
+  if (langHint === 'en') return 'LANGUAGE: the person\'s LATEST message is English. Reply in English only, in Roman script, even if earlier messages in this chat were in another language or script.';
+  return 'LANGUAGE: the person\'s LATEST message is in Roman script. Reply in Roman script only (English or Hinglish, matching them). Do NOT use Gurmukhi or Devanagari letters, even if earlier messages were in them.';
+}
+
 function buildSystemPrompt({ audience, contextText, plansText, langHint = null, script = null }) {
   const audienceNote = {
     agent: 'You are talking to a registered Plotraa agent. Be their friendly, patient assistant and guide.',
@@ -197,11 +210,7 @@ ${plansText}
 ${offersText()}
 
 ${contextText}
-${langHint === 'hi'
-    ? (script === 'gurmukhi' ? '\nLANGUAGE: the person writes Punjabi in Gurmukhi. Reply in simple, natural everyday Punjabi in Gurmukhi, NOT in English.'
-      : script === 'devanagari' ? '\nLANGUAGE: the person writes Hindi in Devanagari. Reply in Hindi in Devanagari, NOT in English.'
-        : '\nLANGUAGE: the person writes Hinglish in Roman script. Reply in Roman-script Hinglish only: no Gurmukhi, no Devanagari, not English.')
-    : langHint === 'en' ? '\nLANGUAGE: the person writes English. Reply in English only.' : ''}
+${langHint || script ? `\n${languageInstruction(langHint, script)}` : ''}
 
 Return ONLY JSON:
 {"reply": "the WhatsApp message to send",
@@ -353,15 +362,62 @@ function isPlainQuestion(text) {
   return looksLikeKnownQuestion(t) || (/\?/.test(t) && !looksLikeSellerIntent(t));
 }
 
-// A discount question is answered in a line or two; models pad it with the
-// plan list. Trims at a sentence/line end so it never stops mid-word.
-const DISCOUNT_QUESTION = /(?:discount|offer|coupon|trial|chhoot|chhut|sasta|ਡਿਸਕਾਊਂਟ|ਡਿਸਕਾਉਂਟ|ਛੋਟ|ਆਫਰ|ਆਫ਼ਰ|डिस्काउंट|छूट|ऑफर)/i;
-const SHORT_REPLY_CHARS = 280;
+// A discount/offer/trial question is answered in at most 2 lines; models pad
+// it with the plan list. Short bare discount questions never reach the model
+// (fixed reply, see handleWithAssistant); anything else about discounts that
+// does is hard-capped: 2 lines, 250 characters, cut at a sentence end or, for
+// one long sentence, at a word.
+const DISCOUNT_QUESTION = /(?:discount|offer|coupon|trial|chhoot|chhut|sasta|ਡਿਸਕਾਊਂਟ|ਡਿਸਕਾਉਂਟ|ਛੋਟ|ਆਫਰ|ਆਫ਼ਰ|ਟ੍ਰਾਇਲ|डिस्काउंट|छूट|ऑफर|ट्रायल)/i;
+const SHORT_REPLY_CHARS = 250;
 function capShortReply(reply, text) {
-  if (!DISCOUNT_QUESTION.test(String(text || '')) || reply.length <= SHORT_REPLY_CHARS) return reply;
-  const head = reply.slice(0, SHORT_REPLY_CHARS);
-  const cut = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('. '), head.lastIndexOf('। '), head.lastIndexOf('! '), head.lastIndexOf('? '));
-  return (cut > 80 ? head.slice(0, cut + 1) : head.replace(/\s+\S*$/, '…')).trim();
+  if (!DISCOUNT_QUESTION.test(String(text || ''))) return reply;
+  return hardCapReply(reply, { maxLines: 2, maxChars: SHORT_REPLY_CHARS });
+}
+
+/**
+ * The model sometimes copies the script of earlier turns (a Roman "Discount?"
+ * after a Gurmukhi chat got a Gurmukhi answer). If the reply's script doesn't
+ * match the latest message, ask once for a rewrite; keep the original if that
+ * fails too.
+ */
+async function enforceReplyScript(reply, script, langHint) {
+  if (replyMatchesScript(reply, script)) return reply;
+  const target = script === 'gurmukhi' ? 'simple everyday Punjabi in Gurmukhi script'
+    : script === 'devanagari' ? 'Hindi in Devanagari script'
+      : langHint === 'en' ? 'plain English (Roman script only)' : 'Roman-script Hinglish (no Gurmukhi or Devanagari letters at all)';
+  try {
+    const raw = await callModel([
+      { role: 'system', content: `Rewrite the WhatsApp message below in ${target}. Keep the meaning, emojis, numbers, links and *bold* exactly. Do not add anything. Return ONLY JSON: {"reply": "..."}` },
+      { role: 'user', content: reply },
+    ]);
+    const fixed = parseAssistantOutput(raw)?.reply;
+    if (fixed && replyMatchesScript(fixed, script)) return fixed;
+    console.warn('[Assistant] script rewrite still wrong (%s), sending original', script);
+  } catch (err) {
+    console.warn('[Assistant] script rewrite failed:', err.message);
+  }
+  return reply;
+}
+
+/** Sends a reply and saves both turns to the assistant's chat history. */
+async function sendAndLog(knex, { phone, audience, tenantId, userId, text, reply, action }) {
+  await enqueueWhatsapp({ tenantId, phone, messageBody: reply });
+  try {
+    await knex('assistant_messages').insert([
+      { phone, audience, tenant_id: tenantId, user_id: userId, direction: 'inbound', body: String(text).slice(0, 4000) },
+      { phone, audience, tenant_id: tenantId, user_id: userId, direction: 'outbound', body: reply, action },
+    ]);
+  } catch (logErr) {
+    console.error('[Assistant] could not save chat history (reply already sent):', logErr.message);
+  }
+}
+
+/** An owner who already started a sale on this number in the last day. */
+async function findOpenSellerLead(knex, phone) {
+  return knex('seller_leads').where({ phone, status: 'new' })
+    .where('created_at', '>=', knex.raw("NOW() - INTERVAL '1 day'"))
+    .orderBy('created_at', 'desc')
+    .first('id', 'property_type', 'city', 'locality', 'expected_price');
 }
 
 /** Website form offered next to the WhatsApp path, by who the visitor turned out to be. */
@@ -398,6 +454,44 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
   const normalizedPhone = normalizePhone(agentUser?.phone || phone) || phone;
   const sendTenantId = agentUser?.tenant_id || tenantId || null;
   const lang = detectReplyLanguage(text);
+  const script = detectScript(text);
+  const userId = agentUser?.id || null;
+
+  // Fixed replies (no model): the wording must not depend on the model.
+  // Not for 'buyer' (a dealer's customer): their "discount?" is about a
+  // property's price, and they have no Plotraa plan to pay for.
+  if (audience !== 'buyer') {
+    // "Payment ho gaya, plan activate nahi hua": always a support request and
+    // always a clear "team ko bata diya hai" confirmation.
+    if (looksLikePaymentProblem(text)) {
+      try {
+        await raiseSupportRequest(knex, {
+          phone: normalizedPhone, name: name || agentUser?.name, audience, kind: 'problem',
+          summary: 'Says the payment is done but the plan is not active yet',
+          lastMessage: text, tenantId: sendTenantId, userId,
+        });
+        const replyLang = detectMessageLanguage(text) || lang;
+        await sendAndLog(knex, { phone: normalizedPhone, audience, tenantId: sendTenantId, userId, text, reply: paymentProblemReply({ script, lang: replyLang }), action: 'support' });
+        console.log('[Assistant] %s %s payment problem, support raised', audience, normalizedPhone);
+        return { handled: true, action: 'support' };
+      } catch (err) {
+        console.error('[Assistant] payment-problem reply failed:', err.message);
+      }
+    }
+    // Bare discount question: a fixed 2-line answer from the live plans.
+    if (isShortDiscountQuestion(text)) {
+      try {
+        const [plans, history] = await Promise.all([loadPlans(knex), loadHistory(knex, normalizedPhone, audience)]);
+        const replyLang = detectMessageLanguage(text)
+          || detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' '));
+        await sendAndLog(knex, { phone: normalizedPhone, audience, tenantId: sendTenantId, userId, text, reply: discountSummary(plans, { script, lang: replyLang }), action: 'none' });
+        console.log('[Assistant] %s %s discount question, fixed reply', audience, normalizedPhone);
+        return { handled: true, action: 'none' };
+      } catch (err) {
+        console.error('[Assistant] discount reply failed, using the model:', err.message);
+      }
+    }
+  }
 
   if (!isAssistantEnabled() || !process.env.OPENAI_API_KEY) {
     if (audience === 'agent' && looksLikeSupportRequest(text)) {
@@ -429,14 +523,19 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // The language of THIS message decides the reply; earlier turns only break
     // a tie when the message is too short to tell ("ok", "Dugri").
     const msgLang = detectMessageLanguage(text);
+    const langHint = msgLang || detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' '));
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), script: detectScript(text), langHint: msgLang || detectReplyLanguage([...history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content), text].join(' ')) }) },
+      { role: 'system', content: buildSystemPrompt({ audience, contextText, plansText: formatPlansForPrompt(plans), script, langHint }) },
       ...history,
+      // Repeated after the history: the model otherwise follows the script
+      // of the earlier turns instead of this message.
+      { role: 'system', content: languageInstruction(langHint, script) },
       { role: 'user', content: String(text).slice(0, 2000) },
     ];
 
     const out = parseAssistantOutput(await callModel(messages));
     if (!out) throw new Error('unusable model output');
+    out.reply = await enforceReplyScript(out.reply, script, langHint);
 
     // A plain question ("support number?", "upgrade kaise karu?") is answered,
     // never ticketed, even when the model picked "support" for it. A real
@@ -449,8 +548,13 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // Deterministic safety net: an owner saying they want to sell must become
     // a seller lead even when the model picked another action (it used to
     // answer "bechni hai" with a buyer reply, or treat it as dealer joining).
+    // An owner already selling on this number (open seller lead) who sends
+    // more details ("Dugri, 200 gaj, 80 lakh") is still the owner, not a
+    // dealer joining or someone to be told how to make a listing.
+    const openSellerLead = audience === 'visitor' && !startSignup ? await findOpenSellerLead(knex, normalizedPhone) : null;
+    const continuesSale = Boolean(openSellerLead) && out.action !== 'callback' && !isPlainQuestion(text);
     const isSellerMessage = audience !== 'agent' && !startSignup
-      && (looksLikeSellerIntent(text) || out.action === 'seller_lead');
+      && (looksLikeSellerIntent(text) || out.action === 'seller_lead' || continuesSale);
     if (isSellerMessage && out.action !== 'seller_lead') {
       const hints = extractSellerHints(text);
       out.action = 'seller_lead';
@@ -467,6 +571,23 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     let action = await performAction(knex, out, { audience, phone: normalizedPhone, name, text, agentUser, tenantId });
     supportRaised = action === 'support';
     let reply = capShortReply(out.reply, text);
+
+    // A raised support request always ends with a clear confirmation.
+    if (supportRaised && !mentionsTeamContact(reply)) {
+      reply = `${reply}\n\n${supportConfirmLine({ script, lang: msgLang || out.replyLanguage || lang })}`;
+    }
+
+    // An owner on the Plotraa number gets a fixed reply: details received, a
+    // verified dealer will contact them, plus the /sell-property form once.
+    // (The model used to tell owners how to "start a listing", which only
+    // dealers can do.)
+    if (isSellerMessage && audience === 'visitor') {
+      const lead = await findOpenSellerLead(knex, normalizedPhone).catch(() => null);
+      const linkSent = history.some((m) => m.role === 'assistant' && m.content.includes('/sell-property'));
+      reply = sellerConfirmReply(lead || out.seller, {
+        script, lang: msgLang || out.replyLanguage || lang, sellLink: linkSent ? null : `${PUBLIC_SITE}/sell-property`,
+      });
+    }
 
     // An owner selling their own property is not a dealer applicant: close
     // any open join request (it used to stay open and swallow the seller).
@@ -510,23 +631,11 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
         if (line) reply = `${reply}\n\n${line}`;
       }
     }
-    if (audience === 'visitor' && isSellerMessage && !history.some((m) => m.role === 'assistant' && m.content.includes('/sell-property'))) {
-      const line = visitorFormLine({ action: 'seller_lead', lang: msgLang || out.replyLanguage || lang });
-      if (line) reply = `${reply}\n\n${line}`;
-    }
 
     // The reply goes out FIRST. Bookkeeping after this point must never stop
     // the person getting their answer (or make the catch below raise the
     // support request a second time).
-    await enqueueWhatsapp({ tenantId: sendTenantId, phone: normalizedPhone, messageBody: reply });
-    try {
-      await knex('assistant_messages').insert([
-        { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'inbound', body: String(text).slice(0, 4000) },
-        { phone: normalizedPhone, audience, tenant_id: sendTenantId, user_id: agentUser?.id || null, direction: 'outbound', body: reply, action },
-      ]);
-    } catch (logErr) {
-      console.error('[Assistant] could not save chat history (reply already sent):', logErr.message);
-    }
+    await sendAndLog(knex, { phone: normalizedPhone, audience, tenantId: sendTenantId, userId, text, reply, action });
     console.log('[Assistant] %s %s action=%s', audience, normalizedPhone, action);
     return { handled: true, action };
   } catch (err) {
@@ -557,5 +666,6 @@ module.exports = {
   isPlainQuestion,
   capShortReply,
   buildSystemPrompt,
+  languageInstruction,
   LISTING_STATUS_MEANING,
 };

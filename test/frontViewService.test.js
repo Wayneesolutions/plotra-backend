@@ -148,3 +148,66 @@ test('savedPanoView keeps the panorama the blur was drawn on while the pin is un
   assert.equal(savedPanoView({ panoId: 'abc', regions: [] }, 30.9, 75.85), null, 'older saves without heading/coords');
   assert.equal(savedPanoView(null, 30.9, 75.85), null);
 });
+
+// ---- Fixed front photo with baked blur (21 Oct QA, option A) ----------------
+const fvs = require('../src/services/frontViewService');
+
+async function checkerboard640x480() {
+  const w = 640; const h = 480; const px = Buffer.alloc(w * h * 3);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const v = ((x >> 3) + (y >> 3)) % 2 ? 255 : 0;
+      px.fill(v, (y * w + x) * 3, (y * w + x) * 3 + 3);
+    }
+  }
+  return sharp(px, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+}
+
+test('bugs 1-3: boxes are baked into the photo, everything else stays sharp', async () => {
+  const out = await fvs.bakeBlurRects(await checkerboard640x480(), [{ x: 0.25, y: 0.25, w: 0.25, h: 0.25 }]);
+  const meta = await sharp(out).metadata();
+  assert.deepStrictEqual([meta.format, meta.width, meta.height], ['jpeg', 640, 480]);
+  assert.ok(await contrastAt(out, 240, 180) < 60, 'inside the box is blurred');
+  assert.ok(await contrastAt(out, 500, 360) > 150, 'outside the box keeps detail');
+  assert.ok(await contrastAt(out, 80, 400) > 150, 'outside the box keeps detail');
+});
+
+test('photo boxes are clipped to the image; junk and extras dropped', () => {
+  assert.deepStrictEqual(fvs.sanitizeBlurRects([{ x: -0.1, y: 0.9, w: 0.3, h: 0.5 }]), [{ x: 0, y: 0.9, w: 0.2, h: 0.1 }]);
+  assert.deepStrictEqual(fvs.sanitizeBlurRects([{ x: 'a' }, null, { x: 0.5, y: 0.5, w: 0.001, h: 0.2 }]), []);
+  assert.strictEqual(fvs.sanitizeBlurRects(Array.from({ length: 12 }, () => ({ x: 0.1, y: 0.1, w: 0.1, h: 0.1 }))).length, fvs.MAX_BLUR_REGIONS);
+  assert.deepStrictEqual(fvs.sanitizeBlurRects('nope'), []);
+});
+
+test('old angle areas convert onto the photo (centre of view = centre of photo)', () => {
+  const frame = { panoId: 'P', heading: 90, pitch: 0, fov: 90 };
+  const r = fvs.regionToFrameRect({ heading: 90, pitch: 0, width: 10, height: 10 }, frame);
+  assert.ok(Math.abs(r.x + r.w / 2 - 0.5) < 0.01 && Math.abs(r.y + r.h / 2 - 0.5) < 0.01);
+  // 10 degrees wide at fov 90: tan(5°) * f / W ≈ 0.0875 of the width each side
+  assert.ok(Math.abs(r.w - 0.0875) < 0.005, String(r.w));
+  assert.strictEqual(fvs.regionToFrameRect({ heading: 270, pitch: 0, width: 10, height: 10 }, frame), null, 'behind the camera');
+  assert.deepStrictEqual(fvs.blurRectsFor({ panoId: 'OTHER', rects: [{ x: 0.1, y: 0.1, w: 0.1, h: 0.1 }] }, frame), [], 'other panorama');
+  assert.strictEqual(fvs.blurRectsFor({ panoId: 'P', regions: [{ heading: 90, pitch: 0, width: 10, height: 10 }] }, frame).length, 1);
+});
+
+test('frame uses the saved fov/pitch so old boxes keep lining up', () => {
+  const f = fvs.frameFor({ panoId: 'P', heading: 12.4 }, { frame: { fov: 55, pitch: 3 } });
+  assert.deepStrictEqual(f, { panoId: 'P', heading: 12, fov: 55, pitch: 3 });
+  assert.strictEqual(fvs.frameFor(null), null);
+  assert.notStrictEqual(fvs.frontPhotoVersion(f, []), fvs.frontPhotoVersion(f, [{ x: 0.1, y: 0.1, w: 0.1, h: 0.1 }]));
+});
+
+test('fetchFrontFrame asks Google for one fixed frame and caches it', async () => {
+  fvs._frameCache.clear();
+  const calls = [];
+  const raw = await checkerboard640x480();
+  const fetchImpl = async (url, opts) => { calls.push(opts.params); return { data: raw }; };
+  const frame = { panoId: 'P1', heading: 45, pitch: 8, fov: 70 };
+  const a = await fvs.fetchFrontFrame({ frame, apiKey: 'k', fetchImpl });
+  const b = await fvs.fetchFrontFrame({ frame, apiKey: 'k', fetchImpl });
+  assert.ok(Buffer.isBuffer(a) && a.equals(b));
+  assert.strictEqual(calls.length, 1);
+  assert.deepStrictEqual([calls[0].pano, calls[0].heading, calls[0].fov, calls[0].size], ['P1', 45, 70, '640x480']);
+  const notFound = async () => { const e = new Error('404'); e.response = { status: 404 }; throw e; };
+  assert.strictEqual(await fvs.fetchFrontFrame({ frame: { ...frame, panoId: 'NONE' }, apiKey: 'k', fetchImpl: notFound }), null);
+});
