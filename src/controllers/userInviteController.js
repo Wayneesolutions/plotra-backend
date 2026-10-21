@@ -1,62 +1,94 @@
-const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
-const { sendOnboardingEmail } = require('../services/emailService');
+const { sendSetPasswordEmail } = require('../services/emailService');
 const { normalizePhone } = require('../utils/phone');
+const {
+  placeholderEmail, unusablePasswordHash, createSetPasswordLink, buildSubDealerWelcomeMessage,
+} = require('../services/dealerOnboardingService');
 
+const enqueueWhatsapp = (...a) => require('../services/agentMessagingService').enqueueAgentWhatsappSend(...a);
+
+/**
+ * POST /api/v1/dashboard/users/invite
+ * Body: { name, phone?, email? } — at least one of phone/email.
+ *
+ * A dealer adds a SUB-DEALER (role 'agent' in the dealer's own space). No
+ * password is created or shown to anyone: the sub-dealer gets a one-time
+ * set-password link on WhatsApp (phone) or by email, and logs in with that
+ * phone or email. With a phone they can also send listings on WhatsApp
+ * straight away.
+ */
 async function inviteTenantUser(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id, role } = req.user;
-  const { email, name, phone } = req.body;
+  const name = String(req.body?.name || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase() || null;
+  const phone = req.body?.phone ? normalizePhone(req.body.phone) : null;
 
   if (role !== 'owner') {
     return res.status(403).json({
-      error: { code: 'FORBIDDEN', message: 'Only tenant owners can invite team members.' }
+      error: { code: 'FORBIDDEN', message: 'Only the dealer can add sub-dealers.' }
     });
   }
 
-  if (!email || !name) {
+  if (!name || (!email && !phone)) {
     return res.status(400).json({
-      error: { code: 'VALIDATION_ERROR', message: 'Email and name are required.' }
+      error: { code: 'VALIDATION_ERROR', message: 'Name and a phone number or email are required.' }
     });
+  }
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Enter a valid email.' } });
   }
 
   try {
-    const existingUser = await knex('users').where({ email: email.trim().toLowerCase() }).first();
-    if (existingUser) {
+    if (email && await knex('users').where({ email }).first('id')) {
       return res.status(409).json({
         error: { code: 'DUPLICATE_ENTRY', message: 'A user with this email already exists.' }
       });
     }
-
-    const tempPassword = `Welcome${crypto.randomBytes(4).toString('hex')}!`;
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+    if (phone && await knex('users').where({ phone }).first('id')) {
+      return res.status(409).json({
+        error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered to another account.' }
+      });
+    }
 
     const [newUser] = await knex('users').insert({
       tenant_id,
-      email: email.trim().toLowerCase(),
-      name: name.trim(),
+      email: email || placeholderEmail(phone, 'subdealer'),
+      name,
       role: 'agent',
-      password_hash: hashedPassword,
-      // Optional — lets this teammate text listing details into WhatsApp
-      // right away (see webhookController.js's agent-intake routing)
-      // instead of having to set it themselves after logging in.
-      phone: phone ? normalizePhone(phone) : null
-    }).returning(['id', 'email', 'role', 'phone']);
+      password_hash: await unusablePasswordHash(),
+      phone,
+    }).returning(['id', 'name', 'email', 'role', 'phone']);
 
-    const tenant = await knex('tenants').where({ id: tenant_id }).select('business_name').first();
-    sendOnboardingEmail({
-      to: email.trim().toLowerCase(),
-      businessName: tenant?.business_name || '',
-      contactName: name.trim(),
-      email: email.trim().toLowerCase(),
-      tempPassword,
-    }).catch(() => {});
+    const setupUrl = await createSetPasswordLink(knex, newUser.id);
+    const tenant = await knex('tenants').where({ id: tenant_id }).first('business_name');
+
+    let sentVia = null;
+    if (phone) {
+      try {
+        await enqueueWhatsapp({
+          tenantId: tenant_id,
+          phone,
+          messageBody: buildSubDealerWelcomeMessage({ name, dealerName: tenant?.business_name || 'Aapke dealer', phone, setupUrl }),
+        });
+        sentVia = 'whatsapp';
+      } catch (err) {
+        console.error('Sub-dealer WhatsApp welcome failed (non-fatal):', err.message);
+      }
+    }
+    if (email) {
+      sendSetPasswordEmail({ to: email, setupUrl, name, dealerName: tenant?.business_name }).catch(() => {});
+      sentVia = sentVia ? 'whatsapp_and_email' : 'email';
+    }
 
     return res.status(201).json({
       success: true,
-      message: 'User created. An email with login credentials has been sent to them.',
-      user: newUser,
-      temporaryPassword: tempPassword
+      message: sentVia
+        ? 'Sub-dealer added. A set-password link was sent to them.'
+        : 'Sub-dealer added. Share the set-password link with them.',
+      user: { ...newUser, email: email || null },
+      sentVia,
+      // Fallback for the dealer to share by hand if delivery fails. One-time link, not a password.
+      setupUrl,
     });
 
   } catch (error) {

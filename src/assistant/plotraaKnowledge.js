@@ -72,9 +72,11 @@ UPGRADING A PLAN
 JOINING (new dealers)
 - Dealers can also apply on the website: ${PUBLIC_SITE}/request-access (no WhatsApp chat needed).
 - To join, a dealer just says so on this WhatsApp in their own words ("main dealer hoon, judna hai", "I want to join", "join as agent" all work) and shares their full name and the area/city they work in. Nothing to download or fill in.
-- The Plotraa team reviews and approves new agents, usually quickly. On approval they get a WhatsApp message (with a dashboard login), then pick a plan, then simply send their first property here.
+- The Plotraa team reviews and approves new dealers, usually quickly. Each approved dealer gets their OWN account and admin panel: login ID is their WhatsApp number, and the approval message has a link to set their own password (Plotraa never sends a password). They pick a plan, then simply send their first property here.
+- Sub-dealers: a dealer adds their own sub-dealers (team members) from the admin panel (Team -> Invite). A sub-dealer gets a set-password link on WhatsApp and can send listings from their own number. Someone who wants to be a sub-dealer under a dealer should ask that dealer to add them.
+- FREE TRIAL: every new dealer gets a 7-day free trial from approval. Reminders start after day 5. When the trial ends without payment, NEW listings stop (for the dealer and their sub-dealers), existing listings stay live, and new leads stay with the Plotraa team until they pay. Paying turns everything back on.
 - Payment: each plan has a fixed monthly price. Pay by the QR code sent on WhatsApp, or pay cash and send a photo of the receipt; the team approves it.
-- Payment reminders start on day 28 of the monthly cycle. If a payment stays pending after the month ends, adding NEW listings pauses until it's paid; existing listings stay live.
+- After the first payment, reminders start on day 28 of the monthly cycle. If a payment stays pending after the month ends, adding NEW listings pauses until it's paid; existing listings stay live.
 
 FOR PROPERTY OWNERS WHO WANT TO SELL
 - They can fill the form at ${PUBLIC_SITE}/sell-property (same link works for anyone), or simply tell the assistant the property type, area/city and expected price on WhatsApp. Plotraa assigns a verified local dealer who contacts them.
@@ -126,7 +128,7 @@ function offersText() {
   const trial = (process.env.PLOTRAA_TRIAL_OFFER || '').trim();
   return trial
     ? `OFFERS\n- ${trial}\n- Plan discounts are as shown in PLANS. Nothing else.`
-    : 'OFFERS\n- Plan discounts are as shown in PLANS. No other trial or offer is configured: if asked about a free trial, say the team will share current offers and set action "callback" only if they want a call.';
+    : 'OFFERS\n- Every new dealer gets a 7-day free trial (see FREE TRIAL). Plan discounts are as shown in PLANS. No other offer is configured.';
 }
 
 module.exports = { PRODUCT, RULES, offersText, PUBLIC_SITE, PLATFORM_WHATSAPP, SUPPORT_NUMBER };

@@ -1,3 +1,4 @@
+const { dealerIsActive } = require('../services/trialService');
 const { createListingRecord, enqueueGeoEnrichment, validateAssignedAgent, ListingLimitError } = require('../services/listingService');
 
 /**
@@ -13,6 +14,15 @@ async function createListing(req, res) {
   const { title, raw_address, price, plot_area, property_type, description, assigned_agent_id } = req.body;
 
   try {
+    // Trial over / payment overdue: no new listings for the dealer or their
+    // sub-dealers (existing listings untouched), same rule as on WhatsApp.
+    const me = await knex('users').where({ id: userId }).first('can_add_listing');
+    if (me?.can_add_listing === false || !(await dealerIsActive(knex, tenant_id))) {
+      return res.status(402).json({
+        error: { code: 'PAYMENT_REQUIRED', message: 'Your free trial has ended or a payment is pending, so new listings are paused. Existing listings stay live.' }
+      });
+    }
+
     const newListing = await createListingRecord(knex, {
       tenantId: tenant_id,
       createdBy: userId,

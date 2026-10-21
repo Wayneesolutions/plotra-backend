@@ -20,14 +20,13 @@
 //      tenant-dashboard endpoints (owner-only) that review what this
 //      collects.
 const { Queue } = require('bullmq');
-const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
 const { normalizePhone } = require('../utils/phone');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { sendPackageSelectionPrompt } = require('../services/agentPaymentService');
-const { setAgentCities, CityValidationError } = require('../services/tenantCityService');
+const { CityValidationError } = require('../services/tenantCityService');
 const { resolveTenantForSignup } = require('../services/agentSignupService');
+const { createDealerFromSignup, buildDealerWelcomeMessage } = require('../services/dealerOnboardingService');
 // Lazy: assistantService pulls in the messaging queue; keeps this file's
 // load order unchanged.
 const handleWithAssistant = (...a) => require('../services/assistantService').handleWithAssistant(...a);
@@ -216,181 +215,29 @@ async function handleAgentSignupMessage({ knex, phone, leadName, incomingText, r
   return true;
 }
 
-/**
- * GET /api/v1/dashboard/agent-signups
- * Lists this tenant's pending, fully-collected signup requests — a row
- * whose conversational collection isn't finished yet (name/address still
- * null) deliberately doesn't show up here yet; see the migration's comment.
- */
+// ---- Dealer dashboard (old owner-side review) ------------------------------
+//
+// Everyone who joins on WhatsApp is a new DEALER now (own tenant + panel),
+// approved only by the Plotraa team in Admin -> Agent Signups. A dealer adds
+// their own sub-dealers from Team -> Invite, so these dashboard endpoints no
+// longer approve anyone: the list is always empty and approve/reject explain
+// why, so an old frontend build can't turn a new dealer into someone's agent.
+
+const OWNER_REVIEW_GONE = 'New dealers who join on WhatsApp are approved by the Plotraa team. Add your own sub-dealers from Team -> Invite.';
+
+/** GET /api/v1/dashboard/agent-signups */
 async function listAgentSignups(req, res) {
-  const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id, role } = req.user;
-
-  if (role !== 'owner') {
-    return res.status(403).json({
-      error: { code: 'FORBIDDEN', message: 'Only tenant owners can view agent signup requests.' }
-    });
-  }
-
-  try {
-    const signups = await knex('pending_agent_signups')
-      .where({ tenant_id, status: 'pending' })
-      .whereNotNull('name')
-      .whereNotNull('address')
-      .select('id', 'name', 'phone', 'address', 'status', 'created_at')
-      .orderBy('created_at', 'desc');
-
-    return res.status(200).json({ success: true, signups });
-  } catch (error) {
-    console.error('Failed to list agent signups:', error);
-    return res.status(500).json({
-      error: { code: 'INTERNAL_ERROR', message: 'Failed to load agent signup requests.' }
-    });
-  }
+  return res.status(200).json({ success: true, signups: [], message: OWNER_REVIEW_GONE });
 }
 
-/**
- * POST /api/v1/dashboard/agent-signups/:id/approve
- * Creates the real users row for this phone (role='agent') — no separate
- * activation step, the phone is immediately recognized by
- * agentIntakeController.js's agent-intake routing the moment this commits.
- *
- * No email was ever collected over WhatsApp, but users.email is NOT NULL +
- * UNIQUE, so a placeholder is synthesized from the (already-unique) phone
- * number. A temporary password is generated too, same as
- * userInviteController.js's invite flow, in case the owner wants to also
- * hand this agent dashboard login access — returned in the response for
- * the owner to share directly, exactly like InviteUserModal.jsx's
- * credential display.
- */
+/** POST /api/v1/dashboard/agent-signups/:id/approve */
 async function approveAgentSignup(req, res) {
-  const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id, role } = req.user;
-  const { id } = req.params;
-
-  if (role !== 'owner') {
-    return res.status(403).json({
-      error: { code: 'FORBIDDEN', message: 'Only tenant owners can approve agent signup requests.' }
-    });
-  }
-
-  try {
-    const signup = await knex('pending_agent_signups').where({ id, tenant_id }).first();
-    if (!signup) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Signup request not found.' } });
-    }
-    if (signup.status !== 'pending') {
-      return res.status(409).json({
-        error: { code: 'CONFLICT', message: `Request is already ${signup.status}.` }
-      });
-    }
-
-    const normalizedPhone = normalizePhone(signup.phone);
-    const tempPassword = `Welcome${crypto.randomBytes(4).toString('hex')}!`;
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
-    const placeholderEmail = `agent.${normalizedPhone.replace(/\D/g, '')}@wa-signup.plotra.internal`;
-
-    let newUser;
-    await knex.transaction(async (trx) => {
-      [newUser] = await trx('users').insert({
-        tenant_id,
-        name: signup.name,
-        email: placeholderEmail,
-        password_hash: hashedPassword,
-        role: 'agent',
-        phone: normalizedPhone,
-      }).returning(['id', 'name', 'email', 'phone', 'role']);
-
-      // Optional: limit the agent to some of the tenant's cities.
-      if (Array.isArray(req.body?.city_ids) && req.body.city_ids.length) {
-        await setAgentCities(trx, tenant_id, newUser.id, req.body.city_ids);
-      }
-
-      await trx('pending_agent_signups')
-        .where({ id })
-        .update({ status: 'approved', updated_at: trx.fn.now() });
-    });
-
-    try {
-      await enqueueAgentWhatsappSend({
-        tenantId: tenant_id,
-        phone: normalizedPhone,
-        messageBody: buildAgentWelcomeMessage({ name: signup.name, lang: detectReplyLanguage(signup.accumulated_text) }),
-      });
-    } catch (err) {
-      console.error('Failed to send agent welcome message (non-fatal):', err.message);
-    }
-
-    // Payment system onboarding step — sends the package menu over
-    // WhatsApp so the agent can pick one whenever they're ready. Best-effort:
-    // this path doesn't send any other WhatsApp notification today (see
-    // the function docstring), so a failure here shouldn't fail the
-    // approval itself, same non-fatal pattern used everywhere else a
-    // WhatsApp send follows a DB write in this codebase.
-    try {
-      await sendPackageSelectionPrompt(knex, { tenantId: tenant_id, phone: normalizedPhone });
-    } catch (err) {
-      console.error('Failed to send package selection prompt (non-fatal):', err.message);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'Agent approved — their WhatsApp number is now live for listing intake.',
-      user: newUser,
-      temporaryPassword: tempPassword,
-    });
-  } catch (error) {
-    if (error instanceof CityValidationError) {
-      return res.status(error.status || 400).json({ error: { code: error.code, message: error.message } });
-    }
-    if (error.code === '23505') { // unique_violation — phone already registered to someone else
-      return res.status(409).json({
-        error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered to another account.' }
-      });
-    }
-    console.error('Failed to approve agent signup:', error);
-    return res.status(500).json({
-      error: { code: 'INTERNAL_ERROR', message: 'Failed to approve this signup request.' }
-    });
-  }
+  return res.status(403).json({ error: { code: 'APPROVED_BY_PLOTRAA', message: OWNER_REVIEW_GONE } });
 }
 
-/**
- * POST /api/v1/dashboard/agent-signups/:id/reject
- */
+/** POST /api/v1/dashboard/agent-signups/:id/reject */
 async function rejectAgentSignup(req, res) {
-  const knex = req.dbTrx || req.app.get('db');
-  const { tenant_id, role } = req.user;
-  const { id } = req.params;
-
-  if (role !== 'owner') {
-    return res.status(403).json({
-      error: { code: 'FORBIDDEN', message: 'Only tenant owners can reject agent signup requests.' }
-    });
-  }
-
-  try {
-    const signup = await knex('pending_agent_signups').where({ id, tenant_id }).first();
-    if (!signup) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Signup request not found.' } });
-    }
-    if (signup.status !== 'pending') {
-      return res.status(409).json({
-        error: { code: 'CONFLICT', message: `Request is already ${signup.status}.` }
-      });
-    }
-
-    await knex('pending_agent_signups')
-      .where({ id })
-      .update({ status: 'rejected', updated_at: knex.fn.now() });
-
-    return res.status(200).json({ success: true, message: 'Signup request rejected.' });
-  } catch (error) {
-    console.error('Failed to reject agent signup:', error);
-    return res.status(500).json({
-      error: { code: 'INTERNAL_ERROR', message: 'Failed to reject this signup request.' }
-    });
-  }
+  return res.status(403).json({ error: { code: 'APPROVED_BY_PLOTRAA', message: OWNER_REVIEW_GONE } });
 }
 
 /**
@@ -420,12 +267,18 @@ async function listAgentSignupsAdmin(req, res) {
 
 /**
  * POST /api/v1/admin/agent-signups/:id/approve
- * Super-admin approval — creates the agent user and sends a WhatsApp
- * notification back to the applicant with their credentials.
+ * Body (optional): { city_ids, primary_city_id, business_name }
+ *
+ * Super-admin approval: the joiner becomes a NEW DEALER — their own tenant,
+ * a users row with role 'owner' (their admin panel), and a 7-day free trial.
+ * The WhatsApp welcome carries a one-time set-password link, never a
+ * password. Cities: as picked, else the city named in their working area,
+ * else the launch city.
  */
 async function approveAgentSignupAdmin(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { id } = req.params;
+  const body = req.body || {};
   try {
     const signup = await knex('pending_agent_signups').where({ id }).first();
     if (!signup) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Signup request not found.' } });
@@ -433,59 +286,46 @@ async function approveAgentSignupAdmin(req, res) {
       return res.status(409).json({ error: { code: 'CONFLICT', message: `Request is already ${signup.status}.` } });
     }
 
-    const normalizedPhone = normalizePhone(signup.phone);
-    const tempPassword = `Welcome${crypto.randomBytes(4).toString('hex')}!`;
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
-    const placeholderEmail = `agent.${normalizedPhone.replace(/\D/g, '')}@wa-signup.plotra.internal`;
-
-    let newUser;
-    await knex.transaction(async (trx) => {
-      [newUser] = await trx('users').insert({
-        tenant_id: signup.tenant_id,
-        name: signup.name,
-        email: placeholderEmail,
-        password_hash: hashedPassword,
-        role: 'agent',
-        phone: normalizedPhone,
-      }).returning(['id', 'name', 'email', 'phone', 'role']);
-
-      // Optional: limit the agent to some of the tenant's cities.
-      if (Array.isArray(req.body?.city_ids) && req.body.city_ids.length) {
-        await setAgentCities(trx, signup.tenant_id, newUser.id, req.body.city_ids);
-      }
-
-      await trx('pending_agent_signups').where({ id }).update({ status: 'approved', updated_at: trx.fn.now() });
+    const { tenant, user, setupUrl, trialEndsAt } = await createDealerFromSignup(knex, signup, {
+      cityIds: body.city_ids,
+      primaryCityId: body.primary_city_id,
+      businessName: body.business_name,
     });
 
-    // Notify agent via WhatsApp: welcome + first steps + login.
-    const approvalMessage = buildAgentWelcomeMessage({
+    const welcome = buildDealerWelcomeMessage({
       name: signup.name,
       lang: detectReplyLanguage(signup.accumulated_text),
-      credentials: { email: placeholderEmail, password: tempPassword },
+      phone: user.phone,
+      setupUrl,
+      trialEnd: trialEndsAt,
     });
-
-    await enqueueAgentWhatsappSend({ tenantId: signup.tenant_id, phone: normalizedPhone, messageBody: approvalMessage });
-
-    // Payment system onboarding step — see the tenant-owner approval path
-    // above for the same call; non-fatal for the same reason.
     try {
-      await sendPackageSelectionPrompt(knex, { tenantId: signup.tenant_id, phone: normalizedPhone });
+      await enqueueAgentWhatsappSend({ tenantId: tenant.id, phone: user.phone, messageBody: welcome });
+    } catch (err) {
+      console.error('Failed to send dealer welcome (non-fatal):', err.message);
+    }
+    try {
+      await sendPackageSelectionPrompt(knex, { tenantId: tenant.id, phone: user.phone });
     } catch (err) {
       console.error('Failed to send package selection prompt (non-fatal):', err.message);
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Agent approved — WhatsApp notification sent.',
-      user: newUser,
-      temporaryPassword: tempPassword,
+      message: 'Dealer approved — their own account is created and the welcome with a set-password link was sent on WhatsApp.',
+      tenant,
+      user,
+      trialEndsAt,
+      // Shown to the admin as a fallback if WhatsApp delivery fails; it's a
+      // one-time link, not a password.
+      setupUrl,
     });
   } catch (error) {
     if (error instanceof CityValidationError) {
       return res.status(error.status || 400).json({ error: { code: error.code, message: error.message } });
     }
-    if (error.code === '23505') {
-      return res.status(409).json({ error: { code: 'DUPLICATE_ENTRY', message: 'This phone number is already registered.' } });
+    if (error.code === 'DUPLICATE_PHONE' || error.code === '23505') {
+      return res.status(409).json({ error: { code: 'DUPLICATE_ENTRY', message: 'This phone number already has an account.' } });
     }
     console.error('Failed to approve agent signup (admin):', error);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to approve this signup request.' } });

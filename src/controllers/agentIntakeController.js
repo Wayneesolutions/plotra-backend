@@ -319,7 +319,7 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       // all, so a blocked agent's message never silently starts a draft
       // that then can't go anywhere.
       if (!agentUser.can_add_listing && !draft.listing_id) {
-        const blockedBody = 'Your account has a payment pending, so new listings can\'t be added right now — your existing listings stay active. Reply "payment" to submit your receipt once paid.';
+        const blockedBody = '⛔ Nayi listing abhi band hai: free trial khatam ho gaya hai ya payment pending hai. Aapki purani listings live hain. Payment karke "payment" likhein aur receipt bhejein, sab dobara chalu ho jayega.';
         await trx('agent_draft_messages').insert({
           draft_id: draft.id,
           direction: 'inbound',
@@ -746,7 +746,7 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
  */
 async function holdPinOnDraft({ knex, agentUser, lat, lng, bspMessageId, res }) {
   if (!agentUser.can_add_listing) {
-    const blockedBody = 'Your account has a payment pending, so new listings can\'t be added right now — your existing listings stay active. Reply "payment" to submit your receipt once paid.';
+    const blockedBody = '⛔ Nayi listing abhi band hai: free trial khatam ho gaya hai ya payment pending hai. Aapki purani listings live hain. Payment karke "payment" likhein aur receipt bhejein, sab dobara chalu ho jayega.';
     await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: blockedBody });
     return res.status(200).json({ success: true, blocked: 'payment' });
   }

@@ -6,6 +6,31 @@
 // in their existing leads dashboard.
 
 const { normalizePhone } = require('../utils/phone');
+const { dealerIsActive } = require('../services/trialService');
+
+const enqueueWhatsapp = (...a) => require('../services/agentMessagingService').enqueueAgentWhatsappSend(...a);
+
+/** Pure (unit-tested): one-line summary of what the owner is selling. */
+function sellerLeadDetails(lead) {
+  const parts = [
+    lead.property_type,
+    lead.size_text,
+    [lead.locality, lead.city].filter(Boolean).join(', ') || null,
+    lead.expected_price ? `expected ${lead.expected_price}` : null,
+  ].filter(Boolean);
+  const text = parts.length ? `Owner selling: ${parts.join(' · ')}` : 'Owner wants to sell a property';
+  return lead.description ? `${text}. ${String(lead.description).slice(0, 300)}` : text;
+}
+
+/** Pure (unit-tested): the WhatsApp alert a dealer gets for a forwarded lead. */
+function buildDealerLeadAlert(lead, { dealerName } = {}) {
+  return [
+    `🔔 *Naya lead${dealerName ? `, ${dealerName}` : ''}!* Plotraa team ne aapko ek property owner bheja hai.`,
+    `👤 ${lead.name || 'Owner'}  📞 ${lead.phone}`,
+    `🏠 ${sellerLeadDetails(lead)}`,
+    'Jaldi contact karein. Ye lead aapke panel mein Leads mein bhi hai.',
+  ].join('\n');
+}
 
 const STATUSES = ['new', 'assigned', 'closed'];
 
@@ -129,6 +154,10 @@ async function assignSellerLead(req, res) {
     if (tenant.status !== 'active') {
       return res.status(409).json({ error: { code: 'TENANT_INACTIVE', message: 'That dealer is not active.' } });
     }
+    // Leads stay with Plotraa for a dealer whose trial ended / payment is due.
+    if (!(await dealerIsActive(knex, tenant_id))) {
+      return res.status(409).json({ error: { code: 'DEALER_UNPAID', message: 'This dealer\'s free trial has ended or a payment is pending. Keep the lead or pick another dealer.' } });
+    }
 
     const [dealerLead] = await knex('leads')
       .insert({
@@ -138,6 +167,7 @@ async function assignSellerLead(req, res) {
         email: lead.email,
         source: 'seller_lead',
         status: 'new',
+        details: sellerLeadDetails(lead),
       })
       .returning(['id']);
 
@@ -151,7 +181,20 @@ async function assignSellerLead(req, res) {
       updated_at: knex.fn.now(),
     });
 
-    return res.json({ success: true, assigned_to: { id: tenant_id, business_name: tenant.business_name } });
+    // Tell the dealer right away (best-effort; the lead is in their panel either way).
+    let notified = false;
+    try {
+      const owner = await knex('users').where({ tenant_id, role: 'owner' }).whereNotNull('phone')
+        .orderBy('created_at', 'asc').first('phone');
+      if (owner?.phone) {
+        await enqueueWhatsapp({ tenantId: tenant_id, phone: owner.phone, messageBody: buildDealerLeadAlert(lead, { dealerName: tenant.business_name }) });
+        notified = true;
+      }
+    } catch (err) {
+      console.error('Dealer lead alert failed (non-fatal):', err.message);
+    }
+
+    return res.json({ success: true, assigned_to: { id: tenant_id, business_name: tenant.business_name }, notified });
   } catch (error) {
     console.error('Failed to assign seller lead:', error);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to assign seller lead.' } });
@@ -189,4 +232,6 @@ async function updateSellerLead(req, res) {
   }
 }
 
-module.exports = { submitSellerLead, listSellerLeadsAdmin, assignSellerLead, updateSellerLead };
+module.exports = {
+  sellerLeadDetails,
+  buildDealerLeadAlert, submitSellerLead, listSellerLeadsAdmin, assignSellerLead, updateSellerLead };

@@ -15,6 +15,7 @@ const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('
 const { handleCallEnquiryReply } = require('../services/callEnquiryService');
 const { transcribeVoiceNote, voiceNotUnderstoodMessage } = require('../services/voiceNoteService');
 const { looksLikeSellerIntent } = require('../utils/sellerIntent');
+const { dealerIsActive } = require('../services/trialService');
 const { handleWithAssistant } = require('../services/assistantService');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
@@ -219,6 +220,13 @@ async function handleInboundWhatsApp(req, res) {
   // Anything that doesn't match a known agent falls through to that
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
+  // A sub-dealer can't add listings while their dealer can't (trial over /
+  // payment overdue). In memory only: their own row is left alone, so they
+  // work again the moment the dealer pays.
+  if (agentUser && agentUser.role === 'agent' && agentUser.can_add_listing !== false
+      && !(await dealerIsActive(knex, agentUser.tenant_id))) {
+    agentUser.can_add_listing = false;
+  }
   if (agentUser) {
     // "Still Available" / "Sold" quick-reply button tap from the monthly
     // listing status check — checked first since a button tap carries

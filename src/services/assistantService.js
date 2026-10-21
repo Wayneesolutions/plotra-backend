@@ -139,11 +139,13 @@ async function loadAgentContext(knex, agentUser) {
     'CONTEXT (this person is a registered agent)',
     `- Name: ${agentUser.name || '-'}; business: ${tenant?.business_name || '-'}`,
     `- Plan: ${pkg ? `${pkg.name} (${formatInr(pkg.amount_inr)}/month)` : 'no plan chosen yet'}; payment status: ${agentUser.payment_status || '-'}${pendingReceipt ? ' (a receipt is waiting for team review)' : ''}`,
-    `- Can add new listings: ${agentUser.can_add_listing ? 'yes' : 'NO (payment pending; existing listings stay live)'}`,
+    `- Role: ${agentUser.role === 'owner' ? 'dealer (has their own admin panel)' : 'sub-dealer under a dealer'}`,
+    agentUser.trial_ends_at ? `- Free trial ends: ${new Date(agentUser.trial_ends_at).toDateString()}` : null,
+    `- Can add new listings: ${agentUser.can_add_listing ? 'yes' : 'NO (free trial over or payment pending; existing listings stay live)'}`,
     `- Their listings by status: ${Object.keys(byStatus).length ? JSON.stringify(byStatus) : 'none yet'}`,
     `- Public profile: rating ${tenant?.agent_rating ?? 'not set'}, experience ${tenant?.agent_experience_years ?? 'not set'} years, RERA ${tenant?.rera_certified ? 'yes' : 'no'}`,
     draftLines,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 async function loadBuyerContext(knex, tenantId, { isFirstMessage } = {}) {

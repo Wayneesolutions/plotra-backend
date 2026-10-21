@@ -13,12 +13,23 @@ const RESET_TOKEN_TTL_MINUTES = 30;
  */
 async function login(req, res) {
   const knex = req.app.get('db'); // Reference to our migrated Knex client
-  const { email, password } = req.body;
+  // `email` may also hold a phone number: dealers who joined on WhatsApp log
+  // in with their WhatsApp number (they have no real email). `identifier`
+  // is accepted as the neutral name for the same field.
+  const { password } = req.body;
+  const loginId = String(req.body.identifier || req.body.email || req.body.phone || '').trim();
 
   // 1. Core input verification
-  if (!email || !password) {
+  if (!loginId || !password) {
     return res.status(400).json({
-      error: { code: 'BAD_REQUEST', message: 'Email and password are required fields.' }
+      error: { code: 'BAD_REQUEST', message: 'Email/phone and password are required fields.' }
+    });
+  }
+  const byPhone = !loginId.includes('@');
+  const loginPhone = byPhone ? normalizePhone(loginId) : null;
+  if (byPhone && !loginPhone) {
+    return res.status(401).json({
+      error: { code: 'INVALID_CREDENTIALS', message: 'Invalid authentication credentials.' }
     });
   }
 
@@ -38,7 +49,7 @@ async function login(req, res) {
         'tenants.business_name',
         'plans.dashboard_access'
       )
-      .where('users.email', email.trim().toLowerCase())
+      .where(byPhone ? { 'users.phone': loginPhone } : { 'users.email': loginId.toLowerCase() })
       .first();
 
     // 3. Fail gracefully if user doesn't exist (using vague errors to protect footprint discovery)
@@ -203,11 +214,15 @@ async function updatePhone(req, res) {
  */
 async function forgotPassword(req, res) {
   const knex = req.app.get('db');
-  const { email } = req.body;
+  // Email, or the WhatsApp number for dealers who joined on WhatsApp (the
+  // link then goes to that WhatsApp number instead of an email).
+  const email = String(req.body.email || req.body.identifier || req.body.phone || '').trim();
 
   if (!email) {
-    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Email is required.' } });
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Email or phone is required.' } });
   }
+  const byPhone = !email.includes('@');
+  const phone = byPhone ? normalizePhone(email) : null;
 
   const genericResponse = {
     success: true,
@@ -224,7 +239,9 @@ async function forgotPassword(req, res) {
     await knex.transaction(async (trx) => {
       await trx.raw("SELECT set_config('app.is_service_context', 'true', true)");
 
-      const user = await trx('users').where({ email: email.trim().toLowerCase() }).first();
+      const user = byPhone
+        ? (phone ? await trx('users').where({ phone }).first() : null)
+        : await trx('users').where({ email: email.toLowerCase() }).first();
       if (!user) return; // stay generic — don't reveal whether the email exists
 
       const rawToken = crypto.randomBytes(32).toString('hex');
@@ -239,10 +256,20 @@ async function forgotPassword(req, res) {
 
       const resetUrl = `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/reset-password?token=${rawToken}`;
 
-      // Best-effort — never let an email failure change the generic response.
-      sendPasswordResetEmail({ to: user.email, resetUrl }).catch((err) =>
-        console.error('Password reset email failed (non-fatal):', err.message)
-      );
+      // Best-effort — never let a send failure change the generic response.
+      if (byPhone || /@wa-signup\.plotra\.internal$/i.test(user.email || '')) {
+        if (user.phone) {
+          require('../services/agentMessagingService').enqueueAgentWhatsappSend({
+            tenantId: user.tenant_id,
+            phone: user.phone,
+            messageBody: `🔑 Plotraa password reset: ${resetUrl}\n(${RESET_TOKEN_TTL_MINUTES} minute tak valid. Aapne nahi maanga to ignore karein.)`,
+          }).catch((err) => console.error('Password reset WhatsApp failed (non-fatal):', err.message));
+        }
+      } else {
+        sendPasswordResetEmail({ to: user.email, resetUrl }).catch((err) =>
+          console.error('Password reset email failed (non-fatal):', err.message)
+        );
+      }
     });
 
     return res.json(genericResponse);

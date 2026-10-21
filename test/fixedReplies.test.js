@@ -77,3 +77,14 @@ test('bug 7: payment problem is detected and confirmed clearly', () => {
   assert.equal(mentionsTeamContact('Aapka plan Basic hai.'), false);
   assert.match(supportConfirmLine({ lang: 'hi' }), /Team ko bata diya hai/);
 });
+
+test('forwarded seller lead: details line and dealer alert', () => {
+  const { sellerLeadDetails, buildDealerLeadAlert } = require('../src/controllers/sellerLeadController');
+  const lead = { name: 'Gurpreet', phone: '+919999999999', property_type: 'Plot', size_text: '200 gaj', locality: 'Dugri', city: 'Ludhiana', expected_price: '80 lakh' };
+  assert.strictEqual(sellerLeadDetails(lead), 'Owner selling: Plot · 200 gaj · Dugri, Ludhiana · expected 80 lakh');
+  assert.strictEqual(sellerLeadDetails({}), 'Owner wants to sell a property');
+  const alert = buildDealerLeadAlert(lead, { dealerName: 'Sharma Properties' });
+  assert.match(alert, /Naya lead, Sharma Properties/);
+  assert.match(alert, /\+919999999999/);
+  assert.match(alert, /Dugri, Ludhiana/);
+});

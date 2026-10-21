@@ -4,7 +4,7 @@ const authGuard = require('../middleware/auth');
 const tenantTransaction = require('../middleware/tenantTransaction');
 const { createListing, getListings, updateListing, deleteListing, getResolvedLocalities } = require('../controllers/listingController');
 const { getDashboardAnalytics } = require('../controllers/analyticsController');
-const { getLeads, updateLeadStatus } = require('../controllers/leadsController');
+const { getLeads, updateLeadStatus, assignLead } = require('../controllers/leadsController');
 const { updateListingBoundary } = require('../controllers/listingBoundaryController');
 const { linkOrCreateBuilderProfile, moderateBuilderProfile } = require('../controllers/builderProfileController');
 const { inviteTenantUser, listTenantUsers, updateTenantUser } = require('../controllers/userInviteController');
@@ -107,6 +107,8 @@ router.get('/leads', authGuard, tenantTransaction, getLeads);
  * @access  Protected
  */
 router.patch('/leads/:id/status', authGuard, tenantTransaction, updateLeadStatus);
+// Dealer hands a lead to a sub-dealer (owner only).
+router.patch('/leads/:id/assign', authGuard, tenantTransaction, assignLead);
 
 /**
  * @route   POST /api/v1/dashboard/users/invite

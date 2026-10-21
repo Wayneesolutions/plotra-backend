@@ -168,4 +168,15 @@ async function sendSupportAlertEmail({ to, subject, text }) {
   return send({ to, subject, html });
 }
 
-module.exports = { sendOnboardingEmail, sendPaymentReceiptEmail, sendPasswordResetEmail, sendSupportAlertEmail };
+/** New sub-dealer: one-time link to set their own password (no password in the email). */
+async function sendSetPasswordEmail({ to, setupUrl, name, dealerName }) {
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;max-width:480px">
+<p>Hi ${escapeHtml(name)},</p>
+<p>${escapeHtml(dealerName || 'Your dealer')} has added you to Plotraa as a sub-dealer.</p>
+<p><a href="${setupUrl}" style="display:inline-block;background:#FF6B4D;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:700">Set your password</a></p>
+<p style="color:#64748b;font-size:12px">This link works once and expires in 7 days. Log in at ${APP_URL} with this email.</p>
+</div>`;
+  return send({ to, subject: 'Set your Plotraa password', html });
+}
+
+module.exports = { sendOnboardingEmail, sendPaymentReceiptEmail, sendPasswordResetEmail, sendSupportAlertEmail, sendSetPasswordEmail };
