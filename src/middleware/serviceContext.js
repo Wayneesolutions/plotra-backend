@@ -34,7 +34,18 @@ module.exports = async function serviceContext(req, res, next) {
   };
 
   res.on('finish', () => finish(res.statusCode >= 500));
-  res.on('close', () => finish(true));
+  // 'close' without 'finish' means the caller (e.g. the BSP, after its own
+  // timeout) hung up while the handler was still working. Rolling back at
+  // that moment made every later query in the handler fail with "Transaction
+  // query already complete" (a slow assistant reply lost its history and
+  // confirmation, and the BSP's retry ran the whole message again, raising a
+  // second support request). Give the handler time to finish and commit its
+  // work like a normal request; the timer is only a cap for a stuck handler.
+  res.on('close', () => {
+    if (res.writableFinished) return finish(false);
+    const timer = setTimeout(() => finish(false), Number(process.env.SERVICE_TRX_ABORT_GRACE_MS || 45000));
+    timer.unref();
+  });
 
   next();
 };

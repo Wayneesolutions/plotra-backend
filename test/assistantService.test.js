@@ -130,3 +130,39 @@ test('listing status meanings never blame the location pin', () => {
   assert.match(LISTING_STATUS_MEANING.awaiting_approval, /haan|yes/);
   assert.match(LISTING_STATUS_MEANING.awaiting_approval, /pin is NOT the reason/);
 });
+
+test('plain questions are not support requests, real problems still are', () => {
+  const { isPlainQuestion } = require('../src/services/assistantService');
+  for (const t of ['support number kya hai', 'Support number?', 'plan upgrade kaise karu', 'Discount?', 'dashboard login kaise karu']) {
+    assert.ok(isPlainQuestion(t), t);
+    assert.ok(!looksLikeSupportRequest(t), t);
+  }
+  for (const t of ['payment kar di phir bhi plan active nahi hua, help', 'mujhe call karo', 'listing live nahi ho rahi? problem hai']) {
+    assert.ok(!isPlainQuestion(t), t);
+  }
+});
+
+test('discount replies are cut to a short answer', () => {
+  const { capShortReply } = require('../src/services/assistantService');
+  const long = `Basic has 10% off. ${'Pro includes many things. '.repeat(30)}`;
+  assert.ok(capShortReply(long, 'Discount?').length <= 280);
+  assert.equal(capShortReply(long, 'plans kya hain'), long);
+  assert.equal(capShortReply('Short.', 'Discount?'), 'Short.');
+});
+
+test('knowledge has the support number, upgrade steps and the two web forms', () => {
+  const { PRODUCT, RULES } = require('../src/assistant/plotraaKnowledge');
+  assert.match(PRODUCT, /Support number: /);
+  assert.match(PRODUCT, /UPGRADING A PLAN/);
+  assert.match(PRODUCT, /\/request-access/);
+  assert.match(RULES, /Aap dealer hain ya property owner\?/);
+  assert.match(RULES, /request-access/);
+  assert.match(RULES, /sell-property/);
+});
+
+test('signup follow-up speaks Gurmukhi to a Gurmukhi writer', () => {
+  const { signupFollowUp } = require('../src/services/agentSignupService');
+  assert.match(signupFollowUp({ name: 'ਗੁਰਪ੍ਰੀਤ', address: 'ਦੁੱਗਰੀ', justCompleted: true, lang: 'hi', script: 'gurmukhi' }), /ਹੋ ਗਿਆ/);
+  assert.match(signupFollowUp({ name: null, address: 'x', justCompleted: false, lang: 'hi', script: 'gurmukhi' }), /ਪੂਰਾ ਨਾਮ/);
+  assert.match(signupFollowUp({ name: null, address: 'x', justCompleted: false, lang: 'hi' }), /poora naam/);
+});
