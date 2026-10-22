@@ -23,10 +23,13 @@
 // clearly asks for help still raises a support request.
 
 const axios = require('axios');
-const { PRODUCT, RULES, offersText, PUBLIC_SITE } = require('../assistant/plotraaKnowledge');
+const { PRODUCT, RULES, offersText, PUBLIC_SITE, SUPPORT_NUMBER } = require('../assistant/plotraaKnowledge');
 const { detectReplyLanguage, detectMessageLanguage, detectScript } = require('../utils/replyLanguage');
 const { normalizePhone } = require('../utils/phone');
-const { looksLikeSellerIntent, extractSellerHints } = require('../utils/sellerIntent');
+const { looksLikeSellerIntent, extractSellerHints, looksLikeSaleDetails } = require('../utils/sellerIntent');
+const { isExplicitDealerIntent, mentionsYearly, isGreeting } = require('../utils/visitorFlowParsers');
+const { t: i18n } = require('../utils/i18n');
+const { variant } = require('../utils/fixedReplies');
 const { raiseSupportRequest } = require('./supportRequestService');
 const { advanceSignupFromAssistant, cancelPendingSignup, describeSignupState } = require('./agentSignupService');
 const { looksLikeKnownQuestion, looksLikePaymentProblem } = require('../utils/agentQuickIntent');
@@ -164,8 +167,19 @@ async function loadBuyerContext(knex, tenantId, { isFirstMessage } = {}) {
   ].filter(Boolean).join('\n');
 }
 
-async function loadVisitorContext(knex, { phone, name, isFirstMessage }) {
+async function loadVisitorContext(knex, { phone, name, isFirstMessage, flowRole = null }) {
   const signupState = await describeSignupState(knex, phone);
+  if (flowRole) {
+    // The role flow (visitorFlowService.js) already asked who they are and is
+    // collecting their details step by step; the assistant only answers a side
+    // question. It must not start a signup, create a lead or ask the role again.
+    return [
+      'CONTEXT (unknown number on the Plotraa platform WhatsApp)',
+      `- They already chose their role in the menu: ${flowRole === 'none' ? 'not chosen yet' : flowRole.toUpperCase()}. Do NOT ask who they are again and do NOT start joining or a sell lead: the system collects details step by step and asks the next question right after your answer.`,
+      '- Answer only the question they asked, briefly (1-3 lines). Use action "none" (or "support" only for a real problem / "callback" if they ask for a call). Never invent plan details (see the PLANS and rules).',
+      name ? `- Their WhatsApp profile name is "${name}".` : null,
+    ].filter(Boolean).join('\n');
+  }
   return [
     'CONTEXT (unknown number on the Plotraa platform WhatsApp)',
     isFirstMessage ? '- This is their FIRST message to Plotraa.' : null,
@@ -451,13 +465,18 @@ function fallbackSupportReply(lang) {
  * Returns { handled: true, action } once a reply is queued, or
  * { handled: false } so the caller can use its old reply.
  */
-async function handleWithAssistant(knex, { audience, phone, text, name = null, agentUser = null, tenantId = null, receiving = {}, startSignup = false }) {
+async function handleWithAssistant(knex, { audience, phone, text, name = null, agentUser = null, tenantId = null, receiving = {}, startSignup = false, answerOnly = false, flowRole = null }) {
   if (!AUDIENCES.includes(audience) || !text || !text.trim()) return { handled: false };
   const normalizedPhone = normalizePhone(agentUser?.phone || phone) || phone;
   const sendTenantId = agentUser?.tenant_id || tenantId || null;
   const lang = detectReplyLanguage(text);
   const script = detectScript(text);
   const userId = agentUser?.id || null;
+  const fixedVariant = variant(script, detectMessageLanguage(text) || lang);
+
+  // 22 Oct bug E: "join", "main dealer hoon", "judna hai" is a dealer joining even when
+  // this number was earlier tagged as an owner (open seller lead).
+  if (audience === 'visitor' && !answerOnly && isExplicitDealerIntent(text)) startSignup = true;
 
   // Fixed replies (no model): the wording must not depend on the model.
   // Not for 'buyer' (a dealer's customer): their "discount?" is about a
@@ -478,6 +497,17 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
         return { handled: true, action: 'support' };
       } catch (err) {
         console.error('[Assistant] payment-problem reply failed:', err.message);
+      }
+    }
+    // Yearly / annual billing: the plans table only has monthly prices, so the
+    // model must never make up yearly benefits (22 Oct bug D).
+    if (mentionsYearly(text) && !looksLikePaymentProblem(text)) {
+      try {
+        await sendAndLog(knex, { phone: normalizedPhone, audience, tenantId: sendTenantId, userId, text, reply: i18n('yearly_unknown', fixedVariant, { support: SUPPORT_NUMBER }), action: 'none' });
+        console.log('[Assistant] %s %s yearly question, fixed reply', audience, normalizedPhone);
+        return { handled: true, action: 'none' };
+      } catch (err) {
+        console.error('[Assistant] yearly reply failed, using the model:', err.message);
       }
     }
     // Bare discount question: a fixed 2-line answer from the live plans.
@@ -511,14 +541,14 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
   try {
     // First contact ever with this number (no assistant chat in any role):
     // the assistant opens with a short welcome and the three paths.
-    const isFirstMessage = audience !== 'agent'
+    const isFirstMessage = audience !== 'agent' && !flowRole
       && !(await knex('assistant_messages').where({ phone: normalizedPhone }).first('id'));
 
     const [plans, contextText, history] = await Promise.all([
       loadPlans(knex),
       audience === 'agent' ? loadAgentContext(knex, agentUser)
         : audience === 'buyer' ? loadBuyerContext(knex, tenantId, { isFirstMessage })
-          : loadVisitorContext(knex, { phone: normalizedPhone, name, isFirstMessage }),
+          : loadVisitorContext(knex, { phone: normalizedPhone, name, isFirstMessage, flowRole }),
       loadHistory(knex, normalizedPhone, audience),
     ]);
 
@@ -538,6 +568,12 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     const out = parseAssistantOutput(await callModel(messages));
     if (!out) throw new Error('unusable model output');
     out.reply = await enforceReplyScript(out.reply, script, langHint);
+    // Never repeat made-up yearly facts if the model produced them anyway.
+    if (mentionsYearly(out.reply) && !mentionsYearly(text)) {
+      out.reply = i18n('yearly_unknown', fixedVariant, { support: SUPPORT_NUMBER });
+    }
+    // Inside the role flow the assistant only answers; the flow owns every action.
+    if (answerOnly && !['support', 'callback', 'none'].includes(out.action)) out.action = 'none';
 
     // A plain question ("support number?", "upgrade kaise karu?") is answered,
     // never ticketed, even when the model picked "support" for it. A real
@@ -553,9 +589,13 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // An owner already selling on this number (open seller lead) who sends
     // more details ("Dugri, 200 gaj, 80 lakh") is still the owner, not a
     // dealer joining or someone to be told how to make a listing.
-    const openSellerLead = audience === 'visitor' && !startSignup ? await findOpenSellerLead(knex, normalizedPhone) : null;
-    const continuesSale = Boolean(openSellerLead) && out.action !== 'callback' && !isPlainQuestion(text);
-    const isSellerMessage = audience !== 'agent' && !startSignup
+    const openSellerLead = audience === 'visitor' && !startSignup && !answerOnly ? await findOpenSellerLead(knex, normalizedPhone) : null;
+    // 22 Oct bug A: only a message that actually carries sale details continues
+    // the sale. "hi", "plan kya hai" or a question with an open seller lead is
+    // answered as what it is.
+    const continuesSale = Boolean(openSellerLead) && out.action !== 'callback' && !isPlainQuestion(text)
+      && !isGreeting(text) && looksLikeSaleDetails(text);
+    const isSellerMessage = audience !== 'agent' && !startSignup && !answerOnly
       && (looksLikeSellerIntent(text) || out.action === 'seller_lead' || continuesSale);
     if (isSellerMessage && out.action !== 'seller_lead') {
       const hints = extractSellerHints(text);
@@ -604,7 +644,7 @@ async function handleWithAssistant(knex, { audience, phone, text, name = null, a
     // adds the "still need X" / "request submitted" line.
     // A selling message is never a joining message, so no "still need your
     // name/area" line is appended to a seller's reply.
-    if (audience === 'visitor' && !isSellerMessage) {
+    if (audience === 'visitor' && !isSellerMessage && !answerOnly) {
       const convoLang = msgLang
         || out.replyLanguage
         || detectReplyLanguage([...history.filter((m) => m.role === 'user').map((m) => m.content), text].join(' '));

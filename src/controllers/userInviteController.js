@@ -4,6 +4,8 @@ const {
   placeholderEmail, unusablePasswordHash, createSetPasswordLink, buildSubDealerWelcomeMessage,
 } = require('../services/dealerOnboardingService');
 
+const { buildTemplate } = require('../services/whatsappTemplates');
+
 const enqueueWhatsapp = (...a) => require('../services/agentMessagingService').enqueueAgentWhatsappSend(...a);
 
 /**
@@ -69,6 +71,9 @@ async function inviteTenantUser(req, res) {
           tenantId: tenant_id,
           phone,
           messageBody: buildSubDealerWelcomeMessage({ name, dealerName: tenant?.business_name || 'Aapke dealer', phone, setupUrl }),
+          template: buildTemplate('subdealer_invite', {
+            name, dealer_name: tenant?.business_name || 'Your dealer', login_id: phone, set_password_link: setupUrl,
+          }),
         });
         sentVia = 'whatsapp';
       } catch (err) {

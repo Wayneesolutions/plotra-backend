@@ -14,6 +14,7 @@ const { listWhatsappNumbers, addWhatsappNumber, removeWhatsappNumber, setDefault
 const { createCheckoutSessionHandler, cancelSubscriptionHandler, getBillingStatus } = require('../controllers/billingController');
 const { uploadMiddleware, getListingMedia, uploadListingPhoto, deleteListingPhoto } = require('../controllers/mediaController');
 const { getCallEnquiries } = require('../controllers/callEnquiryController');
+const { getTrialStatus, createPaymentLink } = require('../controllers/dealerBillingController');
 // NEW — internal ops panel (leads/WhatsApp inbox, document verification, AI call log, site visits)
 // getLeads aliased to getOpsLeadInbox: leadsController.js's getLeads (tenant-wide
 // lead list, mounted at /leads below) and dealerOpsController.js's getLeads
@@ -202,6 +203,15 @@ router.delete('/listings/:id/media', authGuard, tenantTransaction, deleteListing
 router.post('/billing/create-checkout-session', authGuard, tenantTransaction, createCheckoutSessionHandler);
 router.post('/billing/cancel-subscription', authGuard, tenantTransaction, cancelSubscriptionHandler);
 router.get('/billing/status', authGuard, tenantTransaction, getBillingStatus);
+
+/**
+ * @route   GET  /api/v1/dashboard/billing/trial
+ * @route   POST /api/v1/dashboard/billing/payment-link
+ * @desc    Trial banner data ("X days left", status trial/paid/expired) and a
+ *          Razorpay payment link for the dealer's plan.
+ */
+router.get('/billing/trial', authGuard, tenantTransaction, getTrialStatus);
+router.post('/billing/payment-link', authGuard, tenantTransaction, createPaymentLink);
 
 /**
  * NEW — Ops panel routes. Backs the internal admin panel: overview stats,

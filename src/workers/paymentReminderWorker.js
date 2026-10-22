@@ -10,7 +10,11 @@ const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { getCycleAnchorDate, daysSinceCycleAnchor } = require('../services/agentPaymentService');
-const { trialStep, trialReminderMessage, trialExpiredMessage } = require('../services/trialService');
+const { trialStep, trialReminderMessage, trialExpiredMessage, shortDate } = require('../services/trialService');
+const { buildTemplate } = require('../services/whatsappTemplates');
+const { getContactVariant } = require('../services/contactVariantService');
+const { t } = require('../utils/i18n');
+const razorpay = require('../services/razorpayService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -51,17 +55,63 @@ async function processTrialCycle(now = new Date()) {
   let reminders = 0; let expired = 0;
   for (const user of users) {
     const step = trialStep(user, { hasApprovedPayment: paid.has(user.id), now });
+    if (step.type === 'none') continue;
+    const v = await getContactVariant(knex, user.phone);
+    const { link, payLine } = await payLinkFor(user, v);
+    const fallbackHint = 'reply "plan" on this chat to choose a plan';
+    const endDate = shortDate(user.trial_ends_at);
     if (step.type === 'remind') {
       await knex('users').where({ id: user.id }).update({ trial_reminder_day: step.daysLeft, updated_at: knex.fn.now() });
-      await enqueueAgentWhatsappSend({ tenantId: user.tenant_id, phone: user.phone, messageBody: trialReminderMessage(step.daysLeft) });
+      await enqueueAgentWhatsappSend({
+        tenantId: user.tenant_id,
+        phone: user.phone,
+        messageBody: trialReminderMessage(step.daysLeft, { v, trialEndsAt: user.trial_ends_at, payLine }),
+        template: buildTemplate('trial_reminder', {
+          name: user.name || 'Dealer',
+          time_left: step.daysLeft <= 1 ? '1 day' : `${step.daysLeft} days`,
+          trial_end_date: endDate,
+          pay_link_or_hint: link || fallbackHint,
+        }),
+      });
       reminders++;
     } else if (step.type === 'expire') {
       await knex('users').where({ id: user.id }).update({ can_add_listing: false, trial_reminder_day: 0, updated_at: knex.fn.now() });
-      await enqueueAgentWhatsappSend({ tenantId: user.tenant_id, phone: user.phone, messageBody: trialExpiredMessage() });
+      await enqueueAgentWhatsappSend({
+        tenantId: user.tenant_id,
+        phone: user.phone,
+        messageBody: trialExpiredMessage({ v, trialEndsAt: user.trial_ends_at, payLine }),
+        template: buildTemplate('trial_expired', {
+          name: user.name || 'Dealer',
+          trial_end_date: endDate,
+          pay_link_or_hint: link || fallbackHint,
+        }),
+      });
       expired++;
     }
   }
   return { trialUsers: users.length, reminders, expired };
+}
+
+/**
+ * The Razorpay link a trial reminder carries: the dealer's chosen plan, else
+ * the plan their account runs on. Never throws: no link just means the
+ * message tells them to type "plan".
+ */
+async function payLinkFor(user, v) {
+  if (!razorpay.isConfigured()) return { link: null, payLine: '' };
+  try {
+    let planKey = user.selected_plan_key;
+    if (!planKey) {
+      const tenant = await knex('tenants').where({ id: user.tenant_id }).first('plan');
+      planKey = tenant?.plan;
+    }
+    if (!planKey) return { link: null, payLine: '' };
+    const { url } = await razorpay.getOrCreatePaymentLink(knex, { user, planKey });
+    return { link: url, payLine: t('plan_pay_link', v, { link: url }) };
+  } catch (err) {
+    console.error('[Trial] could not create a payment link for %s (continuing without):', user.id, err.message);
+    return { link: null, payLine: '' };
+  }
 }
 
 async function processReminderCycle() {
@@ -82,7 +132,7 @@ async function processReminderCycle() {
     // No package chosen yet — nothing to remind/restrict about. Payment
     // is opt-in at onboarding (spec: "onboarding block nahi hoga"); an
     // agent who never picked a package never entered a billing cycle.
-    if (!agent.package_id) continue;
+    if (!agent.package_id && !agent.selected_plan_key) continue;
 
     const anchor = await getCycleAnchorDate(knex, agent.id, agent.onboarded_at);
     const dayCount = daysSinceCycleAnchor(anchor);

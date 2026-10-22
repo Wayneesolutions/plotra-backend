@@ -77,6 +77,9 @@ async function updatePlan(req, res) {
     'dashboard_access', 'calling_access', 'monthly_listing_limit',
     // Catalog/display fields (20261006_01).
     'category', 'discount_percent', 'max_users', 'included_leads',
+    // Payment QR shown to a dealer who picks this plan on WhatsApp when no
+    // online payment link is available (22 Oct; the old packages had this).
+    'qr_code_url',
   ];
 
   const updates = {};

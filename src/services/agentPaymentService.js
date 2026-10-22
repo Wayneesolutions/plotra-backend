@@ -6,6 +6,7 @@
 // (paymentReminderWorker.js), so the cycle-day math and package-menu
 // formatting live in exactly one place.
 const { enqueueAgentWhatsappSend } = require('./agentMessagingService');
+const { t } = require('../utils/i18n');
 // Lazy: keeps this file's load order unchanged.
 const raiseSupportRequest = (...a) => require('./supportRequestService').raiseSupportRequest(...a);
 
@@ -29,87 +30,112 @@ function isReceiptSubmissionIntent(text) {
 }
 
 /**
- * Active packages in menu order — the single source of truth for both the
- * WhatsApp numbered-list prompt and matching a numeric reply back to a
- * package (index-into-this-same-query, so the two never drift apart).
+ * Active plans in menu order. 22 Oct fix (bug B): the menu used to come from
+ * the old hardcoded `packages` table (Lite 3000 / Growth 10000 / Unlimited
+ * 20000). It now reads the LIVE `plans` table, the same catalogue the website
+ * pricing page, the admin Plans tab and the assistant use, so a price change
+ * in Admin shows up on WhatsApp immediately. This is also what a numeric
+ * reply is matched against (index into this same query, so the two never
+ * drift apart).
  */
-async function getActivePackagesInMenuOrder(knex) {
-  return knex('packages').where({ is_active: true }).orderBy('sort_order', 'asc');
+async function getActivePlansInMenuOrder(knex) {
+  return knex('plans').where({ is_active: true }).orderBy('sort_order', 'asc');
 }
 
-function formatPackageMenu(packages) {
-  return packages.map((p, i) => `${i + 1}. *${p.name}* — ₹${p.amount_inr}/month`).join('\n');
+// Kept for older call sites.
+const getActivePackagesInMenuOrder = getActivePlansInMenuOrder;
+
+/** Pure: "1. *Basic* — ₹5,000/month (40% off) · 1 user" from plan rows. */
+function formatPackageMenu(plans) {
+  return plans.map((p, i) => {
+    const extras = [
+      p.max_users ? `${p.max_users} user${p.max_users > 1 ? 's' : ''}` : null,
+      p.included_leads ? `${p.included_leads} leads` : null,
+    ].filter(Boolean);
+    const price = `₹${Number(p.price_inr).toLocaleString('en-IN')}/month`;
+    return `${i + 1}. *${p.label}* — ${price}${p.discount_percent ? ` (${p.discount_percent}% off)` : ''}${extras.length ? ` · ${extras.join(' · ')}` : ''}`;
+  }).join('\n');
+}
+
+/** Pure: the full plan-list message (header, live plans, footer) in one variant. */
+function buildPlanMenuMessage(plans, v, { headerKey = 'plan_menu_header', footerKey = 'plan_menu_footer', vars = {} } = {}) {
+  return `${t(headerKey, v)}\n\n${formatPackageMenu(plans)}\n\n${t(footerKey, v, vars)}`;
+}
+
+/** Pure: the plan a message picks: "2" (only before a plan is chosen) or "plan 2" (any time). */
+function parsePlanChoice(text, { alreadyChosen }) {
+  const trimmed = String(text || '').trim().toLowerCase();
+  const explicit = trimmed.match(/^(?:plan|ਪਲਾਨ|प्लान)\s*(?:no\.?|number|#)?\s*(\d{1,2})$/i);
+  if (explicit) return Number(explicit[1]);
+  if (!alreadyChosen && /^\d{1,2}$/.test(trimmed)) return Number(trimmed);
+  return null;
 }
 
 /**
- * Sent once right after an agent is approved (both the tenant-owner and
- * super-admin approval paths in agentSignupController.js call this).
+ * Sent once right after an agent is approved (the super-admin approval in
+ * agentSignupController.js calls this).
  */
-async function sendPackageSelectionPrompt(knex, { tenantId, phone }) {
-  const packages = await getActivePackagesInMenuOrder(knex);
-  if (!packages.length) {
-    // Previously a silent no-op — this is the confirmed cause of "new
-    // agent joins via WhatsApp, plan never shared, payment never happens":
-    // if a tenant has no package marked is_active (never configured one,
-    // or deactivated the only one), the agent gets approved and then hears
-    // nothing further, ever, with zero signal anywhere that anything went
-    // wrong. Log loudly (diagnosable from logs going forward, instead of
-    // silently invisible) and still send the agent SOMETHING instead of
-    // total radio silence — they at least know they aren't being ignored,
-    // and can still list properties in the meantime (can_add_listing
-    // defaults true until the payment-reminder cron actually restricts it).
-    console.warn(`[agentPaymentService] No active packages configured for tenant ${tenantId} — agent ${phone} was approved but has nothing to select a payment plan from.`);
-    await enqueueAgentWhatsappSend({
-      tenantId,
-      phone,
-      messageBody: "You're approved! 🎉 Payment plan setup is still being finalized on our end — we'll message you shortly with plan options. You can already send property details to list them in the meantime.",
-    });
+async function sendPackageSelectionPrompt(knex, { tenantId, phone, v = 'hi' }) {
+  const plans = await getActivePlansInMenuOrder(knex);
+  if (!plans.length) {
+    // No active plan at all is a real misconfiguration: log loudly and still
+    // send the dealer something instead of radio silence.
+    console.warn(`[agentPaymentService] No active plans configured: dealer ${phone} was approved but has nothing to choose from.`);
+    await enqueueAgentWhatsappSend({ tenantId, phone, messageBody: t('plan_none', v) });
     return;
   }
-
-  const body = `📦 *Choose your plan* — reply with its number:\n\n${formatPackageMenu(packages)}\n\nYou can list properties either way; this just sets up your payment plan.`;
-  await enqueueAgentWhatsappSend({ tenantId, phone, messageBody: body });
+  await enqueueAgentWhatsappSend({ tenantId, phone, messageBody: buildPlanMenuMessage(plans, v) });
 }
 
 /**
- * Claims a bare numeric reply ("1", "2", ...) as a plan selection —
- * only when this agent hasn't already picked one. Returns false (does
- * nothing) for anything that isn't a plain 1-2 digit number, or that
- * doesn't match an active package's current position in the menu, so a
- * genuine listing-intake message ("plot no 12...") is never swallowed by
- * this check — see webhookController.js for how the caller uses the
- * return value to decide whether to fall through to other handlers.
+ * Claims a plan-choice reply ("2" before a plan is chosen, "plan 2" any time)
+ * and sends the way to pay: a Razorpay payment link when configured (the plan
+ * switches on automatically when it is paid), else the plan's QR, else the
+ * team is asked to send one. Returns false (does nothing) for anything else,
+ * so a genuine listing-intake message ("plot no 12...") is never swallowed;
+ * see webhookController.js for how the return value is used.
  */
 async function tryHandlePackageSelectionReply(knex, { agentUser, incomingText }) {
-  if (agentUser.package_id) return false;
+  const alreadyChosen = Boolean(agentUser.selected_plan_key || agentUser.package_id);
+  const number = parsePlanChoice(incomingText, { alreadyChosen });
+  if (!number) return false;
 
-  const trimmed = String(incomingText || '').trim();
-  if (!/^\d{1,2}$/.test(trimmed)) return false;
-
-  const packages = await getActivePackagesInMenuOrder(knex);
-  const chosen = packages[Number(trimmed) - 1];
+  const plans = await getActivePlansInMenuOrder(knex);
+  const chosen = plans[number - 1];
   if (!chosen) return false;
 
-  await knex('users').where({ id: agentUser.id }).update({ package_id: chosen.id, updated_at: knex.fn.now() });
+  const v = await require('./contactVariantService').getContactVariant(knex, agentUser.phone, incomingText);
+  await knex('users').where({ id: agentUser.id }).update({ selected_plan_key: chosen.key, updated_at: knex.fn.now() });
+  const vars = { plan: chosen.label, price: Number(chosen.price_inr).toLocaleString('en-IN') };
 
-  let body;
-  if (chosen.qr_code_url) {
-    body = `✅ *${chosen.name}* plan selected — ₹${chosen.amount_inr}/month.\n\nScan this QR to pay:\n${chosen.qr_code_url}\n\nOnce paid, send a photo of your payment receipt any time (or just type "payment") to confirm it with us.`;
-  } else {
-    // No QR image is set for this plan yet. Don't promise "shortly" and then
-    // go silent: tell the team so they send the QR, and say so honestly.
-    console.warn(`[agentPaymentService] Plan "${chosen.name}" (${chosen.id}) has no qr_code_url; agent ${agentUser.phone} selected it.`);
+  let body = null;
+  const razorpay = require('./razorpayService');
+  if (razorpay.isConfigured()) {
+    try {
+      const { url } = await razorpay.getOrCreatePaymentLink(knex, { user: agentUser, planKey: chosen.key });
+      body = t('plan_selected_link', v, { ...vars, link: url });
+    } catch (err) {
+      console.error('[agentPaymentService] Razorpay link failed, falling back to QR:', err.response?.data ? JSON.stringify(err.response.data) : err.message);
+    }
+  }
+  if (!body && chosen.qr_code_url) {
+    body = t('plan_selected_qr', v, { ...vars, qr: chosen.qr_code_url });
+  }
+  if (!body) {
+    // Nothing to pay with yet. Don't promise "shortly" and then go silent:
+    // tell the team so they send the details, and say so honestly.
+    console.warn(`[agentPaymentService] Plan "${chosen.label}" (${chosen.key}) has no Razorpay link or QR; ${agentUser.phone} selected it.`);
     await raiseSupportRequest(knex, {
       phone: agentUser.phone,
       name: agentUser.name,
       audience: 'agent',
       kind: 'problem',
-      summary: `Selected the "${chosen.name}" plan but it has no payment QR set. Please send the QR / payment details.`,
-      lastMessage: trimmed,
+      summary: `Selected the "${chosen.label}" plan but there is no payment link or QR for it. Please send the payment details.`,
+      lastMessage: String(incomingText).trim(),
       tenantId: agentUser.tenant_id,
       userId: agentUser.id,
-    }).catch((err) => console.error('[agentPaymentService] could not raise QR support request:', err.message));
-    body = `✅ *${chosen.name}* plan selected — ₹${chosen.amount_inr}/month.\n\nThe payment QR for this plan isn't ready yet. I've told the Plotraa team and they will send it to you on this chat. You can list properties in the meantime.`;
+    }).catch((err) => console.error('[agentPaymentService] could not raise payment-details support request:', err.message));
+    body = t('plan_selected_noqr', v, vars);
   }
   await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: body });
   return true;
@@ -145,8 +171,11 @@ async function getCycleAnchorDate(knex, agentId, onboardedAt) {
 
 module.exports = {
   isReceiptSubmissionIntent,
+  getActivePlansInMenuOrder,
   getActivePackagesInMenuOrder,
   formatPackageMenu,
+  buildPlanMenuMessage,
+  parsePlanChoice,
   sendPackageSelectionPrompt,
   tryHandlePackageSelectionReply,
   daysSinceCycleAnchor,

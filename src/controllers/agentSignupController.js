@@ -26,7 +26,9 @@ const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService'
 const { sendPackageSelectionPrompt } = require('../services/agentPaymentService');
 const { CityValidationError } = require('../services/tenantCityService');
 const { resolveTenantForSignup } = require('../services/agentSignupService');
-const { createDealerFromSignup, buildDealerWelcomeMessage } = require('../services/dealerOnboardingService');
+const { createDealerFromSignup, buildDealerWelcomeMessage, shortDate } = require('../services/dealerOnboardingService');
+const { buildTemplate } = require('../services/whatsappTemplates');
+const { variantFor } = require('../utils/i18n');
 // Lazy: assistantService pulls in the messaging queue; keeps this file's
 // load order unchanged.
 const handleWithAssistant = (...a) => require('../services/assistantService').handleWithAssistant(...a);
@@ -300,12 +302,24 @@ async function approveAgentSignupAdmin(req, res) {
       trialEnd: trialEndsAt,
     });
     try {
-      await enqueueAgentWhatsappSend({ tenantId: tenant.id, phone: user.phone, messageBody: welcome });
+      await enqueueAgentWhatsappSend({
+        tenantId: tenant.id,
+        phone: user.phone,
+        messageBody: welcome,
+        // The new dealer usually has not messaged us in the last 24 hours, so
+        // the welcome + set-password link goes as a template then.
+        template: buildTemplate('dealer_welcome', {
+          name: signup.name,
+          trial_end_date: shortDate(trialEndsAt),
+          login_id: user.phone,
+          set_password_link: setupUrl,
+        }),
+      });
     } catch (err) {
       console.error('Failed to send dealer welcome (non-fatal):', err.message);
     }
     try {
-      await sendPackageSelectionPrompt(knex, { tenantId: tenant.id, phone: user.phone });
+      await sendPackageSelectionPrompt(knex, { tenantId: tenant.id, phone: user.phone, v: variantFor(signup.accumulated_text || '') });
     } catch (err) {
       console.error('Failed to send package selection prompt (non-fatal):', err.message);
     }

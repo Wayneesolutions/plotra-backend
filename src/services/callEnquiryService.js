@@ -26,6 +26,7 @@
 const axios = require('axios');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
+const { EXISTING_TEMPLATES } = require('./whatsappTemplates');
 const { findMatchingListings, formatSearchReply, logDeliveries } = require('./buyerSearchService');
 
 const PROPERTY_TYPES = ['Plot', 'House', 'Villa', 'Flat', 'Commercial', 'Agricultural Land'];
@@ -250,6 +251,7 @@ function buildTemplateJob({ enquiryId, tenantId, phone, buyerName, matchCount, r
         sanitizeTemplateParam(matchCount, '0'),
         sanitizeTemplateParam(requirement, 'your enquiry'),
       ],
+      expectedParams: EXISTING_TEMPLATES.call_enquiry.bodyParams,
       // Echoed back by Meta when the buyer taps the template's quick-reply
       // button — see handleCallEnquiryReply.
       quickReplyPayload: `${BUTTON_PAYLOAD_PREFIX}${enquiryId}`,

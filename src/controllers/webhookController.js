@@ -9,7 +9,7 @@ const { resolveTenantByReceivingNumber } = require('../services/tenantWhatsappNu
 const { enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply } = require('../services/buyerSearchService');
 const { routeAgentText } = require('../services/agentIntentService');
-const { detectReplyLanguage } = require('../utils/replyLanguage');
+const { t, variantFor } = require('../utils/i18n');
 const { handleStillAvailableConfirmation, handleSoldConfirmation } = require('../services/listingStatusCheckService');
 const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('../services/whatsappSignupService');
 const { handleCallEnquiryReply } = require('../services/callEnquiryService');
@@ -17,6 +17,9 @@ const { transcribeVoiceNote, voiceNotUnderstoodMessage } = require('../services/
 const { looksLikeSellerIntent } = require('../utils/sellerIntent');
 const { dealerIsActive } = require('../services/trialService');
 const { handleWithAssistant } = require('../services/assistantService');
+const { handleVisitorFlow, handleVisitorPhoto, isEnabled: isVisitorFlowEnabled } = require('../services/visitorFlowService');
+const { touchContactWindow, applyDeliveryStatuses } = require('../services/whatsappLogService');
+const { uploadToS3 } = require('../services/s3Service');
 
 const MAX_PHOTOS_WHATSAPP = 10; // matches agentIntakeController.js's own constant
 
@@ -95,6 +98,8 @@ function parseInboundPayload(body) {
   const value = body.entry?.[0]?.changes?.[0]?.value ?? body;
 
   return {
+    // Meta delivery receipts (sent / delivered / read / failed) for messages we sent.
+    statuses: Array.isArray(value.statuses) ? value.statuses : null,
     phone: value.contacts?.[0]?.wa_id || body.from_phone || body.sender?.phone,
     leadName: value.contacts?.[0]?.profile?.name || body.from_name || body.sender?.name || 'Visitor',
     // An image message's caption (Meta Cloud API) lives at
@@ -183,6 +188,15 @@ async function handleInboundWhatsApp(req, res) {
   const { phone, leadName, bspThreadRef, inferredSlug, receivingNumber, receivingPhoneNumberId, mediaId, mediaMimeType, buttonReplyId, locationLat, locationLng, templateButtonPayload, audioId, audioMimeType } = parsed;
   let { incomingText } = parsed;
 
+  // Delivery receipts: update the template send log (message id / failure reason).
+  if (parsed.statuses?.length) {
+    try {
+      await applyDeliveryStatuses(knex, parsed.statuses);
+    } catch (statusErr) {
+      console.error('[Webhook] could not apply delivery statuses (non-fatal):', statusErr.message);
+    }
+  }
+
   const hasLocation = locationLat != null && locationLng != null;
 
   // Voice notes (dealers and buyers): transcribe and treat the transcript as
@@ -209,6 +223,13 @@ async function handleInboundWhatsApp(req, res) {
   if (!phone || (!incomingText && !mediaId && !hasLocation && !buttonReplyId)) {
     // Non-message events (delivery receipts, status updates) — ack and move on
     return res.status(200).json({ success: true, warning: 'Acknowledged non-message event.' });
+  }
+
+  // The person messaged us: free text is allowed to them for the next 24 hours.
+  try {
+    await touchContactWindow(knex, phone);
+  } catch (windowErr) {
+    console.error('[Webhook] could not record the contact window (non-fatal):', windowErr.message);
   }
 
   // Agent-intake routing: if this inbound sender's phone matches a
@@ -257,7 +278,7 @@ async function handleInboundWhatsApp(req, res) {
 
     // Payment: a bare numeric reply while no package is chosen yet is a
     // package-menu selection, not listing text.
-    if (!mediaId && incomingText && !agentUser.package_id) {
+    if (!mediaId && incomingText) {
       const claimed = await tryHandlePackageSelectionReply(knex, { agentUser, incomingText: incomingText.trim() });
       if (claimed) return res.status(200).json({ success: true, packageSelected: true });
     }
@@ -363,6 +384,19 @@ async function handleInboundWhatsApp(req, res) {
     return res.status(200).json({ success: true });
   }
 
+  // Platform number only (not a dealer's own number): a photo from an owner who
+  // is at the "photos" step of the sell flow is saved on their seller lead.
+  if (mediaId && !inferredSlug && isVisitorFlowEnabled()) {
+    const dealerForPhoto = await resolveTenantByReceivingNumber(knex, { phoneNumberId: receivingPhoneNumberId, whatsappNumber: receivingNumber });
+    if (!dealerForPhoto) {
+      const photo = await handleVisitorPhoto(knex, {
+        phone, name: leadName && leadName !== 'Visitor' ? leadName : null, mediaId, mimeType: mediaMimeType,
+        deps: { download: downloadWhatsAppMedia, upload: uploadToS3 },
+      });
+      if (photo.handled) return res.status(200).json({ success: true, flow: photo.action });
+    }
+  }
+
   // Buyer/lead media messages aren't handled — only agent-intake photos
   // are (property listing photos). A buyer sending an image with no
   // caption text would otherwise fall through into the text-processing
@@ -390,6 +424,23 @@ async function handleInboundWhatsApp(req, res) {
   } catch (callEnquiryErr) {
     // Never let this optional step break the normal buyer flow.
     console.error('Call enquiry reply handling failed (continuing with normal flow):', callEnquiryErr.message);
+  }
+
+  // Role flow (22 Oct): on the Plotraa platform number the first message always
+  // gets the Buyer / Owner / Dealer menu (no guessing), and each role is then
+  // asked step by step. "menu" changes the role any time. Not used on a
+  // dealer's own number. VISITOR_FLOW=off restores the old assistant-only path.
+  if (!inferredSlug && isVisitorFlowEnabled()) {
+    const dealerOnThisNumber = await resolveTenantByReceivingNumber(knex, { phoneNumberId: receivingPhoneNumberId, whatsappNumber: receivingNumber });
+    if (!dealerOnThisNumber) {
+      const flow = await handleVisitorFlow(knex, {
+        phone,
+        name: leadName && leadName !== 'Visitor' ? leadName : null,
+        text: incomingText.trim(),
+        receiving: { receivingPhoneNumberId, receivingNumber },
+      });
+      if (flow.handled) return res.status(200).json({ success: true, flow: flow.action });
+    }
   }
 
   // Agent self-registration: a "join as agent" message (or a follow-up in
@@ -482,11 +533,8 @@ async function handleInboundWhatsApp(req, res) {
       return res.status(200).json({ success: true, assistant: assistantReply.action });
     }
 
-    // Assistant unavailable: friendly fixed intro, as before.
-    const lang = detectReplyLanguage(incomingText);
-    const coldGreeting = lang === 'en'
-      ? `Hi there! 👋 This number is for Plotraa property agents.\n\n• *Looking for a property?* Tell me the area and type (e.g. "plots in Ludhiana") and I'll show you available listings.\n• *Want to list properties as an agent?* Reply: *join as agent*`
-      : `Namaste! 👋 Yeh number Plotraa ke property agents ke liye hai.\n\n• *Property dhundh rahe hain?* Area aur type batayein (jaise "Ludhiana mein plot") aur main available listings dikha dunga.\n• *Agent ke roop mein property list karna chahte hain?* Reply karein: *join as agent*`;
+    // Assistant unavailable: friendly fixed intro (the role menu), in the script of their message.
+    const coldGreeting = receivingDealer ? t('cold_greeting_dealer_number', variantFor(incomingText)) : t('role_menu', variantFor(incomingText));
 
     await enqueueAgentWhatsappSend({ tenantId: receivingDealer?.id || null, phone, messageBody: coldGreeting });
     return res.status(200).json({ success: true, coldContact: true });

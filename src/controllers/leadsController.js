@@ -1,3 +1,4 @@
+const { buildTemplate } = require('../services/whatsappTemplates');
 const { computeLeadScore } = require('../utils/leadScoring');
 
 const ALLOWED_STATUSES = ['new', 'contacted', 'qualified', 'closed', 'lost'];
@@ -167,6 +168,12 @@ async function assignLead(req, res) {
         await require('../services/agentMessagingService').enqueueAgentWhatsappSend({
           tenantId: tenant_id,
           phone: member.phone,
+          template: buildTemplate('lead_assigned', {
+            dealer_name: member.name || 'there',
+            lead_name: lead.name || 'Customer',
+            lead_phone: lead.phone || '-',
+            lead_details: lead.details || 'Open the Leads section for details',
+          }),
           messageBody: [
             '🔔 *Naya lead aapke liye!*',
             `👤 ${lead.name || 'Customer'}  📞 ${lead.phone || '-'}`,
