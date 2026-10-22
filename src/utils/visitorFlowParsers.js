@@ -65,12 +65,17 @@ function explicitRole(text) {
   return null;
 }
 
-/** "1" / "buyer" / "owner" / "dealer" (also Hindi words) -> role, for the role menu. */
+/**
+ * Role menu reply -> role. The menu shows only 1 Buyer / 2 Dealer (owners are
+ * not advertised). "3" still means dealer for people who saw the old 3-option
+ * menu. The owner path stays reachable when someone types "owner"/"seller" or
+ * says they want to sell (explicitRole), it is just not offered.
+ */
 function parseRoleChoice(text) {
   const t = String(text || '').trim().toLowerCase().replace(/[.!?\s]+$/g, '');
   const digit = t.replace(/[️⃣\s.)]/g, '');
   if (['1', '१', '੧'].includes(digit)) return 'buyer';
-  if (['2', '२', '੨'].includes(digit)) return 'owner';
+  if (['2', '२', '੨'].includes(digit)) return 'dealer';
   if (['3', '३', '੩'].includes(digit)) return 'dealer';
   if (/^(?:buyer|kharidar|kharidne|khareedar|ਖਰੀਦਦਾਰ|खरीदार|buy|buyer hoon)$/i.test(t)) return 'buyer';
   if (/^(?:owner|malik|maalik|seller|ਮਾਲਕ|मालिक|property owner)$/i.test(t)) return 'owner';

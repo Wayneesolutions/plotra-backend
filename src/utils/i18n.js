@@ -24,16 +24,16 @@ function variantFor(text, chatText = '') {
 const M = {
   // ------------------------------------------------------------- role menu
   role_menu: {
-    en: 'Hello! 👋 Welcome to Plotraa.\n\nFirst, tell me who you are. Just send a number:\n1️⃣ Buyer: I want to buy a property\n2️⃣ Owner: I want to sell my property\n3️⃣ Dealer: I want to list properties on Plotraa (7-day free trial)\n\nTo change your role later, type *menu* any time.',
-    hi: 'Namaste! 👋 Plotraa mein aapka swagat hai.\n\nPehle bataiye, aap kaun hain? Sirf number bhejein:\n1️⃣ Buyer: property kharidni hai\n2️⃣ Owner: apni property bechni hai\n3️⃣ Dealer: Plotraa pe listings daalni hain (7 din free trial)\n\nRole badalna ho to kabhi bhi *menu* likhein.',
-    pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! 👋 Plotraa ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ।\n\nਪਹਿਲਾਂ ਦੱਸੋ, ਤੁਸੀਂ ਕੌਣ ਹੋ? ਸਿਰਫ਼ ਨੰਬਰ ਭੇਜੋ:\n1️⃣ Buyer: ਪ੍ਰਾਪਰਟੀ ਖਰੀਦਣੀ ਹੈ\n2️⃣ Owner: ਆਪਣੀ ਪ੍ਰਾਪਰਟੀ ਵੇਚਣੀ ਹੈ\n3️⃣ Dealer: Plotraa \'ਤੇ ਲਿਸਟਿੰਗ ਪਾਉਣੀ ਹੈ (7 ਦਿਨ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ)\n\nਰੋਲ ਬਦਲਣਾ ਹੋਵੇ ਤਾਂ ਕਦੇ ਵੀ *menu* ਲਿਖੋ।',
-    hi_deva: 'नमस्ते! 👋 Plotraa में आपका स्वागत है।\n\nपहले बताइए, आप कौन हैं? सिर्फ़ नंबर भेजें:\n1️⃣ Buyer: प्रॉपर्टी खरीदनी है\n2️⃣ Owner: अपनी प्रॉपर्टी बेचनी है\n3️⃣ Dealer: Plotraa पर लिस्टिंग डालनी है (7 दिन मुफ़्त ट्रायल)\n\nरोल बदलना हो तो कभी भी *menu* लिखें।',
+    en: 'Hello! 👋 Welcome to Plotraa.\n\nFirst, tell me who you are. Just send a number:\n1️⃣ Buyer: I want to buy a property\n2️⃣ Dealer: I want to list properties on Plotraa (7-day free trial)\n\nTo change your role later, type *menu* any time.',
+    hi: 'Namaste! 👋 Plotraa mein aapka swagat hai.\n\nPehle bataiye, aap kaun hain? Sirf number bhejein:\n1️⃣ Buyer: property kharidni hai\n2️⃣ Dealer: Plotraa pe listings daalni hain (7 din free trial)\n\nRole badalna ho to kabhi bhi *menu* likhein.',
+    pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! 👋 Plotraa ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ।\n\nਪਹਿਲਾਂ ਦੱਸੋ, ਤੁਸੀਂ ਕੌਣ ਹੋ? ਸਿਰਫ਼ ਨੰਬਰ ਭੇਜੋ:\n1️⃣ Buyer: ਪ੍ਰਾਪਰਟੀ ਖਰੀਦਣੀ ਹੈ\n2️⃣ Dealer: Plotraa \'ਤੇ ਲਿਸਟਿੰਗ ਪਾਉਣੀ ਹੈ (7 ਦਿਨ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ)\n\nਰੋਲ ਬਦਲਣਾ ਹੋਵੇ ਤਾਂ ਕਦੇ ਵੀ *menu* ਲਿਖੋ।',
+    hi_deva: 'नमस्ते! 👋 Plotraa में आपका स्वागत है।\n\nपहले बताइए, आप कौन हैं? सिर्फ़ नंबर भेजें:\n1️⃣ Buyer: प्रॉपर्टी खरीदनी है\n2️⃣ Dealer: Plotraa पर लिस्टिंग डालनी है (7 दिन मुफ़्त ट्रायल)\n\nरोल बदलना हो तो कभी भी *menu* लिखें।',
   },
   role_retry: {
-    en: 'Please reply with 1, 2 or 3:\n1️⃣ Buyer  2️⃣ Owner  3️⃣ Dealer',
-    hi: 'Kripya 1, 2 ya 3 bhejein:\n1️⃣ Buyer  2️⃣ Owner  3️⃣ Dealer',
-    pa: 'ਕਿਰਪਾ ਕਰਕੇ 1, 2 ਜਾਂ 3 ਭੇਜੋ:\n1️⃣ Buyer  2️⃣ Owner  3️⃣ Dealer',
-    hi_deva: 'कृपया 1, 2 या 3 भेजें:\n1️⃣ Buyer  2️⃣ Owner  3️⃣ Dealer',
+    en: 'Please reply with 1 or 2:\n1️⃣ Buyer  2️⃣ Dealer',
+    hi: 'Kripya 1 ya 2 bhejein:\n1️⃣ Buyer  2️⃣ Dealer',
+    pa: 'ਕਿਰਪਾ ਕਰਕੇ 1 ਜਾਂ 2 ਭੇਜੋ:\n1️⃣ Buyer  2️⃣ Dealer',
+    hi_deva: 'कृपया 1 या 2 भेजें:\n1️⃣ Buyer  2️⃣ Dealer',
   },
   role_set_buyer: {
     en: '👍 Okay, you are a *Buyer*. Let me ask a few quick questions to find the right property.',
@@ -250,10 +250,10 @@ const M = {
     hi_deva: 'कीमत GST सहित है। प्लान चुनने से पहले भी लिस्टिंग कर सकते हैं; यह बस आपका पेमेंट प्लान सेट करता है।',
   },
   plan_menu_visitor_footer: {
-    en: 'Prices include GST. New dealers get a {days}-day free trial first. To join as a dealer type *menu* and choose 3.',
-    hi: 'Price GST ke saath hai. Naye dealers ko pehle {days} din ka free trial milta hai. Dealer ke roop mein judne ke liye *menu* likhein aur 3 chunein.',
-    pa: 'ਕੀਮਤ GST ਸਮੇਤ ਹੈ। ਨਵੇਂ dealers ਨੂੰ ਪਹਿਲਾਂ {days} ਦਿਨ ਦਾ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ ਮਿਲਦਾ ਹੈ। Dealer ਵਜੋਂ ਜੁੜਨ ਲਈ *menu* ਲਿਖੋ ਅਤੇ 3 ਚੁਣੋ।',
-    hi_deva: 'कीमत GST सहित है। नए dealers को पहले {days} दिन का मुफ़्त ट्रायल मिलता है। Dealer के रूप में जुड़ने के लिए *menu* लिखें और 3 चुनें।',
+    en: 'Prices include GST. New dealers get a {days}-day free trial first. To join as a dealer type *menu* and choose 2.',
+    hi: 'Price GST ke saath hai. Naye dealers ko pehle {days} din ka free trial milta hai. Dealer ke roop mein judne ke liye *menu* likhein aur 2 chunein.',
+    pa: 'ਕੀਮਤ GST ਸਮੇਤ ਹੈ। ਨਵੇਂ dealers ਨੂੰ ਪਹਿਲਾਂ {days} ਦਿਨ ਦਾ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ ਮਿਲਦਾ ਹੈ। Dealer ਵਜੋਂ ਜੁੜਨ ਲਈ *menu* ਲਿਖੋ ਅਤੇ 2 ਚੁਣੋ।',
+    hi_deva: 'कीमत GST सहित है। नए dealers को पहले {days} दिन का मुफ़्त ट्रायल मिलता है। Dealer के रूप में जुड़ने के लिए *menu* लिखें और 2 चुनें।',
   },
   plans_list_header: {
     en: '📦 *Plotraa plans* (billed monthly):',
