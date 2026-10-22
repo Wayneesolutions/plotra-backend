@@ -51,4 +51,19 @@ function extractSellerHints(text) {
   };
 }
 
-module.exports = { looksLikeSellerIntent, extractSellerHints };
+/**
+ * Is this message plausibly MORE DETAILS about a property being sold ("200 gaj",
+ * "1.5 crore", "plot Dugri mein")? A greeting, a plan/price question or a
+ * "join" is not. 22 Oct bug A: after an owner's first message every later
+ * message ("hi", "plan kya hai") got the owner confirmation again because an
+ * open seller lead made the assistant treat everything as the sale.
+ */
+function looksLikeSaleDetails(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (looksLikeSellerIntent(t)) return true;
+  const hints = extractSellerHints(t);
+  return Boolean(hints.property_type || hints.expected_price || hints.size_text);
+}
+
+module.exports = { looksLikeSellerIntent, extractSellerHints, looksLikeSaleDetails };

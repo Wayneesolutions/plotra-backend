@@ -35,6 +35,18 @@ const QUESTION_TOPICS = [
   /(?:discount|offer|coupon|trial|chhoot|chhut|sasta|ਡਿਸਕਾਊਂਟ|ਡਿਸਕਾਉਂਟ|ਛੋਟ|ਆਫਰ|ਆਫ਼ਰ|डिस्काउंट|छूट|ऑफर)/i,
 ];
 
+// "plan", "mera plan", "plans list", "trial kab tak hai?": the live plan list /
+// the dealer's own plan and trial end date, answered by the system (not the
+// model) so the numbers always come from the plans table.
+const PLAN_INFO_EXACT = /^(?:my\s*|mera\s*|mere\s*)?(?:plans?|plan\s*list|plans\s*list|plan\s*dikhao|plan\s*batao|plan\s*status|trial(?:\s*status)?|ਪਲਾਨ|ਪਲਾਨ\s*ਦਿਖਾਓ|प्लान|प्लान\s*दिखाओ)[\s?!.]*$/i;
+const TRIAL_QUESTION = /\btrial\b[^.?!]*\b(?:kab|kitne|kitna|end|ends|khatam|status|tak|left|baaki|bacha|remaining)\b|\b(?:kab|kitne)\b[^.?!]*\btrial\b/i;
+
+function looksLikePlanInfoRequest(text) {
+  const t = String(text || '').trim();
+  if (!t || LISTING_SIGNAL.test(t)) return false;
+  return PLAN_INFO_EXACT.test(t) || TRIAL_QUESTION.test(t);
+}
+
 function normalize(text) {
   return String(text || '').trim();
 }
@@ -62,7 +74,8 @@ function looksLikeKnownQuestion(text) {
 
 /**
  * Returns 'listing_info' (send to intake), 'support' (payment problem),
- * 'question' (answered by the assistant) or null (let the classifier decide).
+ * 'plan_info' (plan list / own plan / trial date), 'question' (answered by
+ * the assistant) or null (let the classifier decide).
  * `draftOpen` is true while the agent has an unfinished listing draft.
  */
 function quickAgentIntent(text, { draftOpen = false } = {}) {
@@ -70,9 +83,10 @@ function quickAgentIntent(text, { draftOpen = false } = {}) {
   if (!t) return null;
   if (looksLikeAddress(t)) return 'listing_info';
   if (looksLikePaymentProblem(t)) return 'support';
+  if (looksLikePlanInfoRequest(t)) return 'plan_info';
   if (looksLikeKnownQuestion(t)) return 'question';
   void draftOpen;
   return null;
 }
 
-module.exports = { quickAgentIntent, looksLikeAddress, looksLikePaymentProblem, looksLikeKnownQuestion };
+module.exports = { quickAgentIntent, looksLikeAddress, looksLikePaymentProblem, looksLikeKnownQuestion, looksLikePlanInfoRequest };

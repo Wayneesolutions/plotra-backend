@@ -4,6 +4,9 @@ const crypto = require('crypto');
 const { JWT_SECRET } = require('../config/jwtSecret');
 const { sendPasswordResetEmail } = require('../services/emailService');
 const { normalizePhone } = require('../utils/phone');
+const { buildTemplate } = require('../services/whatsappTemplates');
+const { dealerBilling } = require('../services/trialService');
+const { bannerText } = require('./dealerBillingController');
 
 const JWT_EXPIRES_IN = '12h'; // Optimal window for backoffice operational shift length
 const RESET_TOKEN_TTL_MINUTES = 30;
@@ -98,6 +101,21 @@ async function login(req, res) {
       { expiresIn: JWT_EXPIRES_IN }
     );
 
+    // 6b. Trial / payment state for the dashboard banner ("X days left"). Best
+    // effort: login never fails because of it.
+    let billing = null;
+    try {
+      billing = await knex.transaction(async (trx) => {
+        await trx.raw("SELECT set_config('app.is_service_context', 'true', true)");
+        const b = await dealerBilling(trx, user.tenant_id);
+        if (!b) return null;
+        const { user: _owner, ...state } = b;
+        return { ...state, banner: bannerText(b) };
+      });
+    } catch (billingErr) {
+      console.error('Login: could not load billing state (non-fatal):', billingErr.message);
+    }
+
     // 7. Dispatch success envelope containing application-ready details
     return res.status(200).json({
       success: true,
@@ -108,7 +126,8 @@ async function login(req, res) {
         email: user.email,
         role: user.role,
         businessName: user.business_name
-      }
+      },
+      billing
     });
 
   } catch (error) {
@@ -263,6 +282,7 @@ async function forgotPassword(req, res) {
             tenantId: user.tenant_id,
             phone: user.phone,
             messageBody: `🔑 Plotraa password reset: ${resetUrl}\n(${RESET_TOKEN_TTL_MINUTES} minute tak valid. Aapne nahi maanga to ignore karein.)`,
+            template: buildTemplate('password_reset', { reset_link: resetUrl, valid_minutes: RESET_TOKEN_TTL_MINUTES }),
           }).catch((err) => console.error('Password reset WhatsApp failed (non-fatal):', err.message));
         }
       } else {

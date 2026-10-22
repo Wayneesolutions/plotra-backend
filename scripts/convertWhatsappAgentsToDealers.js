@@ -9,8 +9,10 @@
 //
 // Only users created by the OLD WhatsApp approval (placeholder email
 // agent.<digits>@wa-signup.plotra.internal) are touched; sub-dealers a
-// dealer added (subdealer.* or a real email) are never moved. No trial is set (they are on the payment cycle
-// already); their plan/payment fields stay as they are.
+// dealer added (subdealer.* or a real email) are never moved. Each converted
+// dealer gets a fresh 7-day free trial (unless they already paid), the same as
+// a new dealer. Already-converted dealers without a trial:
+// scripts/repairConvertedDealers.js.
 //
 // DRY RUN by default: prints what would move and changes nothing.
 //   node scripts/convertWhatsappAgentsToDealers.js            # dry run, all
@@ -23,7 +25,7 @@
 require('dotenv').config();
 const knexConfig = require('../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
-const { chooseDealerCities, TRIAL_PLAN } = require('../src/services/dealerOnboardingService');
+const { chooseDealerCities, TRIAL_PLAN, grantMissingTrial } = require('../src/services/dealerOnboardingService');
 const { setTenantCities } = require('../src/services/tenantCityService');
 const { normalizePhone } = require('../src/utils/phone');
 
@@ -73,6 +75,10 @@ async function convert(user) {
 
     await trx('user_cities').where({ user_id: user.id }).del();
     await trx('users').where({ id: user.id }).update({ tenant_id: tenant.id, role: 'owner', updated_at: trx.fn.now() });
+    // 22 Oct: a converted dealer now gets the 7-day trial (and a clean cycle)
+    // like every new dealer, instead of being left with the old monthly cycle
+    // that blocked them (DEALER_UNPAID when a lead was assigned).
+    await grantMissingTrial(trx, { ...user, role: 'owner', tenant_id: tenant.id });
     if (plan.listingIds.length) await trx('listings').whereIn('id', plan.listingIds).update({ tenant_id: tenant.id });
     if (plan.leadIds.length) await trx('leads').whereIn('id', plan.leadIds).update({ tenant_id: tenant.id });
     await trx('agent_listing_drafts').where({ user_id: user.id }).update({ tenant_id: tenant.id });

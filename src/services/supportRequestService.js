@@ -13,6 +13,7 @@
 // - Email to SUPPORT_ALERT_EMAILS, or to every super_admin user when unset.
 
 const { normalizePhone } = require('../utils/phone');
+const { EXISTING_TEMPLATES } = require('./whatsappTemplates');
 
 // One open request per phone: repeat messages update it instead of creating
 // noise, and the team is re-alerted at most this often for the same person.
@@ -60,6 +61,15 @@ async function alertEmails(knex) {
   return admins.map((a) => a.email);
 }
 
+/** Pure: the 3 body variables of the support-alert template ({{1}} who, {{2}} phone, {{3}} what). */
+function supportAlertParams(request, businessName) {
+  return [
+    clip(`${audienceLabel(request.audience)} ${request.name || ''}${businessName ? ` (${businessName})` : ''}`, 60),
+    request.phone,
+    clip(request.summary || request.last_message || kindLabel(request.kind), 200),
+  ];
+}
+
 async function sendAlerts(knex, request, { businessName } = {}) {
   const text = buildAlertText({ ...request, lastMessage: request.last_message, businessName });
   const results = { whatsapp: 0, email: 0 };
@@ -82,11 +92,8 @@ async function sendAlerts(knex, request, { businessName } = {}) {
           template: {
             name: templateName,
             lang: process.env.SUPPORT_ALERT_TEMPLATE_LANG || 'en',
-            bodyParams: [
-              clip(`${audienceLabel(request.audience)} ${request.name || ''}${businessName ? ` (${businessName})` : ''}`, 60),
-              request.phone,
-              clip(request.summary || request.last_message || kindLabel(request.kind), 200),
-            ],
+            bodyParams: supportAlertParams(request, businessName),
+            expectedParams: EXISTING_TEMPLATES.support_alert.bodyParams,
           },
         } : {}),
       });
@@ -165,4 +172,4 @@ async function raiseSupportRequest(knex, { phone, name, audience, kind = 'proble
   }
 }
 
-module.exports = { raiseSupportRequest, buildAlertText, KINDS };
+module.exports = { raiseSupportRequest, buildAlertText, supportAlertParams, KINDS };

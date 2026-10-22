@@ -27,12 +27,16 @@
 const axios = require('axios');
 const { detectReplyLanguage } = require('../utils/replyLanguage');
 const { quickAgentIntent } = require('../utils/agentQuickIntent');
+const { t } = require('../utils/i18n');
+const { getContactVariant } = require('./contactVariantService');
+const { billingState, dealerBilling, shortDate } = require('./trialService');
 
 // Required lazily: agentMessagingService opens a BullMQ/Redis connection at
 // load time, which would keep the pure-function unit tests from exiting.
 const enqueueAgentWhatsappSend = (...a) => require('./agentMessagingService').enqueueAgentWhatsappSend(...a);
-const getActivePackagesInMenuOrder = (...a) => require('./agentPaymentService').getActivePackagesInMenuOrder(...a);
-const formatPackageMenu = (...a) => require('./agentPaymentService').formatPackageMenu(...a);
+const getActivePlansInMenuOrder = (...a) => require('./agentPaymentService').getActivePlansInMenuOrder(...a);
+const buildPlanMenuMessage = (...a) => require('./agentPaymentService').buildPlanMenuMessage(...a);
+const razorpay = () => require('./razorpayService');
 const extractBuyerIntent = (...a) => require('./buyerSearchService').extractBuyerIntent(...a);
 const findMatchingListings = (...a) => require('./buyerSearchService').findMatchingListings(...a);
 const formatPrice = (...a) => require('./buyerSearchService').formatPrice(...a);
@@ -291,21 +295,6 @@ function buttonTitle(text) {
 
 // ---------------------------------------------------------------- replies
 
-const COPY = {
-  help: {
-    en: `Here's what you can do — just type normally, no special commands needed:\n\n🏠 *Add a property*: "3 BHK kothi Model Town Ludhiana 1.2 crore"\n📋 *See your listings*: "show my listings"\n✅ *Mark sold*: "Model Town plot is sold"\n🔎 *Find a property for a client*: "any 200 gaj plot in Dugri?"\n💳 *Payment*: "I've paid" (then send the receipt photo) or "what's my plan?"\n📍 Share a location pin anytime to fix a property's map location.\n🎤 Prefer talking? Send a voice note instead of typing, in any language.`,
-    hi: `Aap normal tarike se likh sakte hain, koi command yaad rakhne ki zaroorat nahi:\n\n🏠 *Property add karein*: "3 BHK kothi Model Town Ludhiana 1.2 crore"\n📋 *Apni listings dekhein*: "meri listings dikhao"\n✅ *Sold mark karein*: "Model Town wala plot bik gaya"\n🔎 *Client ke liye property dhundein*: "Dugri mein 200 gaj plot hai koi?"\n💳 *Payment*: "payment kar di" (phir receipt ki photo bhejein) ya "mera plan kya hai?"\n📍 Property ki location theek karne ke liye kabhi bhi location pin bhej dein.\n🎤 Type nahi karna? Voice note bhej dein, Punjabi/Hindi/English kuch bhi.`,
-  },
-  greeting: {
-    en: (name) => `Hi${name ? ` ${name}` : ''}! 👋 Send me property details anytime and I'll create the listing. Type "help" to see everything I can do.`,
-    hi: (name) => `Namaste${name ? ` ${name} ji` : ''}! 👋 Property ki details bhejiye, main listing bana dunga. Sab options dekhne ke liye "help" likhein.`,
-  },
-};
-
-function pick(lang, entry) {
-  return lang === 'en' ? entry.en : entry.hi;
-}
-
 async function send(agentUser, messageBody, buttons) {
   await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody, buttons });
 }
@@ -360,22 +349,54 @@ async function replyStatusChange(knex, agentUser, lang, { hint, toSold }) {
   return send(agentUser, `${ask}\n\n${formatAgentListingLines(listings)}`);
 }
 
-async function replyPlanInfo(knex, agentUser, lang) {
-  const current = agentUser.package_id ? await knex('packages').where({ id: agentUser.package_id }).first() : null;
-  const statusLabel = { paid: lang === 'en' ? 'Paid ✅' : 'Paid ✅', pending_review: lang === 'en' ? 'Receipt under review 🕒' : 'Receipt check ho rahi hai 🕒', unpaid: lang === 'en' ? 'Unpaid' : 'Pending' }[agentUser.payment_status] || agentUser.payment_status || '-';
+/**
+ * "plan" / "mera plan" / "trial kab tak": the LIVE plan list (or the dealer's
+ * own plan), their status and the trial end date. 22 Oct: the list used to
+ * come from the old hardcoded packages table; the trial end date was not
+ * shown anywhere in the chat.
+ */
+async function replyPlanInfo(knex, agentUser, v) {
+  const plans = await getActivePlansInMenuOrder(knex);
+  const own = billingState(agentUser, { hasApprovedPayment: agentUser.payment_status === 'paid' });
+  // A sub-dealer shares their dealer's trial / payment state.
+  const shared = agentUser.role === 'agent' && !agentUser.trial_ends_at ? await dealerBilling(knex, agentUser.tenant_id) : null;
+  const billing = shared && shared.status !== 'none' ? shared : own;
+  const trialLine = billing.status === 'trial'
+    ? t('trial_line', v, { date: shortDate(billing.trial_ends_at), days: t('trial_days_left', v, { n: billing.days_left }) })
+    : '';
 
-  if (current) {
-    const body = lang === 'en'
-      ? `📦 Your plan: *${current.name}* — ₹${current.amount_inr}/month\nPayment status: ${statusLabel}${current.qr_code_url ? `\n\nPay via QR: ${current.qr_code_url}` : ''}\n\nAfter paying, type "I've paid" and send the receipt photo.`
-      : `📦 Aapka plan: *${current.name}* — ₹${current.amount_inr}/month\nPayment status: ${statusLabel}${current.qr_code_url ? `\n\nQR se pay karein: ${current.qr_code_url}` : ''}\n\nPay karne ke baad "payment kar di" likhein aur receipt ki photo bhejein.`;
-    return send(agentUser, body);
+  const planKey = agentUser.selected_plan_key || (shared?.user?.selected_plan_key) || null;
+  const current = planKey ? (plans.find((p) => p.key === planKey) || await knex('plans').where({ key: planKey }).first()) : null;
+
+  if (!current) {
+    if (!plans.length) return send(agentUser, t('plan_none', v));
+    return send(agentUser, `${buildPlanMenuMessage(plans, v)}${trialLine}`);
   }
 
-  const packages = await getActivePackagesInMenuOrder(knex);
-  if (!packages.length) {
-    return send(agentUser, lang === 'en' ? "Plan details will be shared with you shortly." : 'Plan ki details aapko jaldi bhej di jayengi.');
+  const statusLabel = agentUser.payment_status === 'pending_review' ? t('status_pending_review', v)
+    : billing.status === 'paid' ? t('status_paid', v)
+      : billing.status === 'trial' ? t('status_trial', v)
+        : billing.status === 'expired' ? t('status_expired', v)
+          : (agentUser.payment_status === 'paid' ? t('status_paid', v) : t('status_unpaid', v));
+
+  let pay = '';
+  if (billing.status !== 'paid' && agentUser.payment_status !== 'paid') {
+    pay = t('plan_pay_receipt', v);
+    if (agentUser.role === 'owner' && razorpay().isConfigured()) {
+      try {
+        const { url } = await razorpay().getOrCreatePaymentLink(knex, { user: agentUser, planKey: current.key });
+        pay = `${t('plan_pay_link', v, { link: url })}\n${pay}`;
+      } catch (err) {
+        console.error('agentIntentService: payment link failed (showing QR/receipt text):', err.message);
+        if (current.qr_code_url) pay = `QR: ${current.qr_code_url}\n${pay}`;
+      }
+    } else if (current.qr_code_url) {
+      pay = `QR: ${current.qr_code_url}\n${pay}`;
+    }
   }
-  return send(agentUser, `📦 ${lang === 'en' ? 'Choose a plan — reply with its number' : 'Plan chuniye — number reply karein'}:\n\n${formatPackageMenu(packages)}`);
+  return send(agentUser, t('plan_current', v, {
+    plan: current.label, price: Number(current.price_inr).toLocaleString('en-IN'), status: statusLabel, trial: trialLine, pay,
+  }).trim());
 }
 
 /**
@@ -445,6 +466,9 @@ async function routeAgentText(knex, { agentUser, incomingText }) {
   }
 
   const lang = classification.replyLanguage || detectReplyLanguage(incomingText);
+  // Fixed replies (greeting, help, plan list) are written in the script of
+  // THIS message: a Gurmukhi message gets Gurmukhi, not Roman (22 Oct bug C).
+  const v = await getContactVariant(knex, agentUser.phone, incomingText);
   try {
     switch (decision.route) {
       case 'my_listings':
@@ -458,21 +482,21 @@ async function routeAgentText(knex, { agentUser, incomingText }) {
         // caller runs it so it can own the HTTP response as before.
         return { handled: false, delegate: 'receipt' };
       case 'plan_info':
-        await replyPlanInfo(knex, agentUser, lang); break;
+        await replyPlanInfo(knex, agentUser, v); break;
       case 'search_inventory':
         await replyInventorySearch(knex, agentUser, lang, incomingText); break;
       case 'question':
       case 'support':
       case 'assistant': {
         const answered = await handleWithAssistant(knex, { audience: 'agent', phone: agentUser.phone, text: incomingText, agentUser });
-        if (!answered.handled) await send(agentUser, pick(lang, COPY.help));
+        if (!answered.handled) await send(agentUser, t('agent_help', v));
         break;
       }
       case 'greeting':
-        await send(agentUser, pick(lang, COPY.greeting)(agentUser.name ? String(agentUser.name).split(' ')[0] : '')); break;
+        await send(agentUser, t('agent_greeting', v, { name: agentUser.name ? ` ${String(agentUser.name).split(' ')[0]}${v === 'hi' ? ' ji' : ''}` : '' })); break;
       case 'help':
       default:
-        await send(agentUser, pick(lang, COPY.help)); break;
+        await send(agentUser, t('agent_help', v)); break;
     }
     return { handled: true, route: decision.route };
   } catch (err) {

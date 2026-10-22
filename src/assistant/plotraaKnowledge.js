@@ -71,11 +71,14 @@ UPGRADING A PLAN
 
 JOINING (new dealers)
 - Dealers can also apply on the website: ${PUBLIC_SITE}/request-access (no WhatsApp chat needed).
+- On the Plotraa number the first message gets a short menu: 1 Buyer, 2 Owner, 3 Dealer (the person can type "menu" any time to change role). Owners and buyers are then asked one question at a time; dealers are asked their name and working area.
 - To join, a dealer just says so on this WhatsApp in their own words ("main dealer hoon, judna hai", "I want to join", "join as agent" all work) and shares their full name and the area/city they work in. Nothing to download or fill in.
 - The Plotraa team reviews and approves new dealers, usually quickly. Each approved dealer gets their OWN account and admin panel: login ID is their WhatsApp number, and the approval message has a link to set their own password (Plotraa never sends a password). They pick a plan, then simply send their first property here.
 - Sub-dealers: a dealer adds their own sub-dealers (team members) from the admin panel (Team -> Invite). A sub-dealer gets a set-password link on WhatsApp and can send listings from their own number. Someone who wants to be a sub-dealer under a dealer should ask that dealer to add them.
 - FREE TRIAL: every new dealer gets a 7-day free trial from approval. Reminders start after day 5. When the trial ends without payment, NEW listings stop (for the dealer and their sub-dealers), existing listings stay live, and new leads stay with the Plotraa team until they pay. Paying turns everything back on.
-- Payment: each plan has a fixed monthly price. Pay by the QR code sent on WhatsApp, or pay cash and send a photo of the receipt; the team approves it.
+- Payment: each plan has a fixed monthly price (GST included). The dealer picks a plan on WhatsApp (type "plan", then the plan's number) and gets an online payment link (Razorpay: UPI, card, netbanking); the plan switches on automatically as soon as the payment is done. If the online link is not available they get a QR code, or can pay cash and send a photo of the receipt (type "payment") and the team approves it.
+- Plans are billed MONTHLY only. There is no yearly or annual plan, no yearly discount and no yearly benefit. If asked about yearly billing, say plans are monthly and the team can confirm anything else. Never invent plan features, limits, benefits or prices: only what is in PLANS.
+- The dealer can see their trial end date any time by typing "plan" (or "trial kab tak"), and the dashboard shows "X days left" while the trial runs.
 - After the first payment, reminders start on day 28 of the monthly cycle. If a payment stays pending after the month ends, adding NEW listings pauses until it's paid; existing listings stay live.
 
 FOR PROPERTY OWNERS WHO WANT TO SELL

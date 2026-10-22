@@ -8,6 +8,7 @@
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend } = require('../services/agentMessagingService');
 const { downloadWhatsAppMedia } = require('./agentIntakeController');
 const { uploadToS3 } = require('../services/s3Service');
+const { billingState } = require('../services/trialService');
 
 /**
  * Agent texted a payment-intent keyword ("payment"/"receipt"/"bhugtan" —
@@ -48,6 +49,8 @@ async function handleAgentReceiptPhoto({ knex, agentUser, mediaId, mediaMimeType
         tenant_id: agentUser.tenant_id,
         agent_id: agentUser.id,
         receipt_photo_url: url,
+        plan_key: agentUser.selected_plan_key || null,
+        source: 'receipt',
       });
       await trx('users').where({ id: agentUser.id }).update({
         awaiting_receipt_submission: false,
@@ -101,9 +104,11 @@ async function listPaymentSubmissions(req, res) {
       .join('users as u', 'ps.agent_id', 'u.id')
       .join('tenants as t', 'ps.tenant_id', 't.id')
       .leftJoin('packages as pkg', 'u.package_id', 'pkg.id')
+      .leftJoin('plans as pl', 'pl.key', knex.raw('COALESCE(ps.plan_key, u.selected_plan_key)'))
       .select(
         'ps.id', 'ps.receipt_photo_url', 'ps.amount_inr', 'ps.submitted_at', 'ps.status',
-        'ps.reviewed_at', 'ps.reviewed_by',
+        'ps.reviewed_at', 'ps.reviewed_by', 'ps.source', 'ps.plan_key', 'ps.razorpay_payment_id',
+        'pl.label as plan_label', 'pl.price_inr as plan_price_inr',
         'u.id as agent_id', 'u.name as agent_name', 'u.phone as agent_phone',
         't.business_name as tenant_business_name',
         'pkg.name as package_name', 'pkg.amount_inr as package_amount_inr'
@@ -146,6 +151,14 @@ async function approvePaymentSubmission(req, res) {
       await trx('users').where({ id: submission.agent_id }).update({
         payment_status: 'paid', can_add_listing: true, updated_at: trx.fn.now(),
       });
+      // A dealer's receipt approval switches on the plan they chose (same
+      // result as an online payment): their own account moves onto it.
+      const payer = await trx('users').where({ id: submission.agent_id }).first('role', 'tenant_id', 'selected_plan_key');
+      const planKey = submission.plan_key || payer?.selected_plan_key;
+      if (payer?.role === 'owner' && planKey) {
+        const plan = await trx('plans').where({ key: planKey }).first('key');
+        if (plan) await trx('tenants').where({ id: payer.tenant_id }).update({ plan: plan.key, updated_at: trx.fn.now() });
+      }
     });
 
     const agent = await knex('users').where({ id: submission.agent_id }).first();
@@ -215,13 +228,16 @@ async function listAgentsPaymentStatus(req, res) {
     const agents = await knex('users as u')
       // Dealers (owner) pay now; older WhatsApp agents still listed too.
       .whereIn('u.role', ['agent', 'owner'])
-      .andWhere((b) => b.whereNotNull('u.package_id').orWhereNotNull('u.trial_ends_at').orWhere('u.role', 'agent'))
+      .andWhere((b) => b.whereNotNull('u.package_id').orWhereNotNull('u.trial_ends_at').orWhereNotNull('u.selected_plan_key').orWhere('u.role', 'agent'))
       .leftJoin('packages as pkg', 'u.package_id', 'pkg.id')
+      .leftJoin('plans as pl', 'u.selected_plan_key', 'pl.key')
       .leftJoin('tenants as t', 'u.tenant_id', 't.id')
       .select(
         'u.id', 'u.name', 'u.phone', 'u.role', 'u.onboarded_at', 'u.trial_ends_at', 'u.payment_status', 'u.can_add_listing',
-        't.business_name as tenant_business_name',
-        'pkg.name as package_name', 'pkg.amount_inr as package_amount_inr'
+        'u.selected_plan_key',
+        't.business_name as tenant_business_name', 't.plan as tenant_plan',
+        'pkg.name as package_name', 'pkg.amount_inr as package_amount_inr',
+        'pl.label as plan_label', 'pl.price_inr as plan_price_inr'
       )
       .orderBy('u.name', 'asc');
 
@@ -236,7 +252,16 @@ async function listAgentsPaymentStatus(req, res) {
       const lastPaymentDate = lastPaymentByAgent.get(a.id) || null;
       const anchor = new Date(lastPaymentDate || a.onboarded_at);
       const nextDueDate = new Date(anchor.getTime() + 30 * 24 * 60 * 60 * 1000);
-      return { ...a, last_payment_date: lastPaymentDate, next_due_date: nextDueDate.toISOString() };
+      // trial | paid | expired | none, plus whole days left in a running trial.
+      const billing = billingState(a, { hasApprovedPayment: Boolean(lastPaymentDate) });
+      return {
+        ...a,
+        last_payment_date: lastPaymentDate,
+        next_due_date: nextDueDate.toISOString(),
+        billing_status: billing.status,
+        billing_reason: billing.reason,
+        trial_days_left: billing.days_left,
+      };
     });
 
     return res.status(200).json({ success: true, agents: enriched });

@@ -3,6 +3,7 @@ const router = express.Router();
 const { handleInboundWhatsApp } = require('../controllers/webhookController');
 const { handleStripeWebhook } = require('../controllers/billingController');
 const { handleWayneRingWebhook } = require('../controllers/wayneRingWebhookController');
+const { handleRazorpayWebhook } = require('../controllers/razorpayWebhookController');
 const serviceContext = require('../middleware/serviceContext');
 
 /**
@@ -39,6 +40,15 @@ router.post('/whatsapp/inbound', serviceContext, handleInboundWhatsApp);
  * payment, and the signature check is the real gate.
  */
 router.post('/stripe', serviceContext, handleStripeWebhook);
+
+/**
+ * @route   POST /api/v1/webhooks/razorpay
+ * @desc    payment_link.paid etc. for Plotraa's dealer plan payment links
+ * @access  Public (HMAC signature validated via RAZORPAY_WEBHOOK_SECRET).
+ *          The Razorpay account is shared with Waynur: only events whose
+ *          notes.product is 'plotraa' are processed, the rest are ignored.
+ */
+router.post('/razorpay', serviceContext, handleRazorpayWebhook);
 
 /**
  * @route   POST /api/v1/webhooks/wayne-ring

@@ -6,7 +6,9 @@
 // in their existing leads dashboard.
 
 const { normalizePhone } = require('../utils/phone');
-const { dealerIsActive } = require('../services/trialService');
+const { dealerIsActive, dealerBilling, shortDate } = require('../services/trialService');
+
+const { buildTemplate } = require('../services/whatsappTemplates');
 
 const enqueueWhatsapp = (...a) => require('../services/agentMessagingService').enqueueAgentWhatsappSend(...a);
 
@@ -156,7 +158,13 @@ async function assignSellerLead(req, res) {
     }
     // Leads stay with Plotraa for a dealer whose trial ended / payment is due.
     if (!(await dealerIsActive(knex, tenant_id))) {
-      return res.status(409).json({ error: { code: 'DEALER_UNPAID', message: 'This dealer\'s free trial has ended or a payment is pending. Keep the lead or pick another dealer.' } });
+      const billing = await dealerBilling(knex, tenant_id).catch(() => null);
+      const why = billing?.reason === 'trial_ended'
+        ? `This dealer's free trial ended on ${shortDate(billing.trial_ends_at)} and no payment is recorded.`
+        : billing?.reason === 'payment_overdue'
+          ? "This dealer's monthly payment is overdue."
+          : "This dealer is blocked (no active trial or payment). If this dealer was moved from an old WhatsApp agent account, run scripts/repairConvertedDealers.js to start their trial.";
+      return res.status(409).json({ error: { code: 'DEALER_UNPAID', message: `${why} Keep the lead or pick another dealer.`, billing_status: billing?.status || 'none' } });
     }
 
     const [dealerLead] = await knex('leads')
@@ -187,7 +195,17 @@ async function assignSellerLead(req, res) {
       const owner = await knex('users').where({ tenant_id, role: 'owner' }).whereNotNull('phone')
         .orderBy('created_at', 'asc').first('phone');
       if (owner?.phone) {
-        await enqueueWhatsapp({ tenantId: tenant_id, phone: owner.phone, messageBody: buildDealerLeadAlert(lead, { dealerName: tenant.business_name }) });
+        await enqueueWhatsapp({
+          tenantId: tenant_id,
+          phone: owner.phone,
+          messageBody: buildDealerLeadAlert(lead, { dealerName: tenant.business_name }),
+          template: buildTemplate('lead_assigned', {
+            dealer_name: tenant.business_name,
+            lead_name: lead.name || 'Owner',
+            lead_phone: lead.phone,
+            lead_details: sellerLeadDetails(lead),
+          }),
+        });
         notified = true;
       }
     } catch (err) {

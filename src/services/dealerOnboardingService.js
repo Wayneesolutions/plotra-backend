@@ -148,6 +148,46 @@ async function createDealerFromSignup(knex, signup, { cityIds, primaryCityId, bu
   return { tenant, user, setupUrl, trialEndsAt: endsAt };
 }
 
+/**
+ * Pure (unit-tested): what to do for a dealer account that was converted from
+ * an old WhatsApp agent (or otherwise never got a trial). 22 Oct bug: those
+ * dealers had no trial and a stale old package, so the monthly cycle had
+ * already blocked them and assigning a lead failed with DEALER_UNPAID.
+ *   user: { role, trial_ends_at, can_add_listing, package_id, selected_plan_key }
+ *   hasApprovedPayment: they really paid before
+ *   tenantPlanKnown: tenants.plan exists in the plans table
+ * Returns { needsTrial, patch (users), tenantPlan (or null = leave) }.
+ */
+function planTrialRepair(user, { hasApprovedPayment = false, tenantPlanKnown = true, now = new Date() } = {}) {
+  if (!user || user.role !== 'owner' || user.trial_ends_at || hasApprovedPayment) {
+    return { needsTrial: false, patch: {}, tenantPlan: tenantPlanKnown ? null : TRIAL_PLAN };
+  }
+  return {
+    needsTrial: true,
+    patch: {
+      trial_ends_at: trialEndsAt(now),
+      trial_reminder_day: null,
+      can_add_listing: true,
+      onboarded_at: now,
+      payment_status: 'unpaid',
+      package_id: null,
+      selected_plan_key: null,
+    },
+    tenantPlan: tenantPlanKnown ? null : TRIAL_PLAN,
+  };
+}
+
+/** Applies planTrialRepair to one user inside `trx`. Returns { needsTrial, trialEndsAt }. */
+async function grantMissingTrial(trx, user, { now = new Date() } = {}) {
+  const paid = await trx('payment_submissions').where({ agent_id: user.id, status: 'approved' }).first('id');
+  const tenant = await trx('tenants').where({ id: user.tenant_id }).first('plan');
+  const planKnown = tenant?.plan ? Boolean(await trx('plans').where({ key: tenant.plan }).first('key')) : false;
+  const plan = planTrialRepair(user, { hasApprovedPayment: Boolean(paid), tenantPlanKnown: planKnown, now });
+  if (plan.needsTrial) await trx('users').where({ id: user.id }).update({ ...plan.patch, updated_at: trx.fn.now() });
+  if (plan.tenantPlan) await trx('tenants').where({ id: user.tenant_id }).update({ plan: plan.tenantPlan, updated_at: trx.fn.now() });
+  return { needsTrial: plan.needsTrial, trialEndsAt: plan.needsTrial ? plan.patch.trial_ends_at : null, planFixed: Boolean(plan.tenantPlan) };
+}
+
 /** Pure: "28 Oct" style date for WhatsApp messages (India time). */
 function shortDate(d) {
   return new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
@@ -217,4 +257,6 @@ module.exports = {
   buildDealerWelcomeMessage,
   buildSubDealerWelcomeMessage,
   shortDate,
+  planTrialRepair,
+  grantMissingTrial,
 };

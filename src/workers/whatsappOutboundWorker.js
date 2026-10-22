@@ -4,6 +4,9 @@ const IORedis = require('ioredis');
 const axios = require('axios');
 const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
+const {
+  isWindowOpen, extractMessageId, logTemplateAttempt, markTemplateSent, markTemplateFailed,
+} = require('../services/whatsappLogService');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -55,7 +58,30 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
   let bspPayload;
   let deliveryStatus = 'sent';
 
-  if (template?.name) {
+  // templateMode 'auto' (dealer welcome, invites, reminders, lead alerts):
+  // free text while the person's own 24h window is open, the template
+  // otherwise. Any other template send is always the template.
+  let useTemplate = Boolean(template?.name);
+  let freeTextFallback = null;
+  if (useTemplate && template.templateMode === 'auto' && messageBody) {
+    if (await isWindowOpen(knex, phone)) {
+      useTemplate = false;
+    } else {
+      freeTextFallback = { messaging_product: 'whatsapp', recipient_type: 'individual', to: phone, type: 'text', text: { body: messageBody } };
+    }
+  }
+  if (useTemplate && Number.isInteger(template.expectedParams)
+      && (template.bodyParams?.length || 0) !== template.expectedParams) {
+    // Meta rejects a template with the wrong number of variables. Retrying
+    // cannot help, so fail loudly once instead of burning 3 attempts.
+    const msg = `Template "${template.name}" expects ${template.expectedParams} variables but got ${template.bodyParams?.length || 0}.`;
+    console.error(`[Job ${job.id}] ${msg}`);
+    await logTemplateAttempt(knex, { jobId: job.id, template, phone, tenantId, attempts: job.attemptsMade + 1 }).catch(() => {});
+    await markTemplateFailed(knex, { jobId: job.id, error: msg }).catch(() => {});
+    return { success: false, skipped: 'template_param_mismatch' };
+  }
+
+  if (useTemplate) {
     // Explicit template send — the caller already knows no service window
     // can be open (e.g. callEnquiryService.js: the buyer phoned, they never
     // messaged), so there is nothing to check; a template is the only thing
@@ -172,16 +198,48 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
     deliveryStatus = 'template_sent';
   }
 
+  const isTemplateSend = bspPayload.type === 'template';
+  const loggedTemplate = isTemplateSend
+    ? (template?.name ? template : { name: bspPayload.template.name, lang: bspPayload.template.language?.code, bodyParams: (bspPayload.template.components?.[0]?.parameters || []).map((p) => p.text) })
+    : null;
+  if (loggedTemplate) {
+    await logTemplateAttempt(knex, { jobId: job.id, template: loggedTemplate, phone, tenantId, attempts: job.attemptsMade + 1 })
+      .catch((logErr) => console.error(`[Job ${job.id}] Could not log template attempt:`, logErr.message));
+  }
+
+  const send = (payload) => axios.post(BSP_GATEWAY_URL, payload, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${BSP_API_KEY}`,
+    },
+    timeout: 10000,
+  });
+
   try {
-    const bspResponse = await axios.post(BSP_GATEWAY_URL, bspPayload, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${BSP_API_KEY}`,
-      },
-      timeout: 10000,
-    });
+    let bspResponse;
+    try {
+      bspResponse = await send(bspPayload);
+    } catch (templateErr) {
+      // An auto-mode template that Meta refused (not created/approved yet,
+      // wrong variables): the window may still be open, so try the free text
+      // once. If that fails too, the original template error is what's logged.
+      if (!freeTextFallback || !isTemplateSend) throw templateErr;
+      const templateDetail = templateErr.response ? JSON.stringify(templateErr.response.data) : templateErr.message;
+      console.warn(`[Job ${job.id}] Template send failed (${templateDetail}); trying free text.`);
+      await markTemplateFailed(knex, { jobId: job.id, error: templateDetail }).catch(() => {});
+      try {
+        bspResponse = await send(freeTextFallback);
+        return { success: true, deliveryStatus: 'sent_as_text_after_template_failure' };
+      } catch {
+        throw templateErr;
+      }
+    }
 
     console.log(`[Job ${job.id}] BSP Gateway acknowledged acceptance:`, bspResponse.data);
+    if (isTemplateSend) {
+      await markTemplateSent(knex, { jobId: job.id, metaMessageId: extractMessageId(bspResponse.data) })
+        .catch((logErr) => console.error(`[Job ${job.id}] Could not log template message id:`, logErr.message));
+    }
 
     // 2. Persist the outbound interaction history — only when this send is
     // tied to a buyer whatsapp_threads row. Agent-intake sends (see
@@ -223,6 +281,10 @@ const whatsappWorker = new Worker('whatsapp-outbound', async (job) => {
     // anything queryable after the fact.
     const richError = new Error(errorMessage);
     richError.status = error.response?.status;
+    if (isTemplateSend) {
+      await markTemplateFailed(knex, { jobId: job.id, error: errorMessage })
+        .catch((logErr) => console.error(`[Job ${job.id}] Could not log template error:`, logErr.message));
+    }
     throw richError;
   }
 }, {

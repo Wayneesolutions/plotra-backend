@@ -148,6 +148,7 @@ test('buildTemplateJob: null without a configured template; full job with one', 
     name: 'call_enquiry_listings',
     lang: 'en',
     bodyParams: ['there', '2', 'Plot in Dugri'],
+    expectedParams: 3,
     quickReplyPayload: 'call_enquiry:e1',
   });
 

@@ -30,6 +30,7 @@ const {
 const { listAgentSignupsAdmin, approveAgentSignupAdmin, rejectAgentSignupAdmin } = require('../controllers/agentSignupController');
 // NEW — plan management (gap #3)
 const { listPlansAdmin, updatePlan, createPlan, deletePlan } = require('../controllers/plansController');
+const { listTemplateSends, listTemplates, listPaymentLinks, createDealerPaymentLink } = require('../controllers/adminBillingController');
 // NEW — super-admin geo review queue for WhatsApp agent-intake listings
 const { listGeoReviewQueue, approveGeoReview } = require('../controllers/adminGeoReviewController');
 // NEW — marketplace buyer search lead-delivery tracking (Phase 1, no billing)
@@ -295,6 +296,17 @@ router.get('/agents-payments', listAgentsPaymentStatus);
  * @desc    Manage the platform-wide agent package catalog (name, amount,
  *          QR code URL) — same admin-managed-catalog pattern as /plans above.
  */
+/**
+ * @route   GET  /api/v1/admin/whatsapp-template-sends   template sends: Meta message id, status, error
+ * @route   GET  /api/v1/admin/whatsapp-templates        templates Plotraa uses + variable counts
+ * @route   GET  /api/v1/admin/payment-links             Razorpay payment links
+ * @route   POST /api/v1/admin/dealers/:userId/payment-link
+ */
+router.get('/whatsapp-template-sends', listTemplateSends);
+router.get('/whatsapp-templates', listTemplates);
+router.get('/payment-links', listPaymentLinks);
+router.post('/dealers/:userId/payment-link', createDealerPaymentLink);
+
 router.get('/packages', listPackagesAdmin);
 router.post('/packages', createPackage);
 router.patch('/packages/:id', updatePackage);

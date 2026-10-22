@@ -180,6 +180,7 @@ function sellerConfirmReply(seller, { script = 'roman', lang = 'hi', sellLink } 
 }
 
 module.exports = {
+  variant,
   replyMatchesScript,
   isShortDiscountQuestion,
   discountSummary,
