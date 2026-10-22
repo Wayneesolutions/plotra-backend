@@ -61,7 +61,8 @@ test('system prompt carries the no-hard-sell and same-price rules plus live plan
   assert.match(prompt, /never invent or negotiate a discount/);
   assert.match(prompt, /PLANS Y/);
   assert.match(prompt, /CONTEXT X/);
-  assert.match(prompt, /No other trial or offer is configured/);
+  assert.match(prompt, /7-day free trial/);
+  assert.match(prompt, /No other offer is configured/);
   process.env.PLOTRAA_TRIAL_OFFER = '7-day free trial for every new agent.';
   assert.match(buildSystemPrompt({ audience: 'agent', contextText: '', plansText: '' }), /7-day free trial for every new agent\./);
   delete process.env.PLOTRAA_TRIAL_OFFER;

@@ -4,7 +4,36 @@ const { normalizePhone, toWaMeDigits } = require('../utils/phone');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { recordResolvedLocality } = require('../services/resolvedLocalityService');
 const { provideValidationFeedback } = require('../services/addressValidation');
-const { getFrontView, getStreetViewPano, savedPanoView, sanitizeBlurRegions, blurRegionsForPano } = require('../services/frontViewService');
+const {
+  getStreetViewPano, savedPanoView, sanitizeBlurRegions,
+  frameFor, sanitizeBlurRects, blurRectsFor, fetchFrontFrame, bakeBlurRects, frontPhotoVersion,
+} = require('../services/frontViewService');
+
+async function listingApiKey(knex, tenantId) {
+  const config = await knex('tenant_configs').where({ tenant_id: tenantId }).first();
+  return config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
+}
+
+/**
+ * The panorama + fixed photo frame for a listing: the one the dealer marked
+ * boxes on while the pin hasn't moved, else Google's nearest. Null when the
+ * listing has no location or no street imagery nearby.
+ */
+async function resolveFrontFrame(knex, listing) {
+  if (listing.lat == null || listing.lng == null) return null;
+  let pano = savedPanoView(listing.front_blur, listing.lat, listing.lng);
+  if (!pano) {
+    pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey: await listingApiKey(knex, listing.tenant_id) });
+  }
+  const frame = frameFor(pano, pano && listing.front_blur?.panoId === pano.panoId ? listing.front_blur : null);
+  if (!frame) return null;
+  const rects = blurRectsFor(listing.front_blur, frame);
+  return { frame, rects, version: frontPhotoVersion(frame, rects) };
+}
+
+// Small cache of finished (blurred) photos, keyed by listing + version.
+const bakedCache = new Map();
+const BAKED_MAX = 200;
 
 const redisConnection = { host: process.env.REDIS_HOST || '127.0.0.1', port: process.env.REDIS_PORT || 6379 };
 
@@ -137,17 +166,18 @@ async function getPublicListing(req, res) {
       : null;
 
     let streetView = null;
-    // Pre-approval too (not only live): the dealer marks signboards to hide on
-    // exactly this panorama, so the editor and the buyer's view agree.
+    // One fixed front photo with the dealer's boxes blurred into it (served by
+    // /front-view.jpg). Live: only the photo's version, nothing that opens
+    // Google's panorama. Before approval the dealer also gets the panorama id
+    // and the boxes, to mark them on the same unblurred photo (/front-frame.jpg).
     if (hasLocation) {
       try {
-        let pano = savedPanoView(listing.front_blur, listing.lat, listing.lng);
-        if (!pano) {
-          const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
-          const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
-          pano = await getStreetViewPano({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
+        const front = await resolveFrontFrame(knex, listing);
+        if (front) {
+          streetView = isLive
+            ? { frontPhoto: true, version: front.version }
+            : { frontPhoto: true, version: front.version, panoId: front.frame.panoId, heading: front.frame.heading, blurRects: front.rects };
         }
-        streetView = pano ? { ...pano, blurRegions: blurRegionsForPano(listing.front_blur, pano.panoId) } : null;
       } catch (svErr) {
         console.error('Street view lookup failed (page renders without it):', svErr.message);
       }
@@ -574,10 +604,10 @@ async function updateListingLocation(req, res) {
 async function updateBlurRegions(req, res) {
   const knex = req.app.get('db');
   const { slug } = req.params;
-  const { panoId, regions } = req.body || {};
+  const { panoId, regions, rects } = req.body || {};
 
-  if (typeof panoId !== 'string' || !panoId || !Array.isArray(regions)) {
-    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'panoId and regions are required.' } });
+  if (typeof panoId !== 'string' || !panoId || (!Array.isArray(rects) && !Array.isArray(regions))) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'panoId and rects are required.' } });
   }
 
   try {
@@ -603,12 +633,19 @@ async function updateBlurRegions(req, res) {
       return res.status(409).json({ error: { code: 'STALE_VIEW', message: 'The street view changed. Reload the page and mark the areas again.' } });
     }
 
-    const clean = sanitizeBlurRegions(regions);
+    // Boxes drawn on the fixed photo (fractions of the image). The old
+    // angle-based `regions` body is still accepted from a stale page.
+    const frame = frameFor(view, shown && shown.panoId === panoId ? listing.front_blur : null);
+    const clean = Array.isArray(rects)
+      ? sanitizeBlurRects(rects)
+      : blurRectsFor({ panoId, regions: sanitizeBlurRegions(regions) }, frame);
     await knex('listings').where({ id: listing.id }).update({
-      front_blur: clean.length ? JSON.stringify({ panoId, heading: view.heading, lat: Number(listing.lat), lng: Number(listing.lng), regions: clean }) : null,
+      front_blur: clean.length
+        ? JSON.stringify({ panoId, heading: view.heading, lat: Number(listing.lat), lng: Number(listing.lng), frame: { fov: frame.fov, pitch: frame.pitch }, rects: clean })
+        : null,
       updated_at: knex.fn.now(),
     });
-    return res.status(200).json({ success: true, blurRegions: clean });
+    return res.status(200).json({ success: true, blurRects: clean, version: frontPhotoVersion(frame, clean) });
   } catch (error) {
     console.error('Failed to save blur regions:', error.message);
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Could not save. Please try again.' } });
@@ -617,31 +654,38 @@ async function updateBlurRegions(req, res) {
 
 /**
  * GET /api/v1/public/listings/:slug/front-view.jpg
- * One still photo from the street, facing the property, with everything
- * except the property blurred (frontViewService.js). Live listings only.
- * 404 when the listing isn't live or Google has no street imagery nearby;
- * the page then simply doesn't show the section.
+ * The fixed front photo with the dealer's boxes (signboards, house number)
+ * blurred into the image. This is what buyers see on a live listing; before
+ * approval the dealer can open it too, to check the final result.
+ * 404 when Google has no street imagery near the property.
  */
 async function getListingFrontView(req, res) {
   const knex = req.app.get('db');
   try {
     const listing = await knex('listings')
-      .where({ public_slug: req.params.slug, status: 'active' })
-      .first('id', 'tenant_id', 'lat', 'lng');
-    if (!listing || listing.lat == null || listing.lng == null) {
-      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No front view for this listing.' } });
-    }
-    const config = await knex('tenant_configs').where({ tenant_id: listing.tenant_id }).first();
-    const apiKey = config?.google_maps_api_key_override || process.env.GOOGLE_MAPS_API_KEY;
-
-    const image = await getFrontView({ listingId: listing.id, lat: listing.lat, lng: listing.lng, apiKey });
-    if (!image) {
-      res.set('Cache-Control', 'public, max-age=3600');
+      .where({ public_slug: req.params.slug }).whereNull('deleted_at')
+      .first('id', 'tenant_id', 'status', 'lat', 'lng', 'front_blur');
+    const front = listing ? await resolveFrontFrame(knex, listing) : null;
+    if (!front) {
+      res.set('Cache-Control', 'public, max-age=600');
       return res.status(404).json({ error: { code: 'NO_IMAGERY', message: 'No street imagery near this property.' } });
+    }
+    const key = `${listing.id}:${front.version}`;
+    let image = bakedCache.get(key);
+    if (!image) {
+      const raw = await fetchFrontFrame({ frame: front.frame, apiKey: await listingApiKey(knex, listing.tenant_id) });
+      if (!raw) {
+        res.set('Cache-Control', 'public, max-age=600');
+        return res.status(404).json({ error: { code: 'NO_IMAGERY', message: 'No street imagery near this property.' } });
+      }
+      image = await bakeBlurRects(raw, front.rects);
+      if (bakedCache.size >= BAKED_MAX) bakedCache.delete(bakedCache.keys().next().value);
+      bakedCache.set(key, image);
     }
     res.set({
       'Content-Type': 'image/jpeg',
-      'Cache-Control': 'public, max-age=21600',
+      // Live URLs carry ?v=<version>, so a change gives a new URL.
+      'Cache-Control': listing.status === 'active' ? 'public, max-age=86400' : 'no-store',
       'X-Content-Type-Options': 'nosniff',
     });
     return res.status(200).send(image);
@@ -651,4 +695,31 @@ async function getListingFrontView(req, res) {
   }
 }
 
-module.exports = { getListingFrontView, getPublicListing, logVisit, capturePublicLead, updateListingLocation, updateBlurRegions };
+/**
+ * GET /api/v1/public/listings/:slug/front-frame.jpg
+ * The same photo WITHOUT blur, for the dealer to mark boxes on. Before
+ * approval only (the pre-approval page already shows the full street view);
+ * once live only the blurred photo exists.
+ */
+async function getListingFrontFrame(req, res) {
+  const knex = req.app.get('db');
+  try {
+    const listing = await knex('listings')
+      .where({ public_slug: req.params.slug }).whereNull('deleted_at')
+      .first('id', 'tenant_id', 'status', 'lat', 'lng', 'front_blur');
+    if (!listing || listing.status === 'active') {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Not available.' } });
+    }
+    const front = await resolveFrontFrame(knex, listing);
+    const raw = front ? await fetchFrontFrame({ frame: front.frame, apiKey: await listingApiKey(knex, listing.tenant_id) }) : null;
+    if (!raw) return res.status(404).json({ error: { code: 'NO_IMAGERY', message: 'No street imagery near this property.' } });
+    const jpeg = await require('sharp')(raw).jpeg({ quality: 86 }).toBuffer();
+    res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    return res.status(200).send(jpeg);
+  } catch (error) {
+    console.error('Front frame failed:', error.message);
+    return res.status(502).json({ error: { code: 'FRONT_VIEW_FAILED', message: 'Could not load the photo.' } });
+  }
+}
+
+module.exports = { getListingFrontView, getListingFrontFrame, getPublicListing, logVisit, capturePublicLead, updateListingLocation, updateBlurRegions };

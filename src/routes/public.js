@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getPublicListing, logVisit, capturePublicLead, updateListingLocation, updateBlurRegions, getListingFrontView } = require('../controllers/publicListingController');
+const { getPublicListing, logVisit, capturePublicLead, updateListingLocation, updateBlurRegions, getListingFrontView, getListingFrontFrame } = require('../controllers/publicListingController');
 const { submitSellerLead } = require('../controllers/sellerLeadController');
 const { getPublicBuilderProfile } = require('../controllers/builderProfileController');
 const { submitAccessRequest, listPublicCities } = require('../controllers/adminController');
@@ -29,6 +29,14 @@ router.get('/listings/:slug', publicReadLimiter, getPublicListing);
  * @access  Public
  */
 router.get('/listings/:slug/front-view.jpg', publicReadLimiter, getListingFrontView);
+
+/**
+ * @route   GET /api/v1/public/listings/:slug/front-frame.jpg
+ * @desc    The same front photo without blur, for the dealer to mark the
+ *          areas to hide. Pre-approval only.
+ * @access  Public, same reasoning as the location route below.
+ */
+router.get('/listings/:slug/front-frame.jpg', publicReadLimiter, getListingFrontFrame);
 
 /**
  * @route   POST /api/v1/public/listings/:slug/visit

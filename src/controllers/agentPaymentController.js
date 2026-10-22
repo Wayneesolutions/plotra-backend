@@ -213,11 +213,13 @@ async function listAgentsPaymentStatus(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   try {
     const agents = await knex('users as u')
-      .where('u.role', 'agent')
+      // Dealers (owner) pay now; older WhatsApp agents still listed too.
+      .whereIn('u.role', ['agent', 'owner'])
+      .andWhere((b) => b.whereNotNull('u.package_id').orWhereNotNull('u.trial_ends_at').orWhere('u.role', 'agent'))
       .leftJoin('packages as pkg', 'u.package_id', 'pkg.id')
       .leftJoin('tenants as t', 'u.tenant_id', 't.id')
       .select(
-        'u.id', 'u.name', 'u.phone', 'u.onboarded_at', 'u.payment_status', 'u.can_add_listing',
+        'u.id', 'u.name', 'u.phone', 'u.role', 'u.onboarded_at', 'u.trial_ends_at', 'u.payment_status', 'u.can_add_listing',
         't.business_name as tenant_business_name',
         'pkg.name as package_name', 'pkg.amount_inr as package_amount_inr'
       )
