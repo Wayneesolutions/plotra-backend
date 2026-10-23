@@ -35,14 +35,15 @@ test('stating the role outright skips the menu: that is not a guess', () => {
 
 test('menu numbers pick the role; a wrong reply re-asks; a question is answered and the menu re-asked', () => {
   assert.strictEqual(run(['hi', '1']).state.role, 'buyer');
-  assert.strictEqual(run(['hi', '2']).state.role, 'owner');
-  assert.strictEqual(run(['hi', '3']).state.role, 'dealer');
+  assert.strictEqual(run(['hi', '2']).state.role, 'dealer');
+  assert.strictEqual(run(['hi', '3']).state.role, 'dealer', 'old menu number still means dealer');
+  assert.strictEqual(run(['hi', 'owner']).state.role, 'owner', 'owner path stays reachable when typed');
   assert.deepStrictEqual(keys(run(['hi', 'abc']).trace, 1), ['role_retry']);
   assert.deepStrictEqual(keys(run(['hi', 'support number kya hai?']).trace, 1), ['@assistant', 'role_retry']);
 });
 
 test('owner flow asks type, size, location, price, photos one at a time', () => {
-  const { trace, state } = run(['hi', '2', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'done']);
+  const { trace, state } = run(['hi', 'owner', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'done']);
   assert.deepStrictEqual(trace.map((x) => x.step), ['role', 'type', 'size', 'location', 'price', 'photos', 'done']);
   assert.strictEqual(state.data.type, 'Plot');
   assert.strictEqual(state.data.size, '200 gaj');
@@ -62,7 +63,7 @@ test('details in the first message are not asked again', () => {
 });
 
 test('bug A: after the sale is saved, hi / plan questions are not answered with the owner confirmation', () => {
-  const done = run(['hi', '2', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'skip']).state;
+  const done = run(['hi', 'owner', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'skip']).state;
   const hello = M.decide(done, 'hello');
   assert.deepStrictEqual(hello.out.map((o) => o.key), ['owner_after_done']);
   assert.notStrictEqual(hello.out[0].key, 'owner_done');
@@ -73,7 +74,7 @@ test('bug A: after the sale is saved, hi / plan questions are not answered with 
 });
 
 test('bug E: an owner can still join as a dealer ("join", "main dealer hoon")', () => {
-  const owner = run(['hi', '2', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'skip']).state;
+  const owner = run(['hi', 'owner', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'skip']).state;
   for (const msg of ['join', 'main dealer hoon', 'mujhe join karna hai', 'judna hai']) {
     const r = M.decide(owner, msg);
     assert.strictEqual(r.state.role, 'dealer', msg);
@@ -81,12 +82,12 @@ test('bug E: an owner can still join as a dealer ("join", "main dealer hoon")', 
     assert.ok(r.out.some((o) => o.key === 'role_set_dealer'));
   }
   // and from the middle of the owner flow
-  const mid = run(['hi', '2', '1']).state;
+  const mid = run(['hi', 'owner', '1']).state;
   assert.strictEqual(M.decide(mid, 'main dealer hoon').state.role, 'dealer');
 });
 
 test('"menu" changes the role at any time, in any step', () => {
-  for (const state of [run(['hi', '2', '1']).state, run(['hi', '1']).state, run(['hi', '3']).state]) {
+  for (const state of [run(['hi', 'owner', '1']).state, run(['hi', '1']).state, run(['hi', '3']).state]) {
     const r = M.decide(state, 'menu');
     assert.strictEqual(r.state.role, null);
     assert.deepStrictEqual(r.out.map((o) => o.key), ['role_menu']);
@@ -127,13 +128,13 @@ test('buyer flow asks budget, area, type, size, then searches', () => {
 test('skip moves on; two misses stop the loop instead of asking forever', () => {
   const skipped = run(['hi', '1', 'skip', 'skip', 'skip', 'skip']);
   assert.strictEqual(skipped.state.step, 'done');
-  const loop = run(['hi', '2', '1', 'bahut badi hai', 'pata nahi kitni']); // size: miss, miss -> kept as text
+  const loop = run(['hi', 'owner', '1', 'bahut badi hai', 'pata nahi kitni']); // size: miss, miss -> kept as text
   assert.deepStrictEqual(keys(loop.trace, 3), ['step_retry'], 'first miss asks again');
   assert.notStrictEqual(loop.trace[4].step, 'size', 'second miss moves on');
 });
 
 test('a question in a flow is answered, then the same step is asked again', () => {
-  const s = run(['hi', '2', '1']).state; // at size
+  const s = run(['hi', 'owner', '1']).state; // at size
   const r = M.decide(s, 'plan kya hai?');
   assert.deepStrictEqual(r.out.map((o) => o.name || o.key), ['plans', 'question_then_step']);
   assert.strictEqual(r.state.step, 'size');
@@ -153,7 +154,7 @@ test('bug C: replies follow the script of the message', () => {
 });
 
 test('owner photos: five photos finish the flow', () => {
-  let state = run(['hi', '2', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh']).state;
+  let state = run(['hi', 'owner', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh']).state;
   assert.ok(M.acceptsPhoto(state));
   for (let i = 1; i <= 5; i += 1) {
     const r = M.afterPhoto(state, `https://s3/p${i}.jpg`);
@@ -166,7 +167,7 @@ test('owner photos: five photos finish the flow', () => {
 });
 
 test('a long gap or restart word starts again; "sell" after finishing starts a new property', () => {
-  const done = run(['hi', '2', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'skip']).state;
+  const done = run(['hi', 'owner', '1', '200 gaj', 'Dugri, Ludhiana', '80 lakh', 'skip']).state;
   const again = M.decide(done, 'sell');
   assert.strictEqual(again.state.role, 'owner');
   assert.strictEqual(again.state.step, 'type');
@@ -198,4 +199,20 @@ test('every fixed text exists in all four variants with the same {placeholders}'
     assert.match(entry.hi_deva, /[ऀ-ॿ]/, `${key}.hi_deva should be Devanagari`);
   }
   assert.throws(() => t('no_such_key', 'hi'));
+});
+
+test('role menu offers only Buyer and Dealer (no Owner option) in every script', () => {
+  for (const v of ['en', 'hi', 'pa', 'hi_deva']) {
+    const menu = MESSAGES.role_menu[v];
+    assert.ok(!/Owner/.test(menu), `role_menu.${v} must not offer Owner`);
+    assert.ok(/1️⃣ Buyer/.test(menu) && /2️⃣ Dealer/.test(menu), `role_menu.${v}`);
+    assert.ok(!/3️⃣/.test(menu), `role_menu.${v} has no third option`);
+    assert.ok(!/Owner/.test(MESSAGES.role_retry[v]), `role_retry.${v}`);
+  }
+});
+
+test('someone who says they want to sell is still an owner and their lead is saved', () => {
+  const { state, trace } = run(['meri kothi bechni hai Dugri mein']);
+  assert.strictEqual(state.role, 'owner');
+  assert.ok(trace[0].keys.includes('@seller_lead_sync'), trace[0].keys.join(','));
 });

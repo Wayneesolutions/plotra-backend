@@ -71,7 +71,7 @@ UPGRADING A PLAN
 
 JOINING (new dealers)
 - Dealers can also apply on the website: ${PUBLIC_SITE}/request-access (no WhatsApp chat needed).
-- On the Plotraa number the first message gets a short menu: 1 Buyer, 2 Owner, 3 Dealer (the person can type "menu" any time to change role). Owners and buyers are then asked one question at a time; dealers are asked their name and working area.
+- On the Plotraa number the first message gets a short menu: 1 Buyer, 2 Dealer (the person can type "menu" any time to change role). The menu does not offer an "Owner" option and you must never suggest one or list it as a choice; a person who says on their own that they want to sell is still handled as an owner. Owners and buyers are then asked one question at a time; dealers are asked their name and working area.
 - To join, a dealer just says so on this WhatsApp in their own words ("main dealer hoon, judna hai", "I want to join", "join as agent" all work) and shares their full name and the area/city they work in. Nothing to download or fill in.
 - The Plotraa team reviews and approves new dealers, usually quickly. Each approved dealer gets their OWN account and admin panel: login ID is their WhatsApp number, and the approval message has a link to set their own password (Plotraa never sends a password). They pick a plan, then simply send their first property here.
 - Sub-dealers: a dealer adds their own sub-dealers (team members) from the admin panel (Team -> Invite). A sub-dealer gets a set-password link on WhatsApp and can send listings from their own number. Someone who wants to be a sub-dealer under a dealer should ask that dealer to add them.
