@@ -80,12 +80,41 @@ function trialExpiredMessage({ v = 'hi', trialEndsAt = null, payLine = '' } = {}
 
 /**
  * Is this dealer (tenant) allowed to get new leads / add listings? False
- * when the dealer's owner account is blocked (trial over or payment overdue).
+ * when the dealer's owner account is blocked (payment overdue) OR the free
+ * trial date has passed without a payment. The date is checked here too, not
+ * only the can_add_listing flag, because the hourly/daily job that flips the
+ * flag can lag behind trial_ends_at (23 Oct bug: listings were still being
+ * created for up to an hour after the trial ended).
  */
-async function dealerIsActive(knex, tenantId) {
-  const owner = await knex('users').where({ tenant_id: tenantId, role: 'owner' })
-    .orderBy('created_at', 'asc').first('can_add_listing');
-  return !owner || owner.can_add_listing !== false;
+async function dealerIsActive(knex, tenantId, now = new Date()) {
+  const billing = await dealerBilling(knex, tenantId, now);
+  if (!billing) return true;
+  return billing.can_add_listing !== false && billing.status !== 'expired';
+}
+
+/**
+ * Pure: may this user start / publish a NEW listing right now? Uses the flag
+ * and the trial date together, so an ended trial blocks immediately even if
+ * the cron has not run yet.
+ */
+function listingAllowed(user, { hasApprovedPayment = false, now = new Date() } = {}) {
+  if (!user || user.can_add_listing === false) return false;
+  return billingState(user, { hasApprovedPayment, now }).status !== 'expired';
+}
+
+/**
+ * May this user (dealer or sub-dealer) add / publish a NEW listing right now?
+ * Checks their own row (flag + trial date) and their dealer's (sub-dealers
+ * share the dealer's trial / payment state).
+ */
+async function canAddNewListing(knex, user, now = new Date()) {
+  if (!user || user.can_add_listing === false) return false;
+  if (user.trial_ends_at) {
+    const paid = await knex('payment_submissions').where({ agent_id: user.id, status: 'approved' }).first('id');
+    if (!listingAllowed(user, { hasApprovedPayment: Boolean(paid), now })) return false;
+  }
+  if (user.tenant_id) return dealerIsActive(knex, user.tenant_id, now);
+  return true;
 }
 
 /**
@@ -102,5 +131,5 @@ async function dealerBilling(knex, tenantId, now = new Date()) {
 
 module.exports = {
   trialDaysLeft, trialStep, billingState, dealerBilling, shortDate,
-  trialReminderMessage, trialExpiredMessage, dealerIsActive, REMIND_FROM_DAYS_LEFT,
+  trialReminderMessage, trialExpiredMessage, dealerIsActive, listingAllowed, canAddNewListing, REMIND_FROM_DAYS_LEFT,
 };

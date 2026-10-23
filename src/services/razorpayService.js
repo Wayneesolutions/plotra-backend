@@ -65,6 +65,11 @@ function parseWebhookEvent(body) {
   };
 }
 
+const CHECKOUT_NAME = process.env.RAZORPAY_CHECKOUT_NAME || 'Plotraa';
+// Links made before the Plotraa name was set still show the old name, so they
+// are not reused; a fresh link is made instead (old ones simply expire).
+const BRANDED_LINKS_SINCE = new Date(process.env.RAZORPAY_BRANDED_SINCE || '2026-10-24T00:00:00+05:30');
+
 async function createPaymentLink({ amountInr, planKey, planLabel, user, tenantId, referenceId }) {
   if (!isConfigured()) throw new Error('Razorpay is not configured (set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET).');
   const expireBy = Math.floor((Date.now() + LINK_TTL_MS) / 1000);
@@ -78,6 +83,10 @@ async function createPaymentLink({ amountInr, planKey, planLabel, user, tenantId
     notify: { sms: false, email: false },
     reminder_enable: false,
     expire_by: expireBy,
+    // The Razorpay account is shared with other Wayne E Solutions products, so
+    // its default business name ("Wayne E Solutions") showed on the payment
+    // page. Plotraa's own name replaces it on every link (23 Oct).
+    options: { checkout: { name: CHECKOUT_NAME } },
     notes: {
       product: PRODUCT_NOTE,
       user_id: user.id,
@@ -106,6 +115,7 @@ async function getOrCreatePaymentLink(knex, { user, planKey }) {
     .where({ user_id: user.id, plan_key: plan.key, status: 'created' })
     .where('amount_inr', plan.price_inr)
     .where('expires_at', '>', new Date(Date.now() + REUSE_MIN_REMAINING_MS))
+    .where('created_at', '>=', BRANDED_LINKS_SINCE)
     .orderBy('created_at', 'desc').first('short_url');
   if (reusable) return { url: reusable.short_url, plan };
 

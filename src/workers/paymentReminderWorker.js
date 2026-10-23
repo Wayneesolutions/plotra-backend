@@ -146,7 +146,7 @@ async function processReminderCycle() {
         await enqueueAgentWhatsappSend({
           tenantId: agent.tenant_id,
           phone: agent.phone,
-          messageBody: '⛔ Your monthly payment is overdue — new listings are paused until payment is confirmed. Your existing listings stay active and untouched. Reply "payment" once you\'ve paid to submit your receipt.',
+          messageBody: '⛔ Your monthly payment is overdue — new listings are paused until payment is confirmed. Your existing listings stay active and untouched. Type "plan" to get the online payment link.',
         });
       }
       continue; // restriction message takes over — don't also send a reminder this run
@@ -166,7 +166,7 @@ async function processReminderCycle() {
 
     const messageBody = agent.payment_status === 'pending_review'
       ? 'Your payment receipt is still being reviewed — no action needed from you right now.'
-      : `⏰ Your monthly payment is due soon (day ${dayCount} of your cycle). Please complete your payment and reply "payment" to submit your receipt photo.`;
+      : `⏰ Your monthly payment is due soon (day ${dayCount} of your cycle). Type "plan" to get the online payment link.`;
 
     await enqueueAgentWhatsappSend({ tenantId: agent.tenant_id, phone: agent.phone, messageBody });
     remindersSent++;

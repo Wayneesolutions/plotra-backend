@@ -15,7 +15,7 @@ const { hasActiveSignupSession, getOrCreateSession, advanceSession } = require('
 const { handleCallEnquiryReply } = require('../services/callEnquiryService');
 const { transcribeVoiceNote, voiceNotUnderstoodMessage } = require('../services/voiceNoteService');
 const { looksLikeSellerIntent } = require('../utils/sellerIntent');
-const { dealerIsActive } = require('../services/trialService');
+const { canAddNewListing } = require('../services/trialService');
 const { handleWithAssistant } = require('../services/assistantService');
 const { handleVisitorFlow, handleVisitorPhoto, isEnabled: isVisitorFlowEnabled } = require('../services/visitorFlowService');
 const { touchContactWindow, applyDeliveryStatuses } = require('../services/whatsappLogService');
@@ -241,11 +241,13 @@ async function handleInboundWhatsApp(req, res) {
   // Anything that doesn't match a known agent falls through to that
   // existing buyer path, completely unchanged.
   const agentUser = await knex('users').where({ phone: normalizePhone(phone) }).first();
-  // A sub-dealer can't add listings while their dealer can't (trial over /
-  // payment overdue). In memory only: their own row is left alone, so they
-  // work again the moment the dealer pays.
-  if (agentUser && agentUser.role === 'agent' && agentUser.can_add_listing !== false
-      && !(await dealerIsActive(knex, agentUser.tenant_id))) {
+  // New listings are blocked the moment the trial date passes (or payment is
+  // overdue), for the dealer and their sub-dealers. The trial DATE is checked
+  // here, not only the can_add_listing flag, because the job that flips the
+  // flag runs on a schedule (23 Oct bug: a dealer could keep listing for up to
+  // an hour after the trial ended). In memory only: rows are left alone, so
+  // everything works again the moment the dealer pays.
+  if (agentUser && agentUser.can_add_listing !== false && !(await canAddNewListing(knex, agentUser))) {
     agentUser.can_add_listing = false;
   }
   if (agentUser) {
@@ -496,6 +498,14 @@ async function handleInboundWhatsApp(req, res) {
     // like a buyer search (area + type + price) but must reach the assistant
     // so a seller lead is created, not get other people's listings back.
     const isSellerMessage = looksLikeSellerIntent(incomingText);
+
+    // 23 Oct: a seller gets the sell-property form link straight away (never
+    // a search, never "no matching properties").
+    if (isSellerMessage) {
+      const sellBody = t('sell_link', variantFor(incomingText), { url: `${process.env.PUBLIC_APP_URL || 'https://plotraa.com'}/sell-property` });
+      await enqueueAgentWhatsappSend({ tenantId: receivingDealer?.id || null, phone, messageBody: sellBody });
+      return res.status(200).json({ success: true, sellLink: true });
+    }
 
     if (!receivingDealer && !isSellerMessage) {
       // Shared platform number: try marketplace search first.

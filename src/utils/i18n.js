@@ -29,6 +29,14 @@ const M = {
     pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! 👋 Plotraa ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ।\n\nਪਹਿਲਾਂ ਦੱਸੋ, ਤੁਸੀਂ ਕੌਣ ਹੋ? ਸਿਰਫ਼ ਨੰਬਰ ਭੇਜੋ:\n1️⃣ Buyer: ਪ੍ਰਾਪਰਟੀ ਖਰੀਦਣੀ ਹੈ\n2️⃣ Dealer: Plotraa \'ਤੇ ਲਿਸਟਿੰਗ ਪਾਉਣੀ ਹੈ (7 ਦਿਨ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ)\n\nਰੋਲ ਬਦਲਣਾ ਹੋਵੇ ਤਾਂ ਕਦੇ ਵੀ *menu* ਲਿਖੋ।',
     hi_deva: 'नमस्ते! 👋 Plotraa में आपका स्वागत है।\n\nपहले बताइए, आप कौन हैं? सिर्फ़ नंबर भेजें:\n1️⃣ Buyer: प्रॉपर्टी खरीदनी है\n2️⃣ Dealer: Plotraa पर लिस्टिंग डालनी है (7 दिन मुफ़्त ट्रायल)\n\nरोल बदलना हो तो कभी भी *menu* लिखें।',
   },
+  // 23 Oct: anyone who says they want to SELL gets the sell-property form
+  // link (no search, whatever role they are in).
+  sell_link: {
+    en: '🏡 Want to sell your property? Fill in the details here and a verified local dealer will contact you:\n{url}',
+    hi: '🏡 Property bechni hai? Yahan details bhariye, ek verified local dealer aapse contact karega:\n{url}',
+    pa: '🏡 ਪ੍ਰਾਪਰਟੀ ਵੇਚਣੀ ਹੈ? ਇੱਥੇ ਵੇਰਵੇ ਭਰੋ, ਇੱਕ ਵੈਰੀਫਾਈਡ ਲੋਕਲ ਡੀਲਰ ਤੁਹਾਡੇ ਨਾਲ ਸੰਪਰਕ ਕਰੇਗਾ:\n{url}',
+    hi_deva: '🏡 प्रॉपर्टी बेचनी है? यहाँ डिटेल्स भरिए, एक वेरिफाइड लोकल डीलर आपसे संपर्क करेगा:\n{url}',
+  },
   role_retry: {
     en: 'Please reply with 1 or 2:\n1️⃣ Buyer  2️⃣ Dealer',
     hi: 'Kripya 1 ya 2 bhejein:\n1️⃣ Buyer  2️⃣ Dealer',
@@ -136,10 +144,10 @@ const M = {
     hi_deva: '📍 किस एरिया या शहर में प्रॉपर्टी चाहिए? (जैसे "दुगरी, लुधियाना")',
   },
   buyer_ask_type: {
-    en: '🏠 What type of property? Send a number:\n1. Plot\n2. Kothi / House\n3. Flat\n4. Commercial (shop, SCO, office)\n5. Agricultural land',
-    hi: '🏠 Kis type ki property chahiye? Number bhejein:\n1. Plot\n2. Kothi / House\n3. Flat\n4. Commercial (shop, SCO, office)\n5. Kheti ki zameen',
-    pa: '🏠 ਕਿਸ ਕਿਸਮ ਦੀ ਪ੍ਰਾਪਰਟੀ ਚਾਹੀਦੀ ਹੈ? ਨੰਬਰ ਭੇਜੋ:\n1. Plot\n2. ਕੋਠੀ / House\n3. Flat\n4. Commercial (ਦੁਕਾਨ, SCO, ਦਫ਼ਤਰ)\n5. ਖੇਤੀ ਦੀ ਜ਼ਮੀਨ',
-    hi_deva: '🏠 किस टाइप की प्रॉपर्टी चाहिए? नंबर भेजें:\n1. Plot\n2. कोठी / House\n3. Flat\n4. Commercial (दुकान, SCO, ऑफिस)\n5. खेती की ज़मीन',
+    en: '🏠 What type of property? Send a number:\n1. Plot\n2. Kothi / House\n3. Flat\n4. Commercial (shop, SCO, office)\n5. Agricultural land\n\nWant more than one? Send all the numbers, e.g. *1, 3*',
+    hi: '🏠 Kis type ki property chahiye? Number bhejein:\n1. Plot\n2. Kothi / House\n3. Flat\n4. Commercial (shop, SCO, office)\n5. Kheti ki zameen\n\nEk se zyada chahiye to saare number bhejein, jaise *1, 3*',
+    pa: '🏠 ਕਿਸ ਕਿਸਮ ਦੀ ਪ੍ਰਾਪਰਟੀ ਚਾਹੀਦੀ ਹੈ? ਨੰਬਰ ਭੇਜੋ:\n1. Plot\n2. ਕੋਠੀ / House\n3. Flat\n4. Commercial (ਦੁਕਾਨ, SCO, ਦਫ਼ਤਰ)\n5. ਖੇਤੀ ਦੀ ਜ਼ਮੀਨ\n\nਇੱਕ ਤੋਂ ਵੱਧ ਚਾਹੀਦੀ ਹੈ ਤਾਂ ਸਾਰੇ ਨੰਬਰ ਭੇਜੋ, ਜਿਵੇਂ *1, 3*',
+    hi_deva: '🏠 किस टाइप की प्रॉपर्टी चाहिए? नंबर भेजें:\n1. Plot\n2. कोठी / House\n3. Flat\n4. Commercial (दुकान, SCO, ऑफिस)\n5. खेती की ज़मीन\n\nएक से ज़्यादा चाहिए तो सारे नंबर भेजें, जैसे *1, 3*',
   },
   buyer_ask_size: {
     en: '📐 What size do you need? (e.g. 200 gaj, 10 marla, 3 BHK). Send *skip* if open.',
@@ -232,10 +240,10 @@ const M = {
     hi_deva: 'नमस्ते{name}! 👋 प्रॉपर्टी की डिटेल्स भेजिए, मैं लिस्टिंग बना दूँगा। सारे विकल्प देखने के लिए "help" लिखें।',
   },
   agent_help: {
-    en: `Here's what you can do — just type normally, no special commands needed:\n\n🏠 *Add a property*: "3 BHK kothi Model Town Ludhiana 1.2 crore"\n📋 *See your listings*: "show my listings"\n✅ *Mark sold*: "Model Town plot is sold"\n🔎 *Find a property for a client*: "any 200 gaj plot in Dugri?"\n💳 *Plans and payment*: "plan" to see plans, "I've paid" (then send the receipt photo)\n📍 Share a location pin anytime to fix a property's map location.\n🎤 Prefer talking? Send a voice note instead of typing, in any language.`,
-    hi: 'Aap normal tarike se likh sakte hain, koi command yaad rakhne ki zaroorat nahi:\n\n🏠 *Property add karein*: "3 BHK kothi Model Town Ludhiana 1.2 crore"\n📋 *Apni listings dekhein*: "meri listings dikhao"\n✅ *Sold mark karein*: "Model Town wala plot bik gaya"\n🔎 *Client ke liye property dhundein*: "Dugri mein 200 gaj plot hai koi?"\n💳 *Plan aur payment*: plans ke liye "plan", payment ke liye "payment kar di" (phir receipt ki photo bhejein)\n📍 Property ki location theek karne ke liye kabhi bhi location pin bhej dein.\n🎤 Type nahi karna? Voice note bhej dein, Punjabi/Hindi/English kuch bhi.',
-    pa: 'ਤੁਸੀਂ ਆਮ ਤਰੀਕੇ ਨਾਲ ਲਿਖ ਸਕਦੇ ਹੋ, ਕੋਈ ਕਮਾਂਡ ਯਾਦ ਰੱਖਣ ਦੀ ਲੋੜ ਨਹੀਂ:\n\n🏠 *ਪ੍ਰਾਪਰਟੀ ਜੋੜੋ*: "3 BHK ਕੋਠੀ ਮਾਡਲ ਟਾਊਨ ਲੁਧਿਆਣਾ 1.2 ਕਰੋੜ"\n📋 *ਆਪਣੀਆਂ ਲਿਸਟਿੰਗਾਂ ਦੇਖੋ*: "ਮੇਰੀਆਂ ਲਿਸਟਿੰਗਾਂ ਦਿਖਾਓ"\n✅ *ਵਿਕ ਗਈ ਮਾਰਕ ਕਰੋ*: "ਮਾਡਲ ਟਾਊਨ ਵਾਲਾ ਪਲਾਟ ਵਿਕ ਗਿਆ"\n🔎 *ਗਾਹਕ ਲਈ ਪ੍ਰਾਪਰਟੀ ਲੱਭੋ*: "ਦੁੱਗਰੀ ਵਿੱਚ 200 ਗਜ ਪਲਾਟ ਹੈ ਕੋਈ?"\n💳 *ਪਲਾਨ ਅਤੇ ਪੇਮੈਂਟ*: ਪਲਾਨਾਂ ਲਈ "plan", ਪੇਮੈਂਟ ਲਈ "ਪੇਮੈਂਟ ਕਰ ਦਿੱਤੀ" (ਫਿਰ ਰਸੀਦ ਦੀ ਫੋਟੋ ਭੇਜੋ)\n📍 ਪ੍ਰਾਪਰਟੀ ਦੀ ਲੋਕੇਸ਼ਨ ਠੀਕ ਕਰਨ ਲਈ ਕਦੇ ਵੀ ਲੋਕੇਸ਼ਨ ਪਿੰਨ ਭੇਜ ਦਿਓ।\n🎤 ਲਿਖਣਾ ਨਹੀਂ? ਵੌਇਸ ਨੋਟ ਭੇਜ ਦਿਓ, ਪੰਜਾਬੀ/ਹਿੰਦੀ/ਅੰਗਰੇਜ਼ੀ ਕੁਝ ਵੀ।',
-    hi_deva: 'आप सामान्य तरीके से लिख सकते हैं, कोई कमांड याद रखने की ज़रूरत नहीं:\n\n🏠 *प्रॉपर्टी जोड़ें*: "3 BHK कोठी मॉडल टाउन लुधियाना 1.2 करोड़"\n📋 *अपनी लिस्टिंग देखें*: "मेरी लिस्टिंग दिखाओ"\n✅ *बिक गई मार्क करें*: "मॉडल टाउन वाला प्लॉट बिक गया"\n🔎 *क्लाइंट के लिए प्रॉपर्टी ढूँढें*: "दुगरी में 200 गज प्लॉट है कोई?"\n💳 *प्लान और पेमेंट*: प्लान के लिए "plan", पेमेंट के लिए "पेमेंट कर दी" (फिर रसीद की फ़ोटो भेजें)\n📍 प्रॉपर्टी की लोकेशन ठीक करने के लिए कभी भी लोकेशन पिन भेज दें।\n🎤 टाइप नहीं करना? वॉइस नोट भेज दें, पंजाबी/हिंदी/अंग्रेज़ी कुछ भी।',
+    en: `Here's what you can do — just type normally, no special commands needed:\n\n🏠 *Add a property*: "3 BHK kothi Model Town Ludhiana 1.2 crore"\n📋 *See your listings*: "show my listings"\n✅ *Mark sold*: "Model Town plot is sold"\n🔎 *Find a property for a client*: "any 200 gaj plot in Dugri?"\n💳 *Plans and payment*: type "plan" to see plans and get the online payment link\n📍 Share a location pin anytime to fix a property's map location.\n🎤 Prefer talking? Send a voice note instead of typing, in any language.`,
+    hi: 'Aap normal tarike se likh sakte hain, koi command yaad rakhne ki zaroorat nahi:\n\n🏠 *Property add karein*: "3 BHK kothi Model Town Ludhiana 1.2 crore"\n📋 *Apni listings dekhein*: "meri listings dikhao"\n✅ *Sold mark karein*: "Model Town wala plot bik gaya"\n🔎 *Client ke liye property dhundein*: "Dugri mein 200 gaj plot hai koi?"\n💳 *Plan aur payment*: "plan" likhein, plans aur online payment ka link mil jayega\n📍 Property ki location theek karne ke liye kabhi bhi location pin bhej dein.\n🎤 Type nahi karna? Voice note bhej dein, Punjabi/Hindi/English kuch bhi.',
+    pa: 'ਤੁਸੀਂ ਆਮ ਤਰੀਕੇ ਨਾਲ ਲਿਖ ਸਕਦੇ ਹੋ, ਕੋਈ ਕਮਾਂਡ ਯਾਦ ਰੱਖਣ ਦੀ ਲੋੜ ਨਹੀਂ:\n\n🏠 *ਪ੍ਰਾਪਰਟੀ ਜੋੜੋ*: "3 BHK ਕੋਠੀ ਮਾਡਲ ਟਾਊਨ ਲੁਧਿਆਣਾ 1.2 ਕਰੋੜ"\n📋 *ਆਪਣੀਆਂ ਲਿਸਟਿੰਗਾਂ ਦੇਖੋ*: "ਮੇਰੀਆਂ ਲਿਸਟਿੰਗਾਂ ਦਿਖਾਓ"\n✅ *ਵਿਕ ਗਈ ਮਾਰਕ ਕਰੋ*: "ਮਾਡਲ ਟਾਊਨ ਵਾਲਾ ਪਲਾਟ ਵਿਕ ਗਿਆ"\n🔎 *ਗਾਹਕ ਲਈ ਪ੍ਰਾਪਰਟੀ ਲੱਭੋ*: "ਦੁੱਗਰੀ ਵਿੱਚ 200 ਗਜ ਪਲਾਟ ਹੈ ਕੋਈ?"\n💳 *ਪਲਾਨ ਅਤੇ ਪੇਮੈਂਟ*: "plan" ਲਿਖੋ, ਪਲਾਨ ਅਤੇ ਆਨਲਾਈਨ ਪੇਮੈਂਟ ਦਾ ਲਿੰਕ ਮਿਲ ਜਾਵੇਗਾ\n📍 ਪ੍ਰਾਪਰਟੀ ਦੀ ਲੋਕੇਸ਼ਨ ਠੀਕ ਕਰਨ ਲਈ ਕਦੇ ਵੀ ਲੋਕੇਸ਼ਨ ਪਿੰਨ ਭੇਜ ਦਿਓ।\n🎤 ਲਿਖਣਾ ਨਹੀਂ? ਵੌਇਸ ਨੋਟ ਭੇਜ ਦਿਓ, ਪੰਜਾਬੀ/ਹਿੰਦੀ/ਅੰਗਰੇਜ਼ੀ ਕੁਝ ਵੀ।',
+    hi_deva: 'आप सामान्य तरीके से लिख सकते हैं, कोई कमांड याद रखने की ज़रूरत नहीं:\n\n🏠 *प्रॉपर्टी जोड़ें*: "3 BHK कोठी मॉडल टाउन लुधियाना 1.2 करोड़"\n📋 *अपनी लिस्टिंग देखें*: "मेरी लिस्टिंग दिखाओ"\n✅ *बिक गई मार्क करें*: "मॉडल टाउन वाला प्लॉट बिक गया"\n🔎 *क्लाइंट के लिए प्रॉपर्टी ढूँढें*: "दुगरी में 200 गज प्लॉट है कोई?"\n💳 *प्लान और पेमेंट*: "plan" लिखें, प्लान और ऑनलाइन पेमेंट का लिंक मिल जाएगा\n📍 प्रॉपर्टी की लोकेशन ठीक करने के लिए कभी भी लोकेशन पिन भेज दें।\n🎤 टाइप नहीं करना? वॉइस नोट भेज दें, पंजाबी/हिंदी/अंग्रेज़ी कुछ भी।',
   },
   plan_menu_header: {
     en: '📦 *Choose your plan* — reply with its number:',
@@ -268,10 +276,10 @@ const M = {
     hi_deva: 'प्लान की डिटेल्स आपको जल्दी भेज दी जाएँगी।',
   },
   plan_selected_link: {
-    en: '✅ *{plan}* plan selected — ₹{price}/month.\n\n💳 Pay here: {link}\nYour plan activates automatically as soon as the payment is done.\n\nPaid in cash or by QR? Type *payment* and send the receipt photo.',
-    hi: '✅ *{plan}* plan chun liya — ₹{price}/month.\n\n💳 Yahan pay karein: {link}\nPayment hote hi aapka plan apne aap active ho jayega.\n\nCash ya QR se pay kiya? *payment* likhein aur receipt ki photo bhejein.',
-    pa: '✅ *{plan}* ਪਲਾਨ ਚੁਣ ਲਿਆ — ₹{price}/ਮਹੀਨਾ।\n\n💳 ਇੱਥੇ ਭੁਗਤਾਨ ਕਰੋ: {link}\nਭੁਗਤਾਨ ਹੁੰਦੇ ਹੀ ਤੁਹਾਡਾ ਪਲਾਨ ਆਪਣੇ-ਆਪ ਚਾਲੂ ਹੋ ਜਾਵੇਗਾ।\n\nਕੈਸ਼ ਜਾਂ QR ਨਾਲ ਦਿੱਤਾ? *payment* ਲਿਖੋ ਅਤੇ ਰਸੀਦ ਦੀ ਫੋਟੋ ਭੇਜੋ।',
-    hi_deva: '✅ *{plan}* प्लान चुन लिया — ₹{price}/माह।\n\n💳 यहाँ भुगतान करें: {link}\nभुगतान होते ही आपका प्लान अपने-आप चालू हो जाएगा।\n\nकैश या QR से दिया? *payment* लिखें और रसीद की फ़ोटो भेजें।',
+    en: '✅ *{plan}* plan selected — ₹{price}/month.\n\n💳 Pay here: {link}\nYour plan activates automatically as soon as the payment is done.',
+    hi: '✅ *{plan}* plan chun liya — ₹{price}/month.\n\n💳 Yahan pay karein: {link}\nPayment hote hi aapka plan apne aap active ho jayega.',
+    pa: '✅ *{plan}* ਪਲਾਨ ਚੁਣ ਲਿਆ — ₹{price}/ਮਹੀਨਾ।\n\n💳 ਇੱਥੇ ਭੁਗਤਾਨ ਕਰੋ: {link}\nਭੁਗਤਾਨ ਹੁੰਦੇ ਹੀ ਤੁਹਾਡਾ ਪਲਾਨ ਆਪਣੇ-ਆਪ ਚਾਲੂ ਹੋ ਜਾਵੇਗਾ।',
+    hi_deva: '✅ *{plan}* प्लान चुन लिया — ₹{price}/माह।\n\n💳 यहाँ भुगतान करें: {link}\nभुगतान होते ही आपका प्लान अपने-आप चालू हो जाएगा।',
   },
   plan_selected_qr: {
     en: '✅ *{plan}* plan selected — ₹{price}/month.\n\nScan this QR to pay:\n{qr}\n\nOnce paid, send a photo of your payment receipt any time (or just type "payment") to confirm it with us.',
@@ -298,10 +306,10 @@ const M = {
     hi_deva: '💳 यहाँ भुगतान करें: {link}',
   },
   plan_pay_receipt: {
-    en: 'After paying by QR or cash, type "payment" and send the receipt photo.',
-    hi: 'QR ya cash se pay karne ke baad "payment" likhein aur receipt ki photo bhejein.',
-    pa: 'QR ਜਾਂ ਕੈਸ਼ ਨਾਲ ਭੁਗਤਾਨ ਤੋਂ ਬਾਅਦ "payment" ਲਿਖੋ ਅਤੇ ਰਸੀਦ ਦੀ ਫੋਟੋ ਭੇਜੋ।',
-    hi_deva: 'QR या कैश से भुगतान के बाद "payment" लिखें और रसीद की फ़ोटो भेजें।',
+    en: 'After paying by QR, type "payment" and send the payment screenshot.',
+    hi: 'QR se pay karne ke baad "payment" likhein aur payment ka screenshot bhejein.',
+    pa: 'QR ਨਾਲ ਭੁਗਤਾਨ ਤੋਂ ਬਾਅਦ "payment" ਲਿਖੋ ਅਤੇ ਪੇਮੈਂਟ ਦਾ ਸਕ੍ਰੀਨਸ਼ਾਟ ਭੇਜੋ।',
+    hi_deva: 'QR से भुगतान के बाद "payment" लिखें और पेमेंट का स्क्रीनशॉट भेजें।',
   },
   status_trial: {
     en: 'Free trial', hi: 'Free trial', pa: 'ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ', hi_deva: 'मुफ़्त ट्रायल',

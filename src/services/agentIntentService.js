@@ -385,7 +385,7 @@ async function replyPlanInfo(knex, agentUser, v) {
     if (agentUser.role === 'owner' && razorpay().isConfigured()) {
       try {
         const { url } = await razorpay().getOrCreatePaymentLink(knex, { user: agentUser, planKey: current.key });
-        pay = `${t('plan_pay_link', v, { link: url })}\n${pay}`;
+        pay = t('plan_pay_link', v, { link: url }); // online link: activates by itself, no receipt needed
       } catch (err) {
         console.error('agentIntentService: payment link failed (showing QR/receipt text):', err.message);
         if (current.qr_code_url) pay = `QR: ${current.qr_code_url}\n${pay}`;

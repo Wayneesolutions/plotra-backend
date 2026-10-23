@@ -367,7 +367,7 @@ async function approveWhatsappSignupRequest(req, res, knex, request, adminUserId
     await enqueueAgentWhatsappSend({
       tenantId: null,
       phone: request.phone,
-      messageBody: `You're approved! 🎉 Complete payment (₹${plan.price_inr}/month) to activate your account:\n\n${url}\n\nAlready paid in cash? Just reply CASH.`,
+      messageBody: `You're approved! 🎉 Complete payment (₹${plan.price_inr}/month) to activate your account:\n\n${url}`,
     });
 
     return res.status(201).json({

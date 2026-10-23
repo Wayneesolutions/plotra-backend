@@ -115,15 +115,9 @@ async function advanceSession(knex, session, incomingText) {
     case 'submitted':
       return "Your request is still under review. We'll message you here once it's approved.";
 
-    case 'awaiting_payment': {
-      if (/\bcash\b/i.test(text)) {
-        await knex('tenant_requests')
-          .where({ id: session.tenant_request_id })
-          .update({ payment_status: 'cash_pending', updated_at: knex.fn.now() });
-        return "Got it — we've noted that you'll pay in cash. Our team will confirm shortly and activate your account.";
-      }
-      return "Please complete payment using the link we sent, or reply CASH if you've already paid in cash.";
-    }
+    case 'awaiting_payment':
+      // Online payment only: no cash option (23 Oct).
+      return 'Please complete payment using the link we sent. Your account activates automatically once it is done.';
 
     case 'completed':
       return "You're all set! Text your property details here anytime to list them.";
