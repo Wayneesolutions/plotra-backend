@@ -30,9 +30,10 @@
 
 const {
   explicitRole, parseRoleChoice, isMenuCommand, isSkip, isDone, isGreeting, isPlanListRequest,
-  mentionsYearly, looksLikeQuestion, parsePropertyType, parseSize, parsePrice, splitLocation, looksLikeName,
+  mentionsYearly, looksLikeQuestion, parsePropertyType, parsePropertyTypes, parseSize, parsePrice, splitLocation, looksLikeName,
 } = require('../utils/visitorFlowParsers');
 const { variantFor } = require('../utils/i18n');
+const { looksLikeSellerIntent } = require('../utils/sellerIntent');
 const { detectScript, detectMessageLanguage } = require('../utils/replyLanguage');
 
 const FLOWS = {
@@ -69,6 +70,11 @@ function pickVariant(text, state) {
   return state?.data?.v || 'hi';
 }
 
+// Version of the role menu text in utils/i18n.js (2 = "1 Buyer / 2 Dealer").
+const MENU_VERSION = 2;
+const isBareDigit = (text, d) => String(text || '').replace(/[\uFE0F\u20E3\s.)!]/g, '')
+  .replace(/[२੨]/g, '2') === d;
+
 const isMenuNumber = (text) => /^\s*[1-5][\s.)]*$/.test(String(text || ''));
 
 /**
@@ -80,8 +86,10 @@ function prefillFrom(role, text) {
   const t = String(text || '');
   if (!t.trim() || isMenuNumber(t)) return data;
   if (role === 'owner' || role === 'buyer') {
-    const type = parsePropertyType(t, { allowMenuNumber: false });
+    const types = role === 'buyer' ? parsePropertyTypes(t, { allowMenuNumber: false }) : [];
+    const type = role === 'buyer' ? (types.length ? types.join(' / ') : null) : parsePropertyType(t, { allowMenuNumber: false });
     if (type) { data.type = type; data.done.type = true; }
+    if (types.length > 1) data.types = types;
     const size = parseSize(t);
     if (size) { data.size = size; data.done.size = true; }
     const price = parsePrice(t);
@@ -187,8 +195,9 @@ function readAnswer(role, step, text, data, knownCities) {
     }
     if (step === 'type') {
       if (skip) return { ok: true, patch: {} };
-      const type = parsePropertyType(t);
-      return type ? { ok: true, patch: { type } } : { ok: false };
+      // A buyer may want several types ("1, 2, 3", "plot ya flat").
+      const types = parsePropertyTypes(t);
+      return types.length ? { ok: true, patch: { type: types.join(' / '), types } } : { ok: false };
     }
     if (step === 'size') {
       if (skip) return { ok: true, patch: {} };
@@ -237,7 +246,20 @@ function decide(state, text, ctx = {}) {
   const knownCities = ctx.knownCities || [];
   const v = pickVariant(t, state);
   const withV = (s) => ({ ...s, data: { ...s.data, v } });
-  const finish = (s, out) => ({ state: withV(s), out, v });
+  // Remember that THIS (2-option) menu was shown, so a bare "2" can be read
+  // safely: in the old 3-option menu "2" meant Owner, now it means Dealer.
+  const shownMenu = (out) => out.some((o) => o && (o.key === 'role_menu' || o.key === 'role_retry'));
+  const finish = (s, out) => {
+    const st = withV(s);
+    if (shownMenu(out)) st.data = { ...st.data, menu_v: MENU_VERSION };
+    return { state: st, out, v };
+  };
+
+  // ---- wants to SELL (any role, any step): the sell-property link, never a
+  // search or the role menu (23 Oct). Their saved step is kept as it was.
+  if (looksLikeSellerIntent(t)) {
+    return finish(state || { ...blankState(), data: { done: {}, first_text: '' } }, [reply('sell_link', { url: '__sell_url__' })]);
+  }
 
   // ---- no state yet: first message ever
   if (!state) {
@@ -289,6 +311,12 @@ function decide(state, text, ctx = {}) {
   // ---- waiting for the role menu answer
   if (!state.role || state.step === 'role') {
     const choice = parseRoleChoice(t);
+    // A bare "2" from someone whose saved menu is the OLD one (Buyer / Owner /
+    // Dealer, before 22 Oct) is ambiguous: show the current menu again
+    // instead of guessing a role (23 Oct bug: wrong role was set).
+    if (choice && isBareDigit(t, '2') && state.data?.menu_v !== MENU_VERSION) {
+      return finish(state, [reply('role_menu')]);
+    }
     if (choice) {
       const started = startRole(choice, { text: state.data?.first_text, pending: ctx.pending, prevData: { v } });
       return finish(started.state, started.out);
@@ -425,6 +453,7 @@ function afterPhoto(state, url) {
 module.exports = {
   FLOWS,
   MAX_PHOTOS,
+  MENU_VERSION,
   TRIAL_DAYS,
   blankState,
   decide,

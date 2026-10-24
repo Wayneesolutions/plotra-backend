@@ -29,7 +29,8 @@ test('first message always gets the role menu (no guessing), whatever it says', 
 test('stating the role outright skips the menu: that is not a guess', () => {
   assert.strictEqual(run(['main dealer hoon']).state.role, 'dealer');
   assert.strictEqual(run(['join']).state.role, 'dealer');
-  assert.strictEqual(run(['meri kothi bechni hai 1.5 crore']).state.role, 'owner');
+  // 23 Oct: selling gets the sell-property link, not the owner questions.
+  assert.deepStrictEqual(keys(run(['meri kothi bechni hai 1.5 crore']).trace, 0), ['sell_link']);
   assert.strictEqual(run(['main owner hoon']).state.role, 'owner');
 });
 
@@ -49,14 +50,14 @@ test('owner flow asks type, size, location, price, photos one at a time', () => 
   assert.strictEqual(state.data.size, '200 gaj');
   assert.strictEqual(state.data.locality, 'Dugri');
   assert.strictEqual(state.data.city, 'Ludhiana');
-  assert.strictEqual(state.data.price_text, '80 lakh');
+  assert.strictEqual(state.data.price_text, '₹80 lakh');
   assert.ok(keys(trace, 6).includes('owner_done'));
   assert.ok(keys(trace, 6).includes('@seller_lead_sync'));
 });
 
 test('details in the first message are not asked again', () => {
   const { trace } = run(['hi'], {});
-  const first = run(['Dugri mein 200 gaj plot bechna hai 80 lakh']);
+  const first = run(['main owner hoon, Dugri mein 200 gaj plot hai 80 lakh']);
   assert.strictEqual(first.state.role, 'owner');
   assert.strictEqual(first.state.step, 'location', 'type, size and price already given');
   assert.ok(trace);
@@ -122,7 +123,7 @@ test('buyer flow asks budget, area, type, size, then searches', () => {
   assert.strictEqual(search.data.type, 'Plot');
   assert.strictEqual(search.data.budget_inr, 5000000);
   assert.strictEqual(search.data.locality, 'Dugri');
-  assert.match(search.summary, /Plot 200 gaj in Dugri, Ludhiana budget 50 lakh/);
+  assert.match(search.summary, /Plot 200 gaj in Dugri, Ludhiana budget ₹50 lakh/);
 });
 
 test('skip moves on; two misses stop the loop instead of asking forever', () => {
@@ -177,7 +178,7 @@ test('a long gap or restart word starts again; "sell" after finishing starts a n
 test('parsers: sizes, prices, types and locations', () => {
   assert.strictEqual(P.parseSize('200 gaj'), '200 gaj');
   assert.strictEqual(P.parseSize('3bhk'), '3 BHK');
-  assert.deepStrictEqual(P.parsePrice('1.5 crore'), { text: '1.5 crore', inr: 15000000 });
+  assert.deepStrictEqual(P.parsePrice('1.5 crore'), { text: '₹1.5 crore', inr: 15000000 });
   assert.strictEqual(P.parsePrice('80 lakh').inr, 8000000);
   assert.strictEqual(P.parsePropertyType('kothi'), 'Villa');
   assert.strictEqual(P.parsePropertyType('3'), 'Flat');
@@ -211,8 +212,32 @@ test('role menu offers only Buyer and Dealer (no Owner option) in every script',
   }
 });
 
-test('someone who says they want to sell is still an owner and their lead is saved', () => {
-  const { state, trace } = run(['meri kothi bechni hai Dugri mein']);
-  assert.strictEqual(state.role, 'owner');
-  assert.ok(trace[0].keys.includes('@seller_lead_sync'), trace[0].keys.join(','));
+test('23 Oct: "want to sell / bechna hai / vechna hai" gets the sell-property link in any role, never a search', () => {
+  for (const msg of ['meri kothi bechni hai Dugri mein', 'want to sell 1.5 crore kothi', 'plot vechna hai', 'bechna hai']) {
+    assert.deepStrictEqual(keys(run([msg]).trace, 0), ['sell_link'], msg);
+  }
+  const buyerDone = run(['hi', '1', '50 lakh', 'Dugri, Ludhiana', '1', '200 gaj']).state;
+  const r = run(['want to sell 1.5 crore kothi'], { start: buyerDone });
+  assert.deepStrictEqual(keys(r.trace, 0), ['sell_link']);
+  assert.strictEqual(r.state.role, 'buyer', 'role is left as it was');
+  const midDealer = run(['main dealer hoon']).state;
+  assert.deepStrictEqual(keys(run(['kothi bechni hai'], { start: midDealer }).trace, 0), ['sell_link']);
+});
+
+test('23 Oct: a bare "2" from the old 3-option menu is not guessed; the new menu is shown again', () => {
+  const oldMenuState = { role: null, step: 'role', data: { done: {} } }; // saved before menu_v existed
+  const r = run(['2', '2'], { start: oldMenuState });
+  assert.deepStrictEqual(keys(r.trace, 0), ['role_menu']);
+  assert.strictEqual(r.trace[0].role, null);
+  assert.strictEqual(r.state.role, 'dealer', 'after seeing the current menu, 2 = Dealer');
+  assert.strictEqual(run(['hi', '2']).state.role, 'dealer');
+});
+
+test('23 Oct: buyer can pick several property types ("1, 2, 3")', () => {
+  const { trace } = run(['hi', '1', '50 lakh', 'Dugri, Ludhiana', '1, 2, 3', 'skip']);
+  assert.strictEqual(trace[4].step, 'size');
+  const search = trace[5].out.find((o) => o.name === 'buyer_search');
+  assert.deepStrictEqual(search.data.types, ['Plot', 'Villa', 'Flat']);
+  assert.deepStrictEqual(P.parsePropertyTypes('1 aur 3'), ['Plot', 'Flat']);
+  assert.deepStrictEqual(P.parsePropertyTypes('plot ya flat'), ['Plot', 'Flat']);
 });

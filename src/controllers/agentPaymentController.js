@@ -250,14 +250,23 @@ async function listAgentsPaymentStatus(req, res) {
 
     const enriched = agents.map((a) => {
       const lastPaymentDate = lastPaymentByAgent.get(a.id) || null;
+      // A dealer who never paid is due when the free trial ends (23 Oct bug:
+      // the list showed onboarded_at + 30 days, e.g. 22 Nov, for a trial
+      // ending 30 Oct). After the first payment it is last payment + 30 days.
+      const onTrialClock = !lastPaymentDate && a.trial_ends_at;
       const anchor = new Date(lastPaymentDate || a.onboarded_at);
-      const nextDueDate = new Date(anchor.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const nextDueDate = onTrialClock
+        ? new Date(a.trial_ends_at)
+        : (Number.isNaN(anchor.getTime()) ? null : new Date(anchor.getTime() + 30 * 24 * 60 * 60 * 1000));
       // trial | paid | expired | none, plus whole days left in a running trial.
       const billing = billingState(a, { hasApprovedPayment: Boolean(lastPaymentDate) });
       return {
         ...a,
+        // What actually applies right now (flag + trial date), not just the flag.
+        can_add_listing: billing.status !== 'expired' && a.can_add_listing !== false,
         last_payment_date: lastPaymentDate,
-        next_due_date: nextDueDate.toISOString(),
+        next_due_date: nextDueDate ? nextDueDate.toISOString() : null,
+        next_due_kind: onTrialClock ? 'trial_end' : 'monthly',
         billing_status: billing.status,
         billing_reason: billing.reason,
         trial_days_left: billing.days_left,

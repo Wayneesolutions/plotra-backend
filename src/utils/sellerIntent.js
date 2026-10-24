@@ -18,8 +18,12 @@ const SELLER_PATTERNS = [
   // Devanagari / Gurmukhi
   /बेच(?:नी|ना|ने|नु|ना\s*चाह)|बिकाऊ/,
   /ਵੇਚ(?:ਣ|ਣੀ|ਣਾ|ਣੇ)|ਵਿਕਾਊ/,
+  // Hinglish with the English verb: "sell karni hai", "sell krna hai"
+  /\bsell\s*(?:karni|karna|karni|krni|krna|karvani|karwani|karvana|karwana|kar\s*do|krdo)\b/i,
   // English, first person only
   /\b(?:i|we)\s*(?:want|wish|need|would\s+like|plan|am\s+planning)\s+to\s+sell\b/i,
+  // ...or with the "I" left out, at the start: "want to sell my plot", "wanna sell kothi"
+  /^\s*(?:(?:hi|hello|hey|sir|ji)[\s,!.]+)?(?:want|wanna|wish|need|looking|planning)\s+(?:to\s+)?sell\b/i,
   /\b(?:i\s*am|i'm|we\s*are|we're)\s+(?:selling|looking\s+to\s+sell)\b/i,
   /\bsell(?:ing)?\s+(?:my|our)\b/i,
   /\bmy\s+(?:\w+\s+){0,3}(?:is|are)\s+for\s+sale\b/i,

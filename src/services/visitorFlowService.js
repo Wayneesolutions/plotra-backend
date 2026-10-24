@@ -14,7 +14,7 @@ const { normalizePhone } = require('../utils/phone');
 const { t } = require('../utils/i18n');
 const { detectScript } = require('../utils/replyLanguage');
 const { decide, acceptsPhoto, afterPhoto, ownerHintPatch, TRIAL_DAYS } = require('./visitorFlowMachine');
-const { SUPPORT_NUMBER } = require('../assistant/plotraaKnowledge');
+const { SUPPORT_NUMBER, PUBLIC_SITE } = require('../assistant/plotraaKnowledge');
 
 // Heavy modules are required lazily: they open Redis connections at load time.
 const enqueueWhatsapp = (...a) => require('./agentMessagingService').enqueueAgentWhatsappSend(...a);
@@ -81,6 +81,7 @@ function render(item, v) {
   for (const [k, val] of Object.entries(item.vars || {})) {
     if (val && typeof val === 'object' && val.key) vars[k] = render(val, v);
     else if (val === '__support__') vars[k] = SUPPORT_NUMBER;
+    else if (val === '__sell_url__') vars[k] = `${PUBLIC_SITE}/sell-property`;
     else vars[k] = val;
   }
   const text = t(item.key, v, vars);
@@ -160,10 +161,16 @@ async function sendPlanList(knex, { phone, v }) {
 
 async function runBuyerSearch(knex, { phone, v, data, summary }) {
   const { findMatchingListings, formatSearchReply, logDeliveries } = buyerSearch();
-  const intent = { propertyType: data.type || null, area: data.locality || data.city || data.area || null, sizeText: data.size || null };
+  const types = Array.isArray(data.types) && data.types.length ? data.types : (data.type ? String(data.type).split(/\s*\/\s*/) : []);
+  // Budget is applied in the query (a max), so over-budget listings never
+  // take the few result slots (23 Oct bug: ₹2.7 crore shown for ₹50 lakh).
+  const budgetInr = data.budget_inr || require('../utils/visitorFlowParsers').parsePrice(data.budget_text)?.inr || null;
+  const intent = {
+    propertyTypes: types, propertyType: types[0] || null, area: data.locality || data.city || data.area || null, sizeText: data.size || null, budgetInr,
+  };
   let listings = await findMatchingListings(knex, intent);
   if (!listings.length && intent.area && data.city && data.locality) listings = await findMatchingListings(knex, { ...intent, area: data.city });
-  if (data.budget_inr) listings = listings.filter((l) => l.price == null || Number(l.price) <= data.budget_inr * 1.15);
+  if (budgetInr) listings = listings.filter((l) => l.price == null || Number(l.price) <= budgetInr * buyerSearch().BUDGET_MARGIN);
   await logDeliveries(knex, listings, phone, summary);
 
   await sendText(knex, phone, t('buyer_searching', v, { summary }), 'flow_buyer');

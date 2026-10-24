@@ -10,6 +10,11 @@ const { autoPublishIfReady } = require('./builderProfileController');
 const { provideValidationFeedback } = require('../services/addressValidation');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { haversineMeters } = require('../services/geoConsensusService');
+const { canAddNewListing } = require('../services/trialService');
+
+// Shown when a dealer whose trial ended (or whose payment is overdue) tries to
+// start or publish a NEW listing. Online payment only (no cash, 23 Oct).
+const LISTING_BLOCKED_BODY = '⛔ Nayi listing abhi band hai: free trial khatam ho gaya hai ya payment pending hai. Aapki purani listings live hain. Plan chunne aur online payment karne ke liye *plan* likhein, payment hote hi sab dobara chalu ho jayega.';
 
 const MAX_PHOTOS_WHATSAPP = 10;
 
@@ -201,6 +206,11 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
   // status guard (awaiting_approval lock, listing_id checks) still applies.
   const isApproval = (text) => forceApproval || isApprovalReply(text);
   const isNewListing = (text) => forceNewListing || isNewListingIntent(text);
+  // Trial date / payment re-checked here too (not only the can_add_listing
+  // flag, which a scheduled job flips later), so every caller is covered.
+  if (agentUser.can_add_listing !== false && !(await canAddNewListing(knex, agentUser))) {
+    agentUser = { ...agentUser, can_add_listing: false };
+  }
   try {
     // Peek (no lock) at whether this agent currently has a draft sitting in
     // awaiting_approval. If so, and this isn't a plain "yes", we need to
@@ -318,8 +328,18 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       // can_add_listing off). Checked before accumulated_text is touched at
       // all, so a blocked agent's message never silently starts a draft
       // that then can't go anywhere.
-      if (!agentUser.can_add_listing && !draft.listing_id) {
-        const blockedBody = '⛔ Nayi listing abhi band hai: free trial khatam ho gaya hai ya payment pending hai. Aapki purani listings live hain. Payment karke "payment" likhein aur receipt bhejein, sab dobara chalu ho jayega.';
+      // 23 Oct: publishing ("yes") a listing that is not live yet is also a
+      // NEW listing, so an ended trial blocks that too. Corrections to it and
+      // anything about already-live listings keep working.
+      let publishOfNewListing = false;
+      if (!agentUser.can_add_listing && draft.listing_id && isApproval(incomingText)) {
+        publishOfNewListing = Boolean(await trx('listings')
+          .where({ id: draft.listing_id })
+          .whereIn('status', ['awaiting_approval', 'pending'])
+          .first('id'));
+      }
+      if (!agentUser.can_add_listing && (!draft.listing_id || publishOfNewListing)) {
+        const blockedBody = LISTING_BLOCKED_BODY;
         await trx('agent_draft_messages').insert({
           draft_id: draft.id,
           direction: 'inbound',
@@ -746,7 +766,7 @@ async function handleAgentIntakePhoto({ knex, agentUser, mediaId, mediaMimeType,
  */
 async function holdPinOnDraft({ knex, agentUser, lat, lng, bspMessageId, res }) {
   if (!agentUser.can_add_listing) {
-    const blockedBody = '⛔ Nayi listing abhi band hai: free trial khatam ho gaya hai ya payment pending hai. Aapki purani listings live hain. Payment karke "payment" likhein aur receipt bhejein, sab dobara chalu ho jayega.';
+    const blockedBody = LISTING_BLOCKED_BODY;
     await enqueueAgentWhatsappSend({ tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: blockedBody });
     return res.status(200).json({ success: true, blocked: 'payment' });
   }

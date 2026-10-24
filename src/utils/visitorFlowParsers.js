@@ -7,6 +7,7 @@
 
 const { looksLikeSellerIntent } = require('./sellerIntent');
 const { looksLikeKnownQuestion } = require('./agentQuickIntent');
+const { formatInrShort } = require('./money');
 
 // ------------------------------------------------------------------ roles
 
@@ -141,6 +142,27 @@ function parsePropertyType(text, { allowMenuNumber = true } = {}) {
   return hit ? hit[1] : null;
 }
 
+/**
+ * Several property types in one answer ("1, 2, 3", "1 aur 3", "plot or flat").
+ * Returns a de-duplicated list in the order given, or [] when nothing is read.
+ * 23 Oct: a buyer who sent "1, 2, 3" got "samajh nahi aaya".
+ */
+function parsePropertyTypes(text, { allowMenuNumber = true } = {}) {
+  const t = String(text || '').trim();
+  if (!t) return [];
+  const out = [];
+  const add = (v) => { if (v && !out.includes(v)) out.push(v); };
+  const parts = t.split(/\s*(?:,|\/|&|\+|\band\b|\baur\b|\bor\b|\bya\b|\bte\b|ਅਤੇ|और|या)\s*|\s+/i).filter(Boolean);
+  for (const part of parts) {
+    const num = part.replace(/[\uFE0F\u20E3.)]/g, '');
+    if (allowMenuNumber && /^[1-5]$/.test(num)) { add(TYPE_MENU[num]); continue; }
+    const hit = TYPE_WORDS.find(([re]) => re.test(part));
+    if (hit) add(hit[1]);
+  }
+  if (!out.length) add(parsePropertyType(t, { allowMenuNumber }));
+  return out;
+}
+
 const SIZE_RE = /(\d+(?:[.,]\d+)?)\s*(gaj|gaz|gajj|marla|marle|kanal|kanaal|bigha|acre|sq\.?\s*ft|sqft|square\s*feet|sq\.?\s*y(?:ar)?d?s?|yards?|bhk|ਗਜ|ਮਰਲੇ|ਮਰਲਾ|ਕਨਾਲ|गज|मरला|कनाल)/i;
 
 /** "200 gaj", "10 marla", "3 BHK" from the text, or null. */
@@ -149,8 +171,8 @@ function parseSize(text) {
   return m ? `${m[1].replace(',', '.')} ${m[2].replace(/\s+/g, ' ').toLowerCase()}`.replace(/\bbhk\b/, 'BHK') : null;
 }
 
-const PRICE_RE = /(?:₹|rs\.?|inr)?\s*(\d+(?:[.,]\d+)?)\s*(crore|crores|cr|karod|lakh|lakhs|lac|lacs|k|thousand|हज़ार|लाख|करोड़|ਲੱਖ|ਕਰੋੜ)\b/i;
-const UNIT_INR = { crore: 1e7, crores: 1e7, cr: 1e7, karod: 1e7, 'करोड़': 1e7, 'ਕਰੋੜ': 1e7, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5, 'लाख': 1e5, 'ਲੱਖ': 1e5, k: 1e3, thousand: 1e3, 'हज़ार': 1e3 };
+const PRICE_RE = /(?:₹|rs\.?|inr)?\s*(\d+(?:[.,]\d+)?)\s*(crore|crores|cr|karod|lakh|lakhs|lac|lacs|lakh?s?|l|k|thousand|हज़ार|लाख|करोड़|ਲੱਖ|ਕਰੋੜ)(?![a-z])/i;
+const UNIT_INR = { crore: 1e7, crores: 1e7, cr: 1e7, karod: 1e7, 'करोड़': 1e7, 'ਕਰੋੜ': 1e7, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5, lakhs: 1e5, lak: 1e5, laks: 1e5, l: 1e5, 'लाख': 1e5, 'ਲੱਖ': 1e5, k: 1e3, thousand: 1e3, 'हज़ार': 1e3 };
 
 /** "80 lakh" / "1.5 crore" -> { text: '80 lakh', inr: 8000000 } or null. A bare big number is rupees. */
 function parsePrice(text) {
@@ -159,10 +181,13 @@ function parsePrice(text) {
   if (m) {
     const value = Number(m[1].replace(',', '.'));
     const unit = UNIT_INR[m[2].toLowerCase()] || UNIT_INR[m[2]];
-    if (Number.isFinite(value) && unit) return { text: `${m[1]} ${m[2].toLowerCase()}`, inr: Math.round(value * unit) };
+    if (Number.isFinite(value) && unit) {
+      const inr = Math.round(value * unit);
+      return { text: formatInrShort(inr) || `${m[1]} ${m[2].toLowerCase()}`, inr };
+    }
   }
   const bare = t.replace(/[,\s₹]/g, '').match(/^(?:rs\.?|inr)?(\d{6,10})$/i);
-  if (bare) return { text: `₹${Number(bare[1]).toLocaleString('en-IN')}`, inr: Number(bare[1]) };
+  if (bare) return { text: formatInrShort(Number(bare[1])) || `₹${Number(bare[1]).toLocaleString('en-IN')}`, inr: Number(bare[1]) };
   return null;
 }
 
@@ -204,4 +229,5 @@ module.exports = {
   splitLocation,
   looksLikeName,
   TYPE_MENU,
+  parsePropertyTypes,
 };

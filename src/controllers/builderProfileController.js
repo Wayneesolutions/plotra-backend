@@ -9,6 +9,15 @@ const redisConnection = {
 };
 const builderDueDiligenceQueue = new Queue('builder-due-diligence', { connection: redisConnection });
 
+// 23 Oct kill switch: an auto-researched builder rating (★7.0, "net loss")
+// went public without a human approving it, and it mixed up two different
+// "Orbit" companies (legal risk). Until a proper approval step exists the
+// public builder section stays OFF and nothing is auto-published. Set
+// BUILDER_PROFILE_PUBLIC=on (after the fix) to show it again; set
+// BUILDER_AUTO_PUBLISH=on only if research should go live without review.
+const builderProfilePublic = () => String(process.env.BUILDER_PROFILE_PUBLIC || '').toLowerCase() === 'on';
+const builderAutoPublish = () => String(process.env.BUILDER_AUTO_PUBLISH || '').toLowerCase() === 'on';
+
 function normalizeCompanyName(name) {
   return name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -210,6 +219,7 @@ function buildBuilderAutoLinkNote({ isNew, companyName, lang }) {
  * before research (with its required citations) has actually completed.
  */
 async function autoPublishIfReady(knex, { builderProfileId }) {
+  if (!builderAutoPublish()) return false; // human approval only (23 Oct)
   const profile = await knex('builder_profiles').where({ id: builderProfileId }).first();
   if (!profile || profile.moderation_status !== 'pending_review' || profile.research_status !== 'completed') {
     return false;
@@ -302,6 +312,12 @@ async function moderateBuilderProfile(req, res) {
 async function getPublicBuilderProfile(req, res) {
   const knex = req.app.get('db');
   const { slug } = req.params;
+
+  // Feature switched off (23 Oct): same "no builder profile" answer the page
+  // already handles, so nothing builder-related renders.
+  if (!builderProfilePublic()) {
+    return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No builder profile for this listing.' } });
+  }
 
   try {
     const listing = await knex('listings')

@@ -156,7 +156,8 @@ test('knowledge has the support number, upgrade steps and the two web forms', ()
   assert.match(PRODUCT, /Support number: /);
   assert.match(PRODUCT, /UPGRADING A PLAN/);
   assert.match(PRODUCT, /\/request-access/);
-  assert.match(RULES, /Aap dealer hain ya property owner\?/);
+  assert.match(RULES, /Kya aap property dealer\/agent hain\?/);
+  assert.doesNotMatch(RULES, /Aap dealer hain ya property owner/);
   assert.match(RULES, /request-access/);
   assert.match(RULES, /sell-property/);
 });

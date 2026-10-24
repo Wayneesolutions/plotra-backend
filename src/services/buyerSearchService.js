@@ -24,8 +24,11 @@
 //   their own listing link never calls this module, so it can never be
 //   logged/counted/charged as a marketplace-sourced lead.
 const axios = require('axios');
+const { formatInrShort } = require('../utils/money');
+const { looksLikeSellerIntent } = require('../utils/sellerIntent');
 
 const MAX_RESULTS = 8;
+const parsePrice = (...a) => require('../utils/visitorFlowParsers').parsePrice(...a);
 
 /**
  * Asks the model whether this text is an open-ended property search at
@@ -51,10 +54,12 @@ Respond with ONLY a JSON object, no other text:
   "is_property_search": boolean,
   "property_type": string or null,   // one of: Plot, House, Villa, Flat, Commercial, Agricultural Land, or null if unclear
   "area": string or null,            // locality/neighbourhood/road/city the buyer mentioned, in their own words
-  "size_text": string or null        // any size the buyer mentioned, verbatim (e.g. "200 gaz", "3 bhk", "10 marla")
+  "size_text": string or null,       // any size the buyer mentioned, verbatim (e.g. "200 gaz", "3 bhk", "10 marla")
+  "budget_text": string or null      // the buyer's budget / max price, verbatim (e.g. "50 lakh", "1.5 cr"), or null
 }
 
-If is_property_search is false, set the other three fields to null.`;
+Someone who wants to SELL their own property ("want to sell", "bechna hai", "vechni hai") is NOT a property search: set is_property_search to false.
+If is_property_search is false, set the other fields to null.`;
 
   try {
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
@@ -81,10 +86,12 @@ If is_property_search is false, set the other three fields to null.`;
       return null;
     }
 
+    const budget = parsed.budget_text ? parsePrice(parsed.budget_text) : parsePrice(incomingText);
     return {
       propertyType: parsed.property_type || null,
       area: parsed.area || null,
       sizeText: parsed.size_text || null,
+      budgetInr: budget?.inr || null,
     };
   } catch (err) {
     console.error('buyerSearchService: intent extraction failed (falling back to existing single-listing flow):', err.message);
@@ -150,8 +157,13 @@ function filterBySize(listings, sizeText) {
 async function findMatchingListings(knex, intent, { tenantId } = {}) {
   let query = knex('listings')
     .join('tenants', 'listings.tenant_id', 'tenants.id')
+    // Locality Master match (from the dealer's own address text): the most
+    // reliable area name to show, see displayArea().
+    .leftJoin('localities as loc', 'listings.locality_id', 'loc.id')
     .where('listings.status', 'active')
     .select(
+      'loc.name as locality_name',
+      'loc.city as locality_city',
       'listings.id',
       'listings.title',
       'listings.price',
@@ -163,6 +175,8 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
       'listings.public_slug',
       'listings.tenant_id'
     )
+    // Listings with a price first, "price on request" after them (23 Oct).
+    .orderByRaw('(listings.price IS NULL) ASC')
     .orderBy('listings.created_at', 'desc')
     // With a size to apply, over-fetch: most rows are filtered out in code.
     .limit(parsePlotSize(intent.sizeText) ? MAX_RESULTS * 12 : MAX_RESULTS);
@@ -174,8 +188,18 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
     query = query.where('listings.tenant_id', tenantId);
   }
 
-  if (intent.propertyType) {
-    query = query.whereRaw('LOWER(listings.property_type) = LOWER(?)', [intent.propertyType]);
+  // One type or several ("1, 2, 3" in the buyer flow). Kothi/house are
+  // stored as Villa or House, so asking for either finds both.
+  const types = expandTypes(intent.propertyTypes?.length ? intent.propertyTypes : (intent.propertyType ? [intent.propertyType] : []));
+  if (types.length) {
+    query = query.whereRaw(`LOWER(listings.property_type) IN (${types.map(() => '?').join(', ')})`, types);
+  }
+
+  // Budget is a MAX: a listing above it is never sent (23 Oct bug: a ₹2.7
+  // crore plot came back for a ₹50 lakh budget). Small margin for
+  // negotiation. "Price on request" listings are kept, after the priced ones.
+  if (intent.budgetInr) {
+    query = query.where((b) => b.whereNull('listings.price').orWhere('listings.price', '<=', Math.round(intent.budgetInr * BUDGET_MARGIN)));
   }
 
   if (intent.area) {
@@ -195,9 +219,74 @@ function buildPublicListingUrl(publicSlug) {
   return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
 }
 
+/** "₹50 lakh" / "₹2.7 crore" (not "₹50,00,000"); "Price on request" when unknown. */
 function formatPrice(price) {
-  if (price == null) return 'Price on request';
-  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(price);
+  return formatInrShort(price) || 'Price on request';
+}
+
+const BUDGET_MARGIN = 1.1;
+
+const TYPE_ALIASES = { villa: ['villa', 'house'], house: ['house', 'villa'], plot: ['plot'], flat: ['flat'], commercial: ['commercial'], 'agricultural land': ['agricultural land', 'plot'] };
+function expandTypes(list) {
+  const out = [];
+  for (const t of list) {
+    const k = String(t || '').trim().toLowerCase();
+    if (!k) continue;
+    for (const v of (TYPE_ALIASES[k] || [k])) if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+// Size units a listing can show. Anything else ("100 PLYORD SQ") is not shown
+// rather than sent as garbage (23 Oct).
+const DISPLAY_UNITS = [
+  [/^(?:gaj|gaz|gajj)$/i, 'gaj'],
+  [/^(?:sq\.?\s*y(?:ar)?ds?|sq\.?\s*yd|sqyds?|square\s*y(?:ar)?ds?|yards?|yds?)$/i, 'sq yd'],
+  [/^(?:sq\.?\s*f(?:ee)?t\.?|sqft|square\s*f(?:ee)?t|sft)$/i, 'sq ft'],
+  [/^(?:marla|marle|marlas)$/i, 'marla'],
+  [/^(?:kanal|kanaal|kanals)$/i, 'kanal'],
+  [/^(?:acres?|killa|kille)$/i, 'acre'],
+  [/^(?:bigha|bighas)$/i, 'bigha'],
+  [/^bhk$/i, 'BHK'],
+];
+const DISPLAY_SIZE_RE = /(\d+(?:[.,]\d+)?)\s*(gaj|gaz|gajj|sq\.?\s*y(?:ar)?ds?|sq\.?\s*yd|sqyds?|square\s*y(?:ar)?ds?|yards?|yds?|sq\.?\s*f(?:ee)?t\.?|sqft|square\s*f(?:ee)?t|sft|marlas?|marle|kanals?|kanaal|acres?|killa|kille|bighas?|bhk)(?![a-z])/i;
+
+/** Pure: "250 Sq Yards" -> "250 sq yd", "10 Marla" -> "10 marla", "100 PLYORD SQ" -> null. */
+function displaySize(plotArea) {
+  const m = String(plotArea || '').match(DISPLAY_SIZE_RE);
+  if (!m) return null;
+  const unit = DISPLAY_UNITS.find(([re]) => re.test(m[2].replace(/\s+/g, ' ').trim()));
+  if (!unit) return null;
+  const num = Number(m[1].replace(',', '.'));
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return `${num.toLocaleString('en-IN')} ${unit[1]}`;
+}
+
+const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9\u0900-\u0a7f]+/g, ' ').trim();
+/** The place named in a title like "Plot in Dasmesh Nagar" / "Kothi at Model Town, Ludhiana". */
+function titleArea(title) {
+  const m = String(title || '').match(/\b(?:in|at|near|on)\s+(.+)$/i);
+  return m ? m[1].replace(/[.!]+$/, '').trim() : null;
+}
+
+/**
+ * Pure: the area line for one result. The Locality Master match (from the
+ * dealer's own address) wins; the geocoded general_area is used only when it
+ * agrees with what the dealer wrote, so the title and the area never
+ * contradict each other (23 Oct bug: "Plot in Dasmesh Nagar" showed
+ * "Industrial Area-B"). Never the exact address.
+ */
+function displayArea(l) {
+  if (l.locality_name) return [l.locality_name, l.locality_city].filter(Boolean).join(', ');
+  const fromTitle = titleArea(l.title);
+  const general = l.general_area || null;
+  if (general && fromTitle) {
+    const g = norm(general.split(',')[0]);
+    const tt = norm(fromTitle);
+    if (g && (tt.includes(g) || g.includes(tt.split(',')[0]))) return general;
+    return fromTitle;
+  }
+  return general || fromTitle || 'Area on request';
 }
 
 /**
@@ -217,13 +306,21 @@ function formatSearchReply(listings, intent) {
     ? 'Found 1 matching property:'
     : `Found ${listings.length} matching properties:`;
 
-  const lines = listings.map((l, i) => {
-    const area = l.general_area || 'Area on request';
-    const size = l.plot_area ? ` · ${l.plot_area}` : '';
-    return `${i + 1}. *${l.title}* — ${formatPrice(l.price)}${size}\n📍 ${area}\n${buildPublicListingUrl(l.public_slug)}`;
-  });
+  // Priced listings first; "price on request" ones in their own block after.
+  const priced = listings.filter((l) => l.price != null);
+  const onRequest = listings.filter((l) => l.price == null);
+  let n = 0;
+  const line = (l) => {
+    n += 1;
+    const size = displaySize(l.plot_area);
+    const price = l.price != null ? ` — ${formatPrice(l.price)}` : '';
+    return `${n}. *${l.title}*${price}${size ? ` · ${size}` : ''}\n📍 ${displayArea(l)}\n${buildPublicListingUrl(l.public_slug)}`;
+  };
+  const blocks = [];
+  if (priced.length) blocks.push(priced.map(line).join('\n\n'));
+  if (onRequest.length) blocks.push(`${priced.length ? '*Price on request:*\n\n' : '*Price on request* (ask the dealer):\n\n'}${onRequest.map(line).join('\n\n')}`);
 
-  return `${header}\n\n${lines.join('\n\n')}\n\nTap a link to see more and connect directly with the dealer.`;
+  return `${header}\n\n${blocks.join('\n\n')}\n\nTap a link to see more and connect directly with the dealer.`;
 }
 
 /**
@@ -257,6 +354,9 @@ async function logDeliveries(knex, listings, buyerPhone, matchedQuery) {
  * any) already logged to marketplace_lead_deliveries.
  */
 async function handleBuyerSearch(knex, { incomingText, buyerPhone }) {
+  // Someone selling is never searched for (23 Oct): the caller sends them
+  // the sell-property link instead.
+  if (looksLikeSellerIntent(incomingText)) return null;
   const intent = await extractBuyerIntent(incomingText);
   if (!intent) return null;
 
@@ -266,4 +366,7 @@ async function handleBuyerSearch(knex, { incomingText, buyerPhone }) {
   return { replyText: formatSearchReply(listings, intent), matchCount: listings.length };
 }
 
-module.exports = { parsePlotSize, sizeMatches, filterBySize, handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl };
+module.exports = {
+  parsePlotSize, sizeMatches, filterBySize, handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl,
+  displaySize, displayArea, expandTypes, BUDGET_MARGIN,
+};
