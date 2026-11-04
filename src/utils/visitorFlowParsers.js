@@ -45,6 +45,10 @@ const BUYER_PATTERNS = [
   /\b(?:main|mai|mein|me|i\s*am|i'm)\s+(?:ek\s+)?(?:a\s+)?buyer\b/i,
   /\bbuyer\s+(?:hoon|hun|hu)\b/i,
   /^\s*(?:search|buy)\s*[.!?]*\s*$/i,
+  // Nov 2026: someone looking to TAKE a place on rent/lease is a buyer
+  // (tenant) — "flat kiraye pe chahiye", "need shop on rent", "rent pe lena hai".
+  /\b(?:rent|kiraye?|kiraya|lease)\s*(?:pe|par|pr|on|te)?\s*(?:chahiye|chaiye|chahida|lena|leni|lene|chahta|chahti)\b/i,
+  /\b(?:need|want|looking\s+for|searching)\b[^.?!]{0,40}\b(?:on|for)\s+(?:rent|lease)\b/i,
 ];
 
 function isExplicitDealerIntent(text) {

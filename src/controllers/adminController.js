@@ -831,6 +831,7 @@ async function listAllListings(req, res) {
     }
     if (status) baseQuery.where('listings.status', status);
     if (property_type) baseQuery.where('listings.property_type', property_type);
+    if (['sale', 'rent', 'lease'].includes(req.query.listing_type)) baseQuery.where('listings.listing_type', req.query.listing_type);
     if (tenant_id) baseQuery.where('listings.tenant_id', tenant_id);
 
     const totalRow = await baseQuery.clone().count('listings.id as count').first();
@@ -844,6 +845,10 @@ async function listAllListings(req, res) {
         'listings.raw_address',
         'listings.price',
         'listings.property_type',
+        'listings.listing_type',
+        'listings.monthly_rent',
+        'listings.security_deposit',
+        'listings.property_subtype',
         'listings.status',
         'listings.public_slug',
         'listings.created_at',

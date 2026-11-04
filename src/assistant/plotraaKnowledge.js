@@ -20,11 +20,12 @@ ABOUT PLOTRAA
 - Plotraa (website ${PUBLIC_SITE}) is a WhatsApp-first property listing and lead platform for real estate dealers/agents in India. Tagline: "Ek Text. Ek Listing."
 - Dealers list properties by simply sending a WhatsApp message (text or voice note) to the Plotraa number ${PLATFORM_WHATSAPP}. No app to download, no forms.
 - Each listing gets its own professional web page with photos, map/street view, nearby landmarks and a WhatsApp "contact" button. The dealer shares that link anywhere.
-- Buyers can search properties on WhatsApp (just type what they need, e.g. "Dugri mein 200 gaj plot"), on the website, or by calling the AI calling number. Matching listings are sent to them with links.
+- Buyers and tenants can search properties on WhatsApp (just type what they need, e.g. "Dugri mein 200 gaj plot" or "Model Town mein 2bhk flat kiraye pe 20k tak"), on the website, or by calling the AI calling number. Matching listings are sent to them with links. Sale, rent and lease listings are all searchable; rent searches use the monthly rent budget.
 
 HOW A DEALER LISTS A PROPERTY (WhatsApp)
-1. Send the details in one message or several: address/area, type (plot, flat, kothi/house, commercial), size, price. Text or a voice note in Punjabi/Hindi/English all work.
-2. The bot asks for anything missing (for example the address or the type).
+0. The FIRST question for every new listing is: Sell, Rent or Lease? (three buttons, or reply 1 / 2 / 3). Rent = flats, kothis, independent floors, rooms/PG, shops, offices on monthly rent. Lease = commercial/long-term lease (shop, showroom, SCO, office, godown, factory, land). If the first message already says "for rent" / "kiraye pe" / "on lease", that answers it.
+1. Send the details in one message or several: address/area, type (plot, flat, kothi/house, commercial), size, price (for sale) or monthly rent (for rent/lease). Text or a voice note in Punjabi/Hindi/English all work.
+2. The bot asks for anything missing (for example the address or the type). Rent and lease listings must have the monthly rent. For rent/lease the bot also asks once (optional, "skip" works) for deposit, furnishing, who it is for (family/bachelors/company), available from / lease term, lock-in, yearly increase.
 3. The bot asks for the property's exact location: tap + / attachment -> Location -> "Send your current location" when standing at the property, or move the map and drop the pin on the exact house/plot when elsewhere. If they can't, they reply "pin nahi" and fix the pin later on the preview.
 4. They get a PREVIEW link. On it they can check details and drag the map pin to the exact spot and tap Save.
 5. They reply "haan" / "yes" to publish. The listing goes live and they get the final link.
@@ -47,7 +48,7 @@ PRIVACY ON LISTING PAGES
 - One property can be listed by only one dealer: if someone else tries to list the same address they're told it's already listed.
 
 AFTER A LISTING IS LIVE
-- Every 30 days Plotraa asks the dealer on WhatsApp whether the property is still for sale or sold. Sold listings are removed.
+- Every 30 days Plotraa asks the dealer on WhatsApp whether the property is still for sale or sold (for rent/lease listings: still available or rented/leased out). Sold or rented-out listings are removed.
 - Buyers who are interested contact the dealer through the listing's WhatsApp button or the dealer's number.
 
 LEADS

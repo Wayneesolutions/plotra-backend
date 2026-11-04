@@ -20,7 +20,9 @@ function sellerLeadDetails(lead) {
     [lead.locality, lead.city].filter(Boolean).join(', ') || null,
     lead.expected_price ? `expected ${lead.expected_price}` : null,
   ].filter(Boolean);
-  const text = parts.length ? `Owner selling: ${parts.join(' · ')}` : 'Owner wants to sell a property';
+  const verb = lead.listing_type === 'rent' ? 'renting out' : lead.listing_type === 'lease' ? 'leasing out' : 'selling';
+  const want = lead.listing_type === 'rent' ? 'rent out' : lead.listing_type === 'lease' ? 'lease out' : 'sell';
+  const text = parts.length ? `Owner ${verb}: ${parts.join(' · ')}` : `Owner wants to ${want} a property`;
   return lead.description ? `${text}. ${String(lead.description).slice(0, 300)}` : text;
 }
 
@@ -44,8 +46,8 @@ function clean(value, max) {
 
 /**
  * POST /api/v1/public/sell-property
- * Body: { name, phone, email?, property_type?, city?, locality?, address?,
- *         expected_price?, size_text?, description? }
+ * Body: { name, phone, email?, property_type?, listing_type? ('sale'|'rent'|'lease'),
+ *         city?, locality?, address?, expected_price?, size_text?, description? }
  */
 async function submitSellerLead(req, res) {
   const knex = req.app.get('db');
@@ -78,6 +80,7 @@ async function submitSellerLead(req, res) {
       phone,
       email,
       property_type: clean(body.property_type, 50),
+      listing_type: ['rent', 'lease'].includes(body.listing_type) ? body.listing_type : 'sale',
       city: clean(body.city, 100),
       locality: clean(body.locality, 255),
       address: clean(body.address, 1000),
@@ -88,7 +91,9 @@ async function submitSellerLead(req, res) {
 
     return res.status(201).json({
       success: true,
-      message: 'Thanks! Our team will contact you shortly about selling your property.'
+      message: body.listing_type === 'rent' || body.listing_type === 'lease'
+        ? 'Thanks! Our team will contact you shortly about renting out your property.'
+        : 'Thanks! Our team will contact you shortly about selling your property.'
     });
   } catch (error) {
     console.error('Failed to submit seller lead:', error);

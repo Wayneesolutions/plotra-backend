@@ -32,6 +32,14 @@ const { findMatchingListings, formatSearchReply, logDeliveries } = require('./bu
 const PROPERTY_TYPES = ['Plot', 'House', 'Villa', 'Flat', 'Commercial', 'Agricultural Land'];
 const INTENTS = ['buy', 'rent', 'sell', 'other'];
 
+// A caller who wants to rent gets rental listings, a buyer sale listings
+// (listings.listing_type, Nov 2026); anything else isn't filtered.
+function listingTypeForIntent(intent) {
+  if (intent === 'rent') return 'rent';
+  if (intent === 'buy') return 'sale';
+  return null;
+}
+
 // A call older than this when it is first seen gets recorded but never
 // triggers a WhatsApp message. Without it, the first deploy would walk
 // WayneRing's last 50 inbound calls and message people who phoned days ago.
@@ -353,7 +361,7 @@ async function processCallEnquiry(knex, { call, tenantId = null, leadId = null }
   // listing on the platform — same rule buyerSearchService applies.
   const searchable = Boolean(extraction.propertyType || extraction.area);
   const listings = searchable
-    ? await findMatchingListings(knex, { propertyType: extraction.propertyType, area: extraction.area }, { tenantId })
+    ? await findMatchingListings(knex, { listingType: listingTypeForIntent(extraction.intent), propertyType: extraction.propertyType, area: extraction.area }, { tenantId })
     : [];
 
   let whatsappStatus;
@@ -479,7 +487,7 @@ async function handleCallEnquiryReply(knex, { phone, incomingText, buttonPayload
 
   // Re-run the match now rather than replaying the ids stored at call time:
   // a listing sold or approved in between should be reflected.
-  const intent = { propertyType: enquiry.property_type, area: enquiry.area, sizeText: enquiry.size_text };
+  const intent = { listingType: listingTypeForIntent(enquiry.intent), propertyType: enquiry.property_type, area: enquiry.area, sizeText: enquiry.size_text };
   const listings = await findMatchingListings(knex, intent, { tenantId: enquiry.tenant_id });
 
   // Claim it: only the request that flips template_sent -> listings_sent

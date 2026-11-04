@@ -4,6 +4,12 @@
 // instead of two copies drifting apart.
 const axios = require('axios');
 
+const { normalizeListingType } = require('../utils/listingTypes');
+
+// Sale-listing defaults, kept for callers that don't know the listing type.
+// The listing-type-aware list/questions live in utils/listingTypes.js
+// (requiredFieldsFor / nextQuestion) — the WhatsApp and web-chat flows use
+// those, so the first question is always "Sell, Rent or Lease?".
 const REQUIRED_FIELDS = ['title', 'raw_address', 'property_type'];
 const FIELD_QUESTIONS = {
   raw_address: "Property ka address kya hai? (e.g. 'Plot No. 142-B, Ranjit Avenue, Amritsar' ya 'SCO 145, Sector 34-A, Chandigarh')",
@@ -11,6 +17,11 @@ const FIELD_QUESTIONS = {
   property_type: 'Property type kya hai — Plot, Flat, Villa, Commercial?',
   title: 'Ek chhota sa title de dijiye is listing ke liye.',
 };
+
+const RENTAL_KEYS = [
+  'listing_type', 'monthly_rent', 'security_deposit', 'maintenance_charges', 'furnishing',
+  'preferred_tenant', 'available_from', 'lease_term', 'lock_in', 'rent_escalation_percent', 'property_subtype',
+];
 
 /**
  * GPT-4o-mini extraction. Strict JSON, low temperature (structured
@@ -31,16 +42,31 @@ const FIELD_QUESTIONS = {
  *   fragment and (correctly, given only that context) extracts nothing,
  *   which is what caused the identical-reminder loop dealers hit.
  */
-async function extractListingFields(accumulatedText, correctionContext) {
+async function extractListingFields(accumulatedText, correctionContext, { listingType } = {}) {
+  const knownType = normalizeListingType(listingType);
+  const typeSection = knownType
+    ? `\n\nLISTING TYPE IS ALREADY KNOWN: the dealer already said this property is for ${knownType.toUpperCase()}. Set listing_type to "${knownType}".${knownType === 'sale' ? '' : ' Any per-month amount (or a bare amount like "18k", "25000", "1.5 lakh") is monthly_rent, NOT price — leave price null unless a separate sale price is explicitly stated.'}`
+    : '';
   const correctionSection = correctionContext
     ? `\n\nCORRECTION MODE: the message below is a correction/reply to a listing that is already sitting with these current values: ${JSON.stringify(correctionContext)}. The person is telling you what's wrong or giving a replacement value — they are NOT describing a brand-new property from scratch, so don't expect a full sentence. Read the message as "replace field X with this" even if it's just a bare word or two (e.g. a lone city name means "replace raw_address with this city"). Only extract the field(s) actually being corrected; everything else stays null (unchanged). If the message is pure commentary with no replacement value at all (e.g. "it's wrong", "how do I fix this"), return every field null exactly as the normal rules say.`
     : '';
 
   const systemPrompt = `You extract real-estate listing fields from a Punjab/India property agent's freeform message (often Hinglish/Punjabi-English mixed, using local shorthand).${correctionSection}
 
-Return ONLY a JSON object with exactly these keys: title, raw_address, price, plot_area, property_type, description, pincode, building_name, has_house_number.
+${typeSection}
+
+Return ONLY a JSON object with exactly these keys: title, raw_address, price, plot_area, property_type, description, pincode, building_name, has_house_number, listing_type, monthly_rent, security_deposit, maintenance_charges, furnishing, preferred_tenant, available_from, lease_term, lock_in, rent_escalation_percent, property_subtype.
 
 Rules:
+- listing_type: "sale", "rent" or "lease". "for sale"/"sell"/"bechna"/"vechna" -> sale. "for rent"/"to let"/"kiraye pe"/"kiraya"/"bhada"/a per-month amount ("18k per month", "25000/month", "pm") -> rent. "lease"/"on lease"/"pagdi"/a lease term in years -> lease. null if the text doesn't say (never assume sale).
+- monthly_rent: for rent/lease only — the per-month rent in rupees as a plain number ("18k" -> 18000, "1.5 lakh per month" -> 150000). null for a sale listing. Never put a monthly rent in price.
+- security_deposit: rupees as a plain number. If given in months of rent ("2 months deposit") and monthly_rent is known, multiply; otherwise null and keep the phrase in description.
+- maintenance_charges: monthly maintenance in rupees, plain number, or null.
+- furnishing: "unfurnished", "semi-furnished" or "furnished", or null.
+- preferred_tenant: "family", "bachelors", "company" or "any", or null.
+- available_from: when it's available, verbatim and short ("immediately", "1 Dec", "next month"), or null.
+- lease_term: verbatim and short ("9 years", "3+3+3"), or null. lock_in: verbatim ("3 years"), or null. rent_escalation_percent: yearly increase as a number (5 for "5% yearly"), or null.
+- property_subtype: the specific kind, one of "Independent House", "Independent Floor", "Flat", "Room", "PG", "Shop", "Showroom", "SCO", "Office", "Warehouse", "Factory", "Land", "Plot", "Other" — or null if not clear. ("kothi"/"house" -> Independent House, "floor"/"upper floor"/"ground floor portion" -> Independent Floor, "godown" -> Warehouse, "booth" -> Shop.) property_type still gets the broad bucket: Room/PG/Independent Floor -> Flat, Independent House -> Villa, Shop/Showroom/SCO/Office/Warehouse/Factory -> Commercial, Land/Plot -> Plot.
 - has_house_number: true ONLY when the address itself names a specific unit — a house/plot/flat/shop number ("Plot No. 45", "H.No. 74", "Flat 302", "SCO 145", a bare leading number like "45, Model Town Extn"). false for a locality/sector/block number alone ("Sector 45 Mohali", "Phase 2 Dugri" — these identify an AREA, not a specific unit within it) and for a named building/mall/hotel with no unit number ("DLF Chandigarh One", "Elante Mall", "backside Keys Hotel"). In normal (non-correction) mode this is never null — always true or false, since "no number was given" is itself the answer. In CORRECTION MODE only, use null here too when the correction doesn't touch the address at all (same "stays null = unchanged" rule as every other field there).
 - Use null for any field not actually stated in the text — never guess or invent a value, EXCEPT title (see below).
 - price: convert Indian shorthand to a plain number in rupees. "55 lakh" -> 5500000, "1.2 crore" -> 12000000, "80k" -> 80000.
@@ -75,7 +101,15 @@ Input: "Plot No. 142-B, Ranjit Avenue, Amritsar, 60 lakh"
 Output: {"title":"Plot in Ranjit Avenue","raw_address":"Plot No. 142-B, Ranjit Avenue, Amritsar","price":6000000,"plot_area":null,"property_type":"Plot","description":null,"pincode":null,"building_name":null,"has_house_number":true}
 
 Input: "H.No 74, Guru Nanak Nagar, Ludhiana, 3BHK"
-Output: {"title":"3BHK House in Guru Nanak Nagar","raw_address":"H.No 74, Guru Nanak Nagar, Ludhiana","price":null,"plot_area":null,"property_type":"Villa","description":"3BHK","pincode":null,"building_name":null,"has_house_number":true}`;
+Output: {"title":"3BHK House in Guru Nanak Nagar","raw_address":"H.No 74, Guru Nanak Nagar, Ludhiana","price":null,"plot_area":null,"property_type":"Villa","description":"3BHK","pincode":null,"building_name":null,"has_house_number":true,"listing_type":null}
+
+Input: "2bhk flat for rent in Hero Homes Ludhiana 18k per month, deposit 36k, semi furnished, family only"
+Output: {"title":"2BHK Flat for Rent in Hero Homes","raw_address":"Ludhiana","price":null,"plot_area":null,"property_type":"Flat","description":"2BHK","pincode":null,"building_name":"Hero Homes","has_house_number":false,"listing_type":"rent","monthly_rent":18000,"security_deposit":36000,"maintenance_charges":null,"furnishing":"semi-furnished","preferred_tenant":"family","available_from":null,"lease_term":null,"lock_in":null,"rent_escalation_percent":null,"property_subtype":"Flat"}
+
+Input: "SCO 22 Sector 17 Chandigarh on lease 2.5 lakh monthly, 9 saal, 3 saal lock in, 5% increase"
+Output: {"title":"SCO for Lease in Sector 17 Chandigarh","raw_address":"SCO 22, Sector 17, Chandigarh","price":null,"plot_area":null,"property_type":"Commercial","description":null,"pincode":null,"building_name":null,"has_house_number":true,"listing_type":"lease","monthly_rent":250000,"security_deposit":null,"maintenance_charges":null,"furnishing":null,"preferred_tenant":null,"available_from":null,"lease_term":"9 years","lock_in":"3 years","rent_escalation_percent":5,"property_subtype":"SCO"}
+
+(Every output must contain ALL the keys listed above; use null for any not stated. The two examples above that omit rental keys are shortened — the real output still includes them as null.)`;
 
   const response = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o-mini',
@@ -105,7 +139,24 @@ Output: {"title":"3BHK House in Guru Nanak Nagar","raw_address":"H.No 74, Guru N
     parsed.raw_address = parsed.building_name;
   }
 
+  for (const k of RENTAL_KEYS) if (!(k in parsed)) parsed[k] = null;
+  parsed.listing_type = normalizeListingType(parsed.listing_type) || (correctionContext ? null : knownType);
+  // A sale listing never carries rent fields; a rental never a sale price
+  // the model copied from the monthly amount.
+  if (parsed.listing_type === 'sale' || (!parsed.listing_type && knownType === 'sale')) {
+    parsed.monthly_rent = null;
+  } else if (parsed.listing_type || knownType) {
+    if (parsed.monthly_rent != null && Number(parsed.price) === Number(parsed.monthly_rent)) {
+      parsed.price = null;
+    } else if (parsed.monthly_rent == null && parsed.price != null) {
+      // On a rental the only amount that matters is the rent: "price 20k"
+      // on a rent listing means the monthly rent.
+      parsed.monthly_rent = parsed.price;
+      parsed.price = null;
+    }
+  }
+
   return parsed;
 }
 
-module.exports = { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS };
+module.exports = { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS, RENTAL_KEYS };

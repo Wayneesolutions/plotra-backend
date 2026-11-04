@@ -82,6 +82,7 @@ function render(item, v) {
     if (val && typeof val === 'object' && val.key) vars[k] = render(val, v);
     else if (val === '__support__') vars[k] = SUPPORT_NUMBER;
     else if (val === '__sell_url__') vars[k] = `${PUBLIC_SITE}/sell-property`;
+    else if (val === '__sell_url__rent' || val === '__sell_url__lease') vars[k] = `${PUBLIC_SITE}/sell-property?type=${val.slice('__sell_url__'.length)}`;
     else vars[k] = val;
   }
   const text = t(item.key, v, vars);
@@ -166,11 +167,15 @@ async function runBuyerSearch(knex, { phone, v, data, summary }) {
   // take the few result slots (23 Oct bug: ₹2.7 crore shown for ₹50 lakh).
   const budgetInr = data.budget_inr || require('../utils/visitorFlowParsers').parsePrice(data.budget_text)?.inr || null;
   const intent = {
+    // Buy ('sale') / rent / lease from the first buyer question.
+    listingType: data.purpose || null,
     propertyTypes: types, propertyType: types[0] || null, area: data.locality || data.city || data.area || null, sizeText: data.size || null, budgetInr,
   };
   let listings = await findMatchingListings(knex, intent);
   if (!listings.length && intent.area && data.city && data.locality) listings = await findMatchingListings(knex, { ...intent, area: data.city });
-  if (budgetInr) listings = listings.filter((l) => l.price == null || Number(l.price) <= budgetInr * buyerSearch().BUDGET_MARGIN);
+  // Budget vs the sale price, or vs the monthly rent for a rental.
+  const { listingAmount } = buyerSearch();
+  if (budgetInr) listings = listings.filter((l) => listingAmount(l) == null || listingAmount(l) <= budgetInr * buyerSearch().BUDGET_MARGIN);
   await logDeliveries(knex, listings, phone, summary);
 
   await sendText(knex, phone, t('buyer_searching', v, { summary }), 'flow_buyer');

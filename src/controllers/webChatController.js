@@ -9,10 +9,20 @@
 // See BACKEND_API_SPEC.md for the frontend contract this implements.
 const IORedis = require('ioredis');
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
-const { extractListingFields, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
+const { extractListingFields } = require('../services/listingExtractionService');
 const { recordImplicitApprovalIfUncorrected } = require('../services/resolvedLocalityService');
 const { isApprovalReply } = require('../utils/agentReplyIntent');
-const { detectReplyLanguage, FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
+const { detectReplyLanguage } = require('../utils/replyLanguage');
+const {
+  parseListingType, isBareListingTypeChoice, missingFields, nextQuestion, detailsQuestion,
+  rentalColumns, rentalColumnsNonNull, formatListingPrice, listingTypeLabel, LISTING_TYPES,
+} = require('../utils/listingTypes');
+
+// Web widget quick-reply chips for the first question (same three choices
+// as the WhatsApp buttons).
+function listingTypeQuickReplies(lang) {
+  return LISTING_TYPES.map((t, i) => ({ label: `${i + 1}. ${listingTypeLabel(t, lang === 'en' ? 'en' : 'hi')}`, value: t }));
+}
 const { uploadToS3 } = require('../services/s3Service');
 const { normalizeWebChatCode } = require('../utils/webChatCode');
 const {
@@ -50,18 +60,10 @@ async function autoLinkBuilderProfile({ knex, tenantId, listingId, propertyType,
 // single number that's safe to keep in sync by hand if it ever changes.
 const MAX_PHOTOS_WEB = 10;
 
-// Price deliberately left out of what's required for web chat — some
-// dealers don't want a public price ("price on request" listings are
-// common). WhatsApp's own required-fields list (listingExtractionService.js)
-// is now optional too (see that file) — this array stays web-chat-specific
-// only because photo upload and a couple of other web-only behaviors are
-// tied to this exact list elsewhere in this file, not because WhatsApp
-// still differs on price.
-const REQUIRED_FIELDS_WEB = ['title', 'raw_address', 'property_type'];
-
-function fieldQuestionsFor(lang) {
-  return lang === 'en' ? FIELD_QUESTIONS_EN : FIELD_QUESTIONS_HI;
-}
+// Required fields + questions come from utils/listingTypes.js
+// (missingFields / nextQuestion): listing type first, then title, address,
+// property type, and the monthly rent for rent/lease. Price stays optional
+// ("price on request" listings are common).
 
 function buildPreviewLink(publicSlug) {
   return `${process.env.PUBLIC_APP_URL || 'http://localhost:3000'}/p/${publicSlug}`;
@@ -200,7 +202,8 @@ function listingSummary(listing, publicSlug, published) {
   return {
     title: listing.title || null,
     address: listing.raw_address || listing.address || null,
-    price: formatPrice(listing.price),
+    price: formatListingPrice(listing) || formatPrice(listing.price),
+    listingType: listing.listing_type || 'sale',
     plotArea: listing.plot_area || listing.plotArea || null,
     propertyType: listing.property_type || listing.propertyType || null,
     link: publicSlug ? buildPreviewLink(publicSlug) : null,
@@ -302,7 +305,9 @@ async function handleWebChatMessage(req, res) {
         });
       }
 
-      const extracted = await extractListingFields(message.trim());
+      // The listing's own type tells the model a bare "20k" here is the
+      // monthly rent on a rental, not a sale price.
+      const extracted = await extractListingFields(message.trim(), undefined, { listingType: listing.listing_type });
 
       // While the listing is still an unpublished draft (awaitingApproval),
       // ANY follow-up message is an edit to *this* listing — a realtor
@@ -328,6 +333,9 @@ async function handleWebChatMessage(req, res) {
         // != null, not truthy — has_house_number is a boolean, and `false`
         // is a real, meaningful value here (not "nothing to apply").
         if (extracted.has_house_number != null) patch.has_house_number = extracted.has_house_number;
+        // Rent/lease details ("rent 20k", "deposit 40k", "semi furnished").
+        Object.assign(patch, rentalColumnsNonNull(extracted));
+        if (patch.listing_type === 'sale' && listing.listing_type !== 'sale') patch.monthly_rent = null;
 
         // Neither the address nor the pincode were ever in this patch
         // before — meaning even a same-property, GPT-confirmed correction
@@ -406,19 +414,51 @@ async function handleWebChatMessage(req, res) {
       session.listingId = null;
       session.awaitingApproval = false;
       session.accumulatedText = '';
+      session.listingType = null;
+      session.detailsAsked = false;
     }
 
-    session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim().slice(-MAX_ACCUMULATED_CHARS);
-    const extracted = await extractListingFields(session.accumulatedText);
-    const missing = REQUIRED_FIELDS_WEB.filter((f) => !extracted[f]);
+    // First question of every new listing: Sell, Rent or Lease? A bare
+    // choice ("2", "rent") answers it and isn't added to the text the
+    // model reads; a type named inside a property message counts too.
+    if (!session.listingType) {
+      const chosen = parseListingType(message.trim(), { allowNumber: !!session.awaitingListingType });
+      if (chosen) session.listingType = chosen;
+    }
+    const bareChoice = session.awaitingListingType && isBareListingTypeChoice(message.trim());
+    if (!bareChoice) {
+      session.accumulatedText = (session.accumulatedText + ' ' + message.trim()).trim().slice(-MAX_ACCUMULATED_CHARS);
+    }
+    const extracted = session.accumulatedText
+      ? await extractListingFields(session.accumulatedText, undefined, { listingType: session.listingType })
+      : { title: null, raw_address: null, property_type: null };
+    if (!session.listingType && extracted.listing_type) session.listingType = extracted.listing_type;
+    extracted.listing_type = session.listingType || null;
+    const missing = missingFields(session.listingType, extracted);
 
     if (missing.length > 0) {
+      session.awaitingListingType = missing.includes('listing_type');
       await saveSession(sessionId, session);
-      const questions = fieldQuestionsFor(lang);
+      const question = nextQuestion(missing, session.listingType, lang);
       return res.status(200).json({
-        reply: missing.map((f) => questions[f]).join(' '),
+        reply: session.awaitingListingType
+          ? (lang === 'en' ? 'Is this property for sale, rent or lease? Reply 1 (Sell), 2 (Rent) or 3 (Lease).' : 'Yeh property kis liye hai? 1 (Sell), 2 (Rent) ya 3 (Lease) likhein.')
+          : question.body,
+        quick_replies: session.awaitingListingType ? listingTypeQuickReplies(lang) : undefined,
         listing: null,
       });
+    }
+    session.awaitingListingType = false;
+
+    // Rent / lease: one optional details question (deposit, furnishing...),
+    // asked once — whatever comes back, the listing is created next.
+    if (!session.detailsAsked) {
+      const detailsBody = detailsQuestion(session.listingType, extracted, lang);
+      if (detailsBody) {
+        session.detailsAsked = true;
+        await saveSession(sessionId, session);
+        return res.status(200).json({ reply: detailsBody, listing: null });
+      }
     }
 
     const newListing = await createListingRecord(knex, {
@@ -434,6 +474,7 @@ async function handleWebChatMessage(req, res) {
       pincode: extracted.pincode,
       buildingName: extracted.building_name,
       hasHouseNumber: extracted.has_house_number,
+      rental: rentalColumns(extracted),
     });
 
     session.listingId = newListing.id;

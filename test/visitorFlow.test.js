@@ -116,9 +116,18 @@ test('restating the role in the middle ("main dealer hoon" at the name step) is 
   assert.strictEqual(r.state.data.name, undefined);
 });
 
-test('buyer flow asks budget, area, type, size, then searches', () => {
+test('buyer flow asks purpose, budget, area, type, size, then searches', () => {
+  const { trace } = run(['hi', '1', '1', '50 lakh', 'Dugri, Ludhiana', '1', '200 gaj']);
+  assert.deepStrictEqual(trace.map((x) => x.step), ['role', 'purpose', 'budget', 'area', 'type', 'size', 'done']);
+  const search = trace[6].out.find((o) => o.name === 'buyer_search');
+  assert.strictEqual(search.data.purpose, 'sale');
+  assert.strictEqual(search.data.type, 'Plot');
+  assert.strictEqual(search.data.budget_inr, 5000000);
+});
+
+test('Nov 2026: a budget given at the purpose question answers both (old-style "50 lakh" reply)', () => {
   const { trace } = run(['hi', '1', '50 lakh', 'Dugri, Ludhiana', '1', '200 gaj']);
-  assert.deepStrictEqual(trace.map((x) => x.step), ['role', 'budget', 'area', 'type', 'size', 'done']);
+  assert.deepStrictEqual(trace.map((x) => x.step), ['role', 'purpose', 'area', 'type', 'size', 'done']);
   const search = trace[5].out.find((o) => o.name === 'buyer_search');
   assert.strictEqual(search.data.type, 'Plot');
   assert.strictEqual(search.data.budget_inr, 5000000);
@@ -127,7 +136,7 @@ test('buyer flow asks budget, area, type, size, then searches', () => {
 });
 
 test('skip moves on; two misses stop the loop instead of asking forever', () => {
-  const skipped = run(['hi', '1', 'skip', 'skip', 'skip', 'skip']);
+  const skipped = run(['hi', '1', 'skip', 'skip', 'skip', 'skip', 'skip']);
   assert.strictEqual(skipped.state.step, 'done');
   const loop = run(['hi', 'owner', '1', 'bahut badi hai', 'pata nahi kitni']); // size: miss, miss -> kept as text
   assert.deepStrictEqual(keys(loop.trace, 3), ['step_retry'], 'first miss asks again');
@@ -240,4 +249,25 @@ test('23 Oct: buyer can pick several property types ("1, 2, 3")', () => {
   assert.deepStrictEqual(search.data.types, ['Plot', 'Villa', 'Flat']);
   assert.deepStrictEqual(P.parsePropertyTypes('1 aur 3'), ['Plot', 'Flat']);
   assert.deepStrictEqual(P.parsePropertyTypes('plot ya flat'), ['Plot', 'Flat']);
+});
+
+test('Nov 2026: tenant flow — rent purpose, monthly rent budget, search for rentals', () => {
+  const { trace, state } = run(['hi', '1', '2', '25000', 'Model Town, Ludhiana', '3', 'skip']);
+  assert.deepStrictEqual(keys(trace, 2), ['buyer_ask_budget_rent']);
+  assert.strictEqual(state.step, 'done');
+  const search = trace[6].out.find((o) => o.name === 'buyer_search');
+  assert.strictEqual(search.data.purpose, 'rent');
+  assert.strictEqual(search.data.budget_inr, 25000, 'a bare 25000 is a monthly rent');
+  assert.match(search.summary, /for rent/);
+  assert.match(search.summary, /rent ₹25,000\/month/);
+});
+
+test('Nov 2026: "flat kiraye pe chahiye" states the role and the purpose outright', () => {
+  const r = run(['2bhk flat kiraye pe chahiye']);
+  assert.strictEqual(r.state.role, 'buyer');
+  assert.strictEqual(r.state.data.purpose, 'rent');
+  assert.strictEqual(r.state.step, 'budget');
+  assert.strictEqual(M.parsePurpose('3'), 'lease');
+  assert.strictEqual(M.parsePurpose('kharidna hai'), 'sale');
+  assert.strictEqual(M.parsePurpose('2', { allowNumber: false }), null);
 });

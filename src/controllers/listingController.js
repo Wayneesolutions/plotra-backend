@@ -1,5 +1,19 @@
 const { dealerIsActive } = require('../services/trialService');
 const { createListingRecord, enqueueGeoEnrichment, validateAssignedAgent, ListingLimitError } = require('../services/listingService');
+const { rentalColumns, normalizeListingType } = require('../utils/listingTypes');
+
+// Sale / rent / lease fields a dashboard request may send (snake_case,
+// same names as the listings columns).
+const RENTAL_BODY_KEYS = [
+  'listing_type', 'monthly_rent', 'security_deposit', 'maintenance_charges', 'furnishing',
+  'preferred_tenant', 'available_from', 'lease_term', 'lock_in', 'rent_escalation_percent', 'property_subtype',
+];
+function rentalFromBody(body = {}) {
+  const picked = {};
+  for (const k of RENTAL_BODY_KEYS) if (body[k] !== undefined) picked[k] = body[k];
+  return rentalColumns(picked);
+}
+const RENTAL_SELECT = RENTAL_BODY_KEYS.map((k) => `listings.${k}`);
 
 /**
  * Inserts a new real estate listing asset safely scoped inside the active
@@ -34,6 +48,7 @@ async function createListing(req, res) {
       propertyType: property_type,
       description,
       assignedAgentId: assigned_agent_id,
+      rental: rentalFromBody(req.body),
     });
 
     return res.status(201).json({
@@ -87,6 +102,10 @@ async function getListings(req, res) {
   const knex = req.dbTrx || req.app.get('db');
   const { tenant_id, role, id: userId } = req.user;
   const { q, min_price, max_price, property_type } = req.query;
+  const listingTypeFilter = normalizeListingType(req.query.listing_type);
+  // Rent/lease listings are priced per month: a price range on those
+  // filters the monthly rent, not the (empty) sale price.
+  const priceColumn = listingTypeFilter === 'rent' || listingTypeFilter === 'lease' ? 'listings.monthly_rent' : 'listings.price';
 
   try {
     let query = knex('listings')
@@ -115,6 +134,7 @@ async function getListings(req, res) {
         'listings.public_slug',
         'listings.created_at',
         'listings.assigned_agent_id',
+        ...RENTAL_SELECT,
         'assigned_agent.name as assigned_agent_name',
         'assigned_agent.phone as assigned_agent_phone',
         'builder_profiles.id as builder_profile_id',
@@ -155,15 +175,19 @@ async function getListings(req, res) {
 
     if (min_price !== undefined && min_price !== '') {
       const parsed = parseFloat(min_price);
-      if (Number.isFinite(parsed)) query = query.where('listings.price', '>=', parsed);
+      if (Number.isFinite(parsed)) query = query.where(priceColumn, '>=', parsed);
     }
     if (max_price !== undefined && max_price !== '') {
       const parsed = parseFloat(max_price);
-      if (Number.isFinite(parsed)) query = query.where('listings.price', '<=', parsed);
+      if (Number.isFinite(parsed)) query = query.where(priceColumn, '<=', parsed);
     }
 
-    if (property_type && ['Plot', 'Villa', 'Commercial'].includes(property_type)) {
+    if (property_type && ['Plot', 'Villa', 'Flat', 'Commercial'].includes(property_type)) {
       query = query.where('listings.property_type', property_type);
+    }
+
+    if (listingTypeFilter) {
+      query = query.where('listings.listing_type', listingTypeFilter);
     }
 
     const listings = await query
@@ -172,6 +196,7 @@ async function getListings(req, res) {
         'listings.lat', 'listings.lng', 'listings.price', 'listings.plot_area',
         'listings.property_type', 'listings.description', 'listings.status',
         'listings.public_slug', 'listings.created_at', 'listings.assigned_agent_id',
+        ...RENTAL_SELECT,
         'assigned_agent.name', 'assigned_agent.phone',
         'builder_profiles.id', 'builder_profiles.company_name', 'builder_profiles.moderation_status'
       )
@@ -240,7 +265,10 @@ async function updateListing(req, res) {
 
     const updates = { updated_at: knex.fn.now() };
     if (title !== undefined) updates.title = title.trim();
-    if (price !== undefined) updates.price = parseFloat(price);
+    if (price !== undefined) updates.price = price === null || price === '' ? null : parseFloat(price);
+    // Sale / rent / lease fields; switching to sale clears the monthly rent.
+    Object.assign(updates, rentalFromBody(req.body));
+    if (updates.listing_type === 'sale' && existing.listing_type !== 'sale') updates.monthly_rent = null;
     if (plot_area !== undefined) updates.plot_area = plot_area ? plot_area.trim() : null;
     if (property_type !== undefined) updates.property_type = property_type.trim();
     if (description !== undefined) updates.description = description ? description.trim() : null;

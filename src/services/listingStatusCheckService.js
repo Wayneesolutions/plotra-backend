@@ -30,10 +30,17 @@ async function getResponsibleAgent(knex, listing) {
   return knex('users').where({ id: agentId }).first();
 }
 
-function buildButtons(listingId) {
+// Rent/lease listings (Nov 2026) are asked "still available or rented
+// out?" instead of "for sale or sold?". Same `sold:` button id either way,
+// so the webhook handler and the soft-delete stay one code path.
+const CLOSED_WORD = { sale: 'Sold', rent: 'Rented Out', lease: 'Leased Out' };
+const STILL_PHRASE = { sale: 'still for sale', rent: 'still available for rent', lease: 'still available for lease' };
+const typeOf = (listing) => (['rent', 'lease'].includes(listing?.listing_type) ? listing.listing_type : 'sale');
+
+function buildButtons(listingId, listing) {
   return [
     { id: `available:${listingId}`, title: 'Still Available' },
-    { id: `sold:${listingId}`, title: 'Sold' },
+    { id: `sold:${listingId}`, title: CLOSED_WORD[typeOf(listing)] },
   ];
 }
 
@@ -44,15 +51,16 @@ async function sendStatusCheckPrompt(knex, listing, { isReminder = false, send =
   if (!agent || !agent.phone) return false;
   console.log('[StatusCheck] listing %s -> user %s (%s)%s', listing.id, agent.id, agent.phone, isReminder ? ' [reminder]' : '');
 
+  const still = STILL_PHRASE[typeOf(listing)];
   const body = isReminder
-    ? `⏰ Reminder: is "${listing.title}" still for sale? Please confirm below.`
-    : `📋 Quick check-in: is "${listing.title}" still for sale?`;
+    ? `⏰ Reminder: is "${listing.title}" ${still}? Please confirm below.`
+    : `📋 Quick check-in: is "${listing.title}" ${still}?`;
 
   await send({
     tenantId: listing.tenant_id,
     phone: agent.phone,
     messageBody: body,
-    buttons: buildButtons(listing.id),
+    buttons: buildButtons(listing.id, listing),
   });
 
   const updates = isReminder
@@ -109,7 +117,11 @@ async function handleSoldConfirmation(knex, { listingId, agentUser }) {
     updated_at: knex.fn.now(),
   });
 
-  const body = '🎉 Congratulations on the sale! This listing has been marked sold and removed from public view.';
+  // Status stays 'sold' for rentals too (deal closed, out of public view);
+  // listing_type tells which it was.
+  const body = typeOf(listing) === 'sale'
+    ? '🎉 Congratulations on the sale! This listing has been marked sold and removed from public view.'
+    : `🎉 Congratulations! This listing has been marked ${typeOf(listing) === 'lease' ? 'leased out' : 'rented out'} and removed from public view. Send it again any time it's vacant.`;
   await enqueueAgentWhatsappSend({ tenantId: listing.tenant_id, phone: agentUser.phone, messageBody: body });
   return true;
 }
@@ -176,6 +188,7 @@ async function processMonthlyStatusChecks(knex, { send } = {}) {
 }
 
 module.exports = {
+  buildButtons,
   processMonthlyStatusChecks,
   sendStatusCheckPrompt,
   handleStillAvailableConfirmation,

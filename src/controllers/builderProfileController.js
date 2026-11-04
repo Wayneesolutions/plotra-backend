@@ -57,13 +57,13 @@ const SIMILAR_PROJECT_LIMIT = 6;
  * plot/villa should never show up as a "comparable project" and should
  * never trigger this developer-comparison content on its own page.
  */
-async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
+async function findSimilarProjects(knex, { listingId, lat, lng, price, listingType = 'sale', monthlyRent = null }) {
   if (lat == null || lng == null) return []; // no coordinates, no "nearby" — non-fatal, just skip
 
   const query = knex('listings as l')
     .join('builder_profiles as bp', 'bp.id', 'l.builder_profile_id')
     .select(
-      'l.public_slug', 'l.title', 'l.price', 'l.plot_area', 'l.property_type',
+      'l.public_slug', 'l.title', 'l.price', 'l.plot_area', 'l.property_type', 'l.listing_type', 'l.monthly_rent',
       'bp.company_name', 'bp.overall_rating',
       // Explicit ::float8 casts — lat/lng are numeric columns, and while
       // Postgres's numeric->float8 cast usually resolves fine here, radians()
@@ -84,8 +84,14 @@ async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
     .whereNotNull('l.lng')
     .whereNot('l.id', listingId);
 
-  if (price != null) {
-    query.whereBetween('l.price', [price * (1 - SIMILAR_PROJECT_PRICE_BAND), price * (1 + SIMILAR_PROJECT_PRICE_BAND)]);
+  // Compare like with like: sale listings by price, rentals by monthly rent
+  // (a flat for rent must never be "compared" against one for sale).
+  const rental = listingType === 'rent' || listingType === 'lease';
+  query.where('l.listing_type', rental ? listingType : 'sale');
+  const band = rental ? monthlyRent : price;
+  const bandColumn = rental ? 'l.monthly_rent' : 'l.price';
+  if (band != null) {
+    query.whereBetween(bandColumn, [band * (1 - SIMILAR_PROJECT_PRICE_BAND), band * (1 + SIMILAR_PROJECT_PRICE_BAND)]);
   }
 
   const rows = await query;
@@ -98,6 +104,8 @@ async function findSimilarProjects(knex, { listingId, lat, lng, price }) {
       slug: r.public_slug,
       title: r.title,
       price: r.price,
+      listing_type: r.listing_type,
+      monthly_rent: r.monthly_rent,
       plot_area: r.plot_area,
       property_type: r.property_type,
       builder_company_name: r.company_name,
@@ -321,7 +329,7 @@ async function getPublicBuilderProfile(req, res) {
 
   try {
     const listing = await knex('listings')
-      .select('id', 'builder_profile_id', 'lat', 'lng', 'price', 'property_type')
+      .select('id', 'builder_profile_id', 'lat', 'lng', 'price', 'property_type', 'listing_type', 'monthly_rent')
       .where({ public_slug: slug })
       .whereIn('status', ['active', 'awaiting_approval'])
       .first();
@@ -359,6 +367,7 @@ async function getPublicBuilderProfile(req, res) {
     try {
       similarProjects = await findSimilarProjects(knex, {
         listingId: listing.id, lat: listing.lat, lng: listing.lng, price: listing.price,
+        listingType: listing.listing_type, monthlyRent: listing.monthly_rent,
       });
     } catch (simErr) {
       console.error('Failed to compute similar projects (non-fatal):', simErr.message);

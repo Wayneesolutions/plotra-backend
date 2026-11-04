@@ -1,3 +1,4 @@
+const { formatListingPrice } = require('../utils/listingTypes');
 /**
  * Serves OG meta tags for known social media / messaging crawlers hitting
  * /p/:slug. Real browsers call next() and get the SPA as normal.
@@ -70,6 +71,9 @@ async function servePropertyPreview(req, res, next) {
         'listings.property_type',
         'listings.plot_area',
         'listings.description',
+        'listings.listing_type',
+        'listings.monthly_rent',
+        'listings.security_deposit',
         'listing_media.satellite_image_url'
       )
       // 'awaiting_approval' included so the preview link sent to the agent
@@ -88,7 +92,10 @@ async function servePropertyPreview(req, res, next) {
     // any listing that has one (new listings only; see the migration),
     // exact address unchanged for everything geocoded before this feature.
     const address = listing.general_area || listing.formatted_address || listing.raw_address;
-    const priceFormatted = listing.price != null
+    const isRental = listing.listing_type === 'rent' || listing.listing_type === 'lease';
+    const priceFormatted = isRental
+      ? `${listing.listing_type === 'lease' ? 'For Lease' : 'For Rent'}: ${formatListingPrice(listing) || 'Rent on request'}`
+      : listing.price != null
       ? new Intl.NumberFormat('en-IN', {
           style: 'currency',
           currency: 'INR',

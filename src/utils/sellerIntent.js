@@ -70,4 +70,22 @@ function looksLikeSaleDetails(text) {
   return Boolean(hints.property_type || hints.expected_price || hints.size_text);
 }
 
-module.exports = { looksLikeSellerIntent, extractSellerHints, looksLikeSaleDetails };
+// Nov 2026: an owner who wants to RENT OUT / LEASE OUT their own place
+// ("flat kiraye pe dena hai", "I want to rent out my shop"). Taking a place on
+// rent ("kiraye pe chahiye") is a tenant search and does NOT match.
+const RENT_OUT_PATTERNS = [
+  /\b(?:kiraye?|kiraya|kirae|rent|lease)\s*(?:pe|par|pr|te|on)\s*(?:dena|deni|dene|dena\s*hai|deni\s*hai|chadhana|chadhani|charhana|dunga|dungi|denge)\b/i,
+  /\b(?:rent|lease)\s+out\b/i,
+  /\b(?:i|we)\s*(?:want|wish|need|would\s+like|plan)\s+to\s+(?:rent|lease)\s+(?:out\s+)?(?:my|our)\b/i,
+  /ਕਿਰਾਏ\s*['’]?\s*ਤੇ\s*(?:ਦੇਣਾ|ਦੇਣੀ|ਚੜ੍ਹਾਉਣ)/,
+  /किराए?\s*(?:पे|पर)\s*(?:देना|देनी|चढ़ाना)/,
+];
+
+/** 'rent' / 'lease' when an owner says they want to rent/lease OUT their property, else null. */
+function looksLikeRentOutIntent(text) {
+  const t = String(text || '');
+  if (!RENT_OUT_PATTERNS.some((re) => re.test(t))) return null;
+  return /\blease\b|ਲੀਜ|लीज/i.test(t) ? 'lease' : 'rent';
+}
+
+module.exports = { looksLikeSellerIntent, extractSellerHints, looksLikeSaleDetails, looksLikeRentOutIntent };

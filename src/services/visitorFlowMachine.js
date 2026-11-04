@@ -33,12 +33,27 @@ const {
   mentionsYearly, looksLikeQuestion, parsePropertyType, parsePropertyTypes, parseSize, parsePrice, splitLocation, looksLikeName,
 } = require('../utils/visitorFlowParsers');
 const { variantFor } = require('../utils/i18n');
-const { looksLikeSellerIntent } = require('../utils/sellerIntent');
+const { looksLikeSellerIntent, looksLikeRentOutIntent } = require('../utils/sellerIntent');
 const { detectScript, detectMessageLanguage } = require('../utils/replyLanguage');
+const { parseListingType, guessTypeFromBudget, toNumber, listingTypeLabel } = require('../utils/listingTypes');
+
+// Buyer's purpose: buy (stored as 'sale', the listing type it searches),
+// rent or lease. "1/2/3" only counts at the purpose question itself.
+const BUY_WORDS = /\b(?:buy|buying|purchase|kharid\w*|khareed\w*|lena|leni)\b|ਖਰੀਦ|खरीद/i;
+function parsePurpose(text, { allowNumber = true } = {}) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const typed = parseListingType(t, { allowNumber });
+  if (typed === 'rent' || typed === 'lease') return typed;
+  if (typed === 'sale' && allowNumber && /^\s*1/.test(t)) return 'sale';
+  if (BUY_WORDS.test(t)) return 'sale';
+  return null;
+}
+const isRentalPurpose = (p) => p === 'rent' || p === 'lease';
 
 const FLOWS = {
   owner: ['type', 'size', 'location', 'price', 'photos'],
-  buyer: ['budget', 'area', 'type', 'size'],
+  buyer: ['purpose', 'budget', 'area', 'type', 'size'],
   dealer: ['name', 'area'],
 };
 const MAX_PHOTOS = 5;
@@ -56,6 +71,8 @@ function promptFor(role, step, data = {}) {
   if (role === 'dealer' && step === 'name') return reply('dealer_ask_name', { days: TRIAL_DAYS });
   if (role === 'dealer' && step === 'area') return reply('dealer_ask_area', { name: String(data.name || '').split(/\s+/)[0] || '' });
   if (step === 'role') return reply('role_menu');
+  // A tenant is asked for the monthly rent, not a purchase budget.
+  if (role === 'buyer' && step === 'budget' && isRentalPurpose(data.purpose)) return reply('buyer_ask_budget_rent');
   return reply(`${role}_ask_${step}`);
 }
 
@@ -97,6 +114,11 @@ function prefillFrom(role, text) {
       if (role === 'owner') { data.price_text = price.text; data.price_inr = price.inr; data.done.price = true; }
       else { data.budget_text = price.text; data.budget_inr = price.inr; data.done.budget = true; }
     }
+    // "2bhk flat kiraye pe chahiye": the purpose is already said.
+    if (role === 'buyer') {
+      const purpose = parsePurpose(t, { allowNumber: false });
+      if (purpose) { data.purpose = purpose; data.done.purpose = true; }
+    }
   }
   return data;
 }
@@ -114,8 +136,9 @@ function ownerSummary(data) {
 
 function buyerSummary(data) {
   const loc = [data.locality, data.city].filter(Boolean).join(', ') || data.area;
+  const purpose = isRentalPurpose(data.purpose) ? listingTypeLabel(data.purpose, 'en').toLowerCase() : null;
   return [
-    data.type, data.size, loc && `in ${loc}`, data.budget_text && `budget ${data.budget_text}`,
+    data.type, data.size, purpose, loc && `in ${loc}`, data.budget_text && `${isRentalPurpose(data.purpose) ? 'rent' : 'budget'} ${data.budget_text}${isRentalPurpose(data.purpose) ? '/month' : ''}`,
   ].filter(Boolean).join(' ') || 'property';
 }
 
@@ -181,10 +204,26 @@ function readAnswer(role, step, text, data, knownCities) {
   }
 
   if (role === 'buyer') {
+    if (step === 'purpose') {
+      if (skip) return { ok: true, patch: {} };
+      const purpose = parsePurpose(t);
+      if (purpose) return { ok: true, patch: { purpose } };
+      // Answered with a budget instead ("50 lakh", "15k"): that says it too.
+      const price = parsePrice(t);
+      if (price) {
+        return { ok: true, patch: { purpose: guessTypeFromBudget(price.inr), budget_text: price.text, budget_inr: price.inr }, alsoDone: ['budget'] };
+      }
+      return { ok: false };
+    }
     if (step === 'budget') {
       if (skip) return { ok: true, patch: {} };
       const price = parsePrice(t);
       if (price) return { ok: true, patch: { budget_text: price.text, budget_inr: price.inr } };
+      // A bare rent amount ("25000") is too small for the sale-price parser.
+      if (rawNumber && isRentalPurpose(data.purpose)) {
+        const n = toNumber(t);
+        if (n) return { ok: true, patch: { budget_text: `₹${n.toLocaleString('en-IN')}`, budget_inr: n } };
+      }
       return rawNumber ? { ok: true, patch: { budget_text: t.slice(0, 40) } } : { ok: false };
     }
     if (step === 'area') {
@@ -259,6 +298,13 @@ function decide(state, text, ctx = {}) {
   // search or the role menu (23 Oct). Their saved step is kept as it was.
   if (looksLikeSellerIntent(t)) {
     return finish(state || { ...blankState(), data: { done: {}, first_text: '' } }, [reply('sell_link', { url: '__sell_url__' })]);
+  }
+
+  // ---- wants to RENT OUT / LEASE OUT their own property: the same owner
+  // form, opened on "Rent out" / "Lease out" (Nov 2026).
+  const rentOut = looksLikeRentOutIntent(t);
+  if (rentOut) {
+    return finish(state || { ...blankState(), data: { done: {}, first_text: '' } }, [reply('rent_out_link', { url: `__sell_url__${rentOut}` })]);
   }
 
   // ---- no state yet: first message ever
@@ -376,6 +422,7 @@ function decide(state, text, ctx = {}) {
   if (answer.ok) {
     Object.assign(data, answer.patch);
     data.done[step] = true;
+    for (const extra of answer.alsoDone || []) data.done[extra] = true;
     const after = afterAnswer(role, data);
     const out = [];
     if (role === 'owner') out.push(effect('seller_lead_sync', { data }));
@@ -411,6 +458,7 @@ function leniently(role, step, text, knownCities) {
   if (role === 'owner' && step === 'location') return splitLocation(t, knownCities);
   if (role === 'buyer' && step === 'area') return { area: t, ...splitLocation(t, knownCities) };
   if (role === 'buyer' && step === 'budget') return { budget_text: t };
+  if (role === 'buyer' && step === 'purpose') return {};
   if (role === 'buyer' && step === 'size') return { size: t };
   if (role === 'dealer' && step === 'name') return { name: t };
   if (role === 'dealer' && step === 'area') return { area: t };
@@ -461,6 +509,7 @@ module.exports = {
   promptFor,
   firstOpenStep,
   prefillFrom,
+  parsePurpose,
   ownerSummary,
   buyerSummary,
   acceptsPhoto,

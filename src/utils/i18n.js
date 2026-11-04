@@ -24,10 +24,10 @@ function variantFor(text, chatText = '') {
 const M = {
   // ------------------------------------------------------------- role menu
   role_menu: {
-    en: 'Hello! 👋 Welcome to Plotraa.\n\nFirst, tell me who you are. Just send a number:\n1️⃣ Buyer: I want to buy a property\n2️⃣ Dealer: I want to list properties on Plotraa (7-day free trial)\n\nTo change your role later, type *menu* any time.',
-    hi: 'Namaste! 👋 Plotraa mein aapka swagat hai.\n\nPehle bataiye, aap kaun hain? Sirf number bhejein:\n1️⃣ Buyer: property kharidni hai\n2️⃣ Dealer: Plotraa pe listings daalni hain (7 din free trial)\n\nRole badalna ho to kabhi bhi *menu* likhein.',
-    pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! 👋 Plotraa ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ।\n\nਪਹਿਲਾਂ ਦੱਸੋ, ਤੁਸੀਂ ਕੌਣ ਹੋ? ਸਿਰਫ਼ ਨੰਬਰ ਭੇਜੋ:\n1️⃣ Buyer: ਪ੍ਰਾਪਰਟੀ ਖਰੀਦਣੀ ਹੈ\n2️⃣ Dealer: Plotraa \'ਤੇ ਲਿਸਟਿੰਗ ਪਾਉਣੀ ਹੈ (7 ਦਿਨ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ)\n\nਰੋਲ ਬਦਲਣਾ ਹੋਵੇ ਤਾਂ ਕਦੇ ਵੀ *menu* ਲਿਖੋ।',
-    hi_deva: 'नमस्ते! 👋 Plotraa में आपका स्वागत है।\n\nपहले बताइए, आप कौन हैं? सिर्फ़ नंबर भेजें:\n1️⃣ Buyer: प्रॉपर्टी खरीदनी है\n2️⃣ Dealer: Plotraa पर लिस्टिंग डालनी है (7 दिन मुफ़्त ट्रायल)\n\nरोल बदलना हो तो कभी भी *menu* लिखें।',
+    en: 'Hello! 👋 Welcome to Plotraa.\n\nFirst, tell me who you are. Just send a number:\n1️⃣ Buyer: I want to buy or rent a property\n2️⃣ Dealer: I want to list properties on Plotraa (7-day free trial)\n\nTo change your role later, type *menu* any time.',
+    hi: 'Namaste! 👋 Plotraa mein aapka swagat hai.\n\nPehle bataiye, aap kaun hain? Sirf number bhejein:\n1️⃣ Buyer: property kharidni ya kiraye pe leni hai\n2️⃣ Dealer: Plotraa pe listings daalni hain (7 din free trial)\n\nRole badalna ho to kabhi bhi *menu* likhein.',
+    pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! 👋 Plotraa ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ।\n\nਪਹਿਲਾਂ ਦੱਸੋ, ਤੁਸੀਂ ਕੌਣ ਹੋ? ਸਿਰਫ਼ ਨੰਬਰ ਭੇਜੋ:\n1️⃣ Buyer: ਪ੍ਰਾਪਰਟੀ ਖਰੀਦਣੀ ਜਾਂ ਕਿਰਾਏ \'ਤੇ ਲੈਣੀ ਹੈ\n2️⃣ Dealer: Plotraa \'ਤੇ ਲਿਸਟਿੰਗ ਪਾਉਣੀ ਹੈ (7 ਦਿਨ ਮੁਫ਼ਤ ਟ੍ਰਾਇਲ)\n\nਰੋਲ ਬਦਲਣਾ ਹੋਵੇ ਤਾਂ ਕਦੇ ਵੀ *menu* ਲਿਖੋ।',
+    hi_deva: 'नमस्ते! 👋 Plotraa में आपका स्वागत है।\n\nपहले बताइए, आप कौन हैं? सिर्फ़ नंबर भेजें:\n1️⃣ Buyer: प्रॉपर्टी खरीदनी या किराए पर लेनी है\n2️⃣ Dealer: Plotraa पर लिस्टिंग डालनी है (7 दिन मुफ़्त ट्रायल)\n\nरोल बदलना हो तो कभी भी *menu* लिखें।',
   },
   // 23 Oct: anyone who says they want to SELL gets the sell-property form
   // link (no search, whatever role they are in).
@@ -36,6 +36,14 @@ const M = {
     hi: '🏡 Property bechni hai? Yahan details bhariye, ek verified local dealer aapse contact karega:\n{url}',
     pa: '🏡 ਪ੍ਰਾਪਰਟੀ ਵੇਚਣੀ ਹੈ? ਇੱਥੇ ਵੇਰਵੇ ਭਰੋ, ਇੱਕ ਵੈਰੀਫਾਈਡ ਲੋਕਲ ਡੀਲਰ ਤੁਹਾਡੇ ਨਾਲ ਸੰਪਰਕ ਕਰੇਗਾ:\n{url}',
     hi_deva: '🏡 प्रॉपर्टी बेचनी है? यहाँ डिटेल्स भरिए, एक वेरिफाइड लोकल डीलर आपसे संपर्क करेगा:\n{url}',
+  },
+  // Nov 2026: an owner who wants to rent out / lease out gets the same form,
+  // opened on "Rent out".
+  rent_out_link: {
+    en: '🏠 Want to rent out your property? Fill in the details here and a verified local dealer will find you a tenant:\n{url}',
+    hi: '🏠 Property kiraye pe deni hai? Yahan details bhariye, ek verified local dealer aapke liye tenant dhundhega:\n{url}',
+    pa: '🏠 ਪ੍ਰਾਪਰਟੀ ਕਿਰਾਏ \'ਤੇ ਦੇਣੀ ਹੈ? ਇੱਥੇ ਵੇਰਵੇ ਭਰੋ, ਇੱਕ ਵੈਰੀਫਾਈਡ ਲੋਕਲ ਡੀਲਰ ਤੁਹਾਡੇ ਲਈ ਕਿਰਾਏਦਾਰ ਲੱਭੇਗਾ:\n{url}',
+    hi_deva: '🏠 प्रॉपर्टी किराए पर देनी है? यहाँ डिटेल्स भरिए, एक वेरिफाइड लोकल डीलर आपके लिए किरायेदार ढूँढेगा:\n{url}',
   },
   role_retry: {
     en: 'Please reply with 1 or 2:\n1️⃣ Buyer  2️⃣ Dealer',
@@ -131,6 +139,19 @@ const M = {
   },
 
   // ------------------------------------------------------------- buyer flow
+  // Nov 2026: first buyer question — buy, rent or lease (rentals are listed now).
+  buyer_ask_purpose: {
+    en: '🔑 Do you want to buy, rent or lease? Send a number:\n1. Buy\n2. Rent (flat, house, floor, room/PG, shop, office)\n3. Lease (commercial: shop, showroom, office, warehouse)',
+    hi: '🔑 Property kharidni hai, kiraye pe leni hai ya lease pe? Number bhejein:\n1. Kharidni hai (Buy)\n2. Kiraye pe (Rent: flat, kothi, floor, room/PG, shop, office)\n3. Lease (commercial: shop, showroom, office, godown)',
+    pa: '🔑 ਪ੍ਰਾਪਰਟੀ ਖਰੀਦਣੀ ਹੈ, ਕਿਰਾਏ \'ਤੇ ਲੈਣੀ ਹੈ ਜਾਂ ਲੀਜ਼ \'ਤੇ? ਨੰਬਰ ਭੇਜੋ:\n1. ਖਰੀਦਣੀ ਹੈ (Buy)\n2. ਕਿਰਾਏ \'ਤੇ (Rent: ਫਲੈਟ, ਕੋਠੀ, ਫਲੋਰ, ਕਮਰਾ/PG, ਦੁਕਾਨ, ਦਫ਼ਤਰ)\n3. ਲੀਜ਼ (ਕਮਰਸ਼ੀਅਲ: ਦੁਕਾਨ, ਸ਼ੋਰੂਮ, ਦਫ਼ਤਰ, ਗੋਦਾਮ)',
+    hi_deva: '🔑 प्रॉपर्टी खरीदनी है, किराए पर लेनी है या लीज़ पर? नंबर भेजें:\n1. खरीदनी है (Buy)\n2. किराए पर (Rent: फ्लैट, कोठी, फ्लोर, कमरा/PG, दुकान, ऑफिस)\n3. लीज़ (कमर्शियल: दुकान, शोरूम, ऑफिस, गोदाम)',
+  },
+  buyer_ask_budget_rent: {
+    en: '💰 What monthly rent can you pay? (e.g. 15k, 25000). Send *skip* if open.',
+    hi: '💰 Mahine ka kiraya kitna de sakte hain? (jaise 15k, 25000). Fix na ho to *skip* likhein.',
+    pa: '💰 ਮਹੀਨੇ ਦਾ ਕਿਰਾਇਆ ਕਿੰਨਾ ਦੇ ਸਕਦੇ ਹੋ? (ਜਿਵੇਂ 15k, 25000)। ਪੱਕਾ ਨਾ ਹੋਵੇ ਤਾਂ *skip* ਲਿਖੋ।',
+    hi_deva: '💰 महीने का किराया कितना दे सकते हैं? (जैसे 15k, 25000)। तय न हो तो *skip* लिखें।',
+  },
   buyer_ask_budget: {
     en: '💰 What is your budget? (e.g. 50 lakh, 1 crore). Send *skip* if open.',
     hi: '💰 Aapka budget kitna hai? (jaise 50 lakh, 1 crore). Fix na ho to *skip* likhein.',
