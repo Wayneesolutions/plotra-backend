@@ -1,7 +1,8 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
 const { normalizePhone } = require('../utils/phone');
-const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia } = require('./agentIntakeController');
+const { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia, isAwaitingListingType, LIVE_STATUSES: AGENT_DRAFT_LIVE_STATUSES } = require('./agentIntakeController');
+const { BUTTON_PREFIX: LISTING_TYPE_BUTTON_PREFIX, isBareListingTypeChoice } = require('../utils/listingTypes');
 const { handleAgentSignupMessage } = require('./agentSignupController');
 const { handleAgentReceiptIntent, handleAgentReceiptPhoto } = require('./agentPaymentController');
 const { isReceiptSubmissionIntent, tryHandlePackageSelectionReply } = require('../services/agentPaymentService');
@@ -255,6 +256,18 @@ async function handleInboundWhatsApp(req, res) {
     // listing status check — checked first since a button tap carries
     // neither mediaId nor incomingText. Verifies the listing belongs to
     // this agent's tenant before acting.
+    // "Sell / Rent / Lease" button tap — the answer to the first question
+    // of a new listing (agentIntakeWorker.js / utils/listingTypes.js).
+    if (buttonReplyId && buttonReplyId.startsWith(LISTING_TYPE_BUTTON_PREFIX)) {
+      return handleAgentIntakeMessage({
+        knex,
+        agentUser,
+        incomingText: buttonReplyId,
+        bspMessageId: bspThreadRef,
+        res,
+      });
+    }
+
     if (buttonReplyId) {
       const [action, listingId] = buttonReplyId.split(':');
       if ((action === 'available' || action === 'sold') && listingId) {
@@ -276,6 +289,25 @@ async function handleInboundWhatsApp(req, res) {
     // branches so it's never mistaken for a listing photo.
     if (agentUser.awaiting_receipt_submission && mediaId) {
       return handleAgentReceiptPhoto({ knex, agentUser, mediaId, mediaMimeType, res });
+    }
+
+    // A bare "1"/"2"/"3" (or "rent", "lease") while the open question is
+    // "Sell, Rent or Lease?" answers THAT question — it must not be taken
+    // as a plan-menu number below or sent through the intent model.
+    if (!mediaId && incomingText && isBareListingTypeChoice(incomingText.trim())) {
+      const openDraft = await knex('agent_listing_drafts')
+        .where({ user_id: agentUser.id, tenant_id: agentUser.tenant_id })
+        .whereIn('status', AGENT_DRAFT_LIVE_STATUSES)
+        .first();
+      if (isAwaitingListingType(openDraft)) {
+        return handleAgentIntakeMessage({
+          knex,
+          agentUser,
+          incomingText: incomingText.trim(),
+          bspMessageId: bspThreadRef,
+          res,
+        });
+      }
     }
 
     // Payment: a bare numeric reply while no package is chosen yet is a

@@ -11,8 +11,11 @@ const knexConfig = require('../../knexfile');
 const knex = require('knex')(knexConfig[process.env.NODE_ENV || 'development']);
 const { createListingRecord, enqueueGeoEnrichment, ListingLimitError } = require('../services/listingService');
 const { logAgentOutboundMessage, enqueueAgentWhatsappSend, detectDraftLanguage } = require('../services/agentMessagingService');
-const { extractListingFields, REQUIRED_FIELDS, FIELD_QUESTIONS: FIELD_QUESTIONS_HI } = require('../services/listingExtractionService');
-const { FIELD_QUESTIONS_EN } = require('../utils/replyLanguage');
+const { extractListingFields } = require('../services/listingExtractionService');
+const {
+  normalizeListingType, missingFields, nextQuestion, detailsQuestion, rentalColumns, rentalColumnsNonNull,
+  formatListingPrice, listingTypeLabel,
+} = require('../utils/listingTypes');
 const {
   linkOrCreateBuilderProfileCore,
   buildBuilderAutoLinkNote,
@@ -78,10 +81,6 @@ function buildLocationPinRequest(lang, { addressIsVague = false } = {}) {
   ].filter(Boolean).join('\n');
 }
 
-function fieldQuestionsFor(lang) {
-  return lang === 'en' ? FIELD_QUESTIONS_EN : FIELD_QUESTIONS_HI;
-}
-
 /**
  * Sends the "here's your listing, reply to approve" message and flips the
  * draft to awaiting_approval. Shared between the 'send-preview' job
@@ -115,18 +114,23 @@ async function sendPreviewAndAwaitApproval({ draftId, listingId }) {
       return { tenantId: draft.tenant_id, phone: (await trx('users').where({ id: draft.user_id }).first()).phone, messageBody: waitingBody };
     }
 
+    // "🏷️ For Rent · ₹18,000/month + ₹36,000 deposit" — so the dealer sees
+    // the listing type and amount were understood before approving.
+    const priceLine = formatListingPrice(listing);
+    const typeLine = `🏷️ ${listingTypeLabel(listing.listing_type, 'en')}${priceLine ? ` · ${priceLine}` : ''}\n`;
+
     // geoEnrichmentWorker.js couldn't get a confident, house-level geocode
     // for this address — the pin is a best-effort guess and may be off by
     // a street or more. Say so explicitly instead of the routine "check
     // it's on the right spot" line, so a dealer doesn't rubber-stamp
     // approve a pin that's actually just wrong.
-    const previewBody = listing.location_low_confidence
+    const previewBody = typeLine + (listing.location_low_confidence
       ? (lang === 'en'
           ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\n⚠️ We couldn't pin this address precisely — the map pin is a rough guess and may be off. Please open the link and drag it to the exact location before tapping *Save*. Reply *"yes"* once you've confirmed it.`
           : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\n⚠️ Yeh address sahi se locate nahi ho paya — map pin sirf ek andaza hai aur galat ho sakta hai. Please link kholke pin ko sahi jagah pe drag karo, phir *Save* dabao. Confirm karne ke baad *"haan"* reply karo.`)
       : (lang === 'en'
           ? `Here's your listing preview:\n${buildPreviewLink(listing.public_slug)}\n\nOpen the link — check the map pin is on the right spot. If it's off, drag it to the exact location and tap *Save*. Reply *"yes"* when you're ready to publish.`
-          : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nLink kholo — map pin sahi jagah hai kya check karo. Agar thoda hatna hai, pin ko drag karke sahi jagah pe laao aur *Save* dabao. Publish karna ho to *"haan"* reply karo.`);
+          : `Yeh raha aapki listing ka preview:\n${buildPreviewLink(listing.public_slug)}\n\nLink kholo — map pin sahi jagah hai kya check karo. Agar thoda hatna hai, pin ko drag karke sahi jagah pe laao aur *Save* dabao. Publish karna ho to *"haan"* reply karo.`));
 
     await logAgentOutboundMessage(trx, { draftId, body: previewBody });
     await trx('agent_listing_drafts')
@@ -180,14 +184,38 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         building_name: existingListingForExtraction.building_name,
         price: existingListingForExtraction.price,
         property_type: existingListingForExtraction.property_type,
+        listing_type: existingListingForExtraction.listing_type,
+        monthly_rent: existingListingForExtraction.monthly_rent,
       }
     : undefined;
 
-  const extracted = await extractListingFields(draft.accumulated_text, correctionContext);
+  // The dealer's answer to "Sell, Rent or Lease?" (saved on the draft by
+  // agentIntakeController.js) is the authority; the model's reading of the
+  // text only fills it in when the dealer said it in the property message
+  // itself ("2bhk flat for rent ...").
+  const draftListingType = normalizeListingType(draft.listing_type);
+  // Nothing typed yet besides the "Sell, Rent or Lease?" answer (a bare
+  // "2" is never appended to accumulated_text): no model call needed, every
+  // field is simply still missing.
+  const extracted = String(draft.accumulated_text || '').trim()
+    ? await extractListingFields(draft.accumulated_text, correctionContext, {
+        listingType: draftListingType || existingListingForExtraction?.listing_type,
+      })
+    : { title: null, raw_address: null, property_type: null, price: null, listing_type: draftListingType };
 
   if (!draft.listing_id) {
     // First-time creation path.
-    const missing = REQUIRED_FIELDS.filter((f) => !extracted[f]);
+    const listingType = draftListingType || normalizeListingType(extracted.listing_type);
+    extracted.listing_type = listingType;
+    if (listingType && !draftListingType) {
+      await knex('agent_listing_drafts').where({ id: draftId }).update({ listing_type: listingType });
+    }
+
+    // FIRST question is always "Sell, Rent or Lease?" (asked alone, with
+    // buttons); once that's known, the remaining missing fields are asked
+    // in that type's wording (rent asks the monthly rent, lease asks what
+    // kind of commercial space, etc.). See utils/listingTypes.js.
+    const missing = missingFields(listingType, extracted);
 
     if (missing.length > 0) {
       await knex('agent_listing_drafts').where({ id: draftId }).update({
@@ -198,13 +226,35 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       });
 
       const lang = await detectDraftLanguage(knex, draftId);
-      const questions = fieldQuestionsFor(lang);
-      const questionBody = missing.map((f) => questions[f]).join(' ');
+      const question = nextQuestion(missing, listingType, lang);
+      const questionBody = question.body;
       await knex.transaction(async (trx) => {
         await logAgentOutboundMessage(trx, { draftId, body: questionBody });
       });
-      await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: questionBody });
+      await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: questionBody, buttons: question.buttons });
       return { success: true, missing };
+    }
+
+    // Rent / lease: ONE optional follow-up for the details tenants ask about
+    // (deposit, furnishing, who it's for / lease term, lock-in, increase).
+    // Asked once; whatever the reply ("skip" included) we move on.
+    if (!draft.details_requested_at) {
+      const lang = await detectDraftLanguage(knex, draftId);
+      const detailsBody = detailsQuestion(listingType, extracted, lang);
+      if (detailsBody) {
+        await knex('agent_listing_drafts').where({ id: draftId }).update({
+          status: 'collecting',
+          extracted_fields: JSON.stringify(extracted),
+          missing_fields: JSON.stringify(['details_asked']),
+          details_requested_at: knex.fn.now(),
+          updated_at: knex.fn.now(),
+        });
+        await knex.transaction(async (trx) => {
+          await logAgentOutboundMessage(trx, { draftId, body: detailsBody });
+        });
+        await enqueueAgentWhatsappSend({ tenantId: draft.tenant_id, phone: agentUser.phone, messageBody: detailsBody });
+        return { success: true, awaitingDetails: true };
+      }
     }
 
     // Location pin step. Every WhatsApp listing now asks for the property's
@@ -259,6 +309,7 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
         hasHouseNumber: extracted.has_house_number,
         agentPinLat: hasPendingPin ? draft.pending_pin_lat : null,
         agentPinLng: hasPendingPin ? draft.pending_pin_lng : null,
+        rental: rentalColumns(extracted),
       });
 
       await knex('agent_listing_drafts').where({ id: draftId }).update({
@@ -345,7 +396,12 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
     description: extracted.description ?? existingListing.description,
     building_name: extracted.building_name ?? existingListing.building_name,
     has_house_number: extracted.has_house_number ?? existingListing.has_house_number,
+    // Rent/lease fields: only what this correction actually stated
+    // ("rent 20k now", "deposit 40k") overwrites; nothing is blanked.
+    ...rentalColumnsNonNull(extracted),
   };
+  // Switching a listing to sale drops its monthly rent.
+  if (merged.listing_type === 'sale' && existingListing.listing_type !== 'sale') merged.monthly_rent = null;
 
   await knex('agent_listing_drafts').where({ id: draftId }).update({ status: 'creating', updated_at: knex.fn.now() });
 
@@ -389,6 +445,8 @@ const agentIntakeWorker = new Worker('agent-listing-intake', async (job) => {
       description: merged.description,
       building_name: merged.building_name,
       has_house_number: merged.has_house_number,
+      ...rentalColumnsNonNull(merged),
+      ...(merged.monthly_rent === null ? { monthly_rent: null } : {}),
       updated_at: knex.fn.now(),
     });
     await knex('agent_listing_drafts').where({ id: draftId }).update({

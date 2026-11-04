@@ -39,7 +39,15 @@ const buildPlanMenuMessage = (...a) => require('./agentPaymentService').buildPla
 const razorpay = () => require('./razorpayService');
 const extractBuyerIntent = (...a) => require('./buyerSearchService').extractBuyerIntent(...a);
 const findMatchingListings = (...a) => require('./buyerSearchService').findMatchingListings(...a);
-const formatPrice = (...a) => require('./buyerSearchService').formatPrice(...a);
+const formatSalePrice = (...a) => require('./buyerSearchService').formatPrice(...a);
+// Sale price, or "₹18,000/month" + a [Rent]/[Lease] tag for rentals.
+function formatPrice(price, listing) {
+  if (listing && (listing.listing_type === 'rent' || listing.listing_type === 'lease')) {
+    const { formatListingPrice, listingTypeLabel } = require('../utils/listingTypes');
+    return `${formatListingPrice(listing, { withDeposit: false }) || 'Rent on request'} [${listingTypeLabel(listing.listing_type, 'en')}]`;
+  }
+  return formatSalePrice(price);
+}
 const buildPublicListingUrl = (...a) => require('./buyerSearchService').buildPublicListingUrl(...a);
 const handleWithAssistant = (...a) => require('./assistantService').handleWithAssistant(...a);
 
@@ -122,7 +130,7 @@ Intents:
 - approve: clearly approves the waiting preview with no change requested ("haan sab sahi hai publish kar do", "looks good go ahead"). Only possible when a preview is waiting.
 - new_listing: wants to add another/different property but gives no details yet ("ek aur property daalni hai").
 - my_listings: wants to see their listings ("meri listings dikhao", "kitni property live hai").
-- mark_sold: says a property is sold or should be removed ("model town wala plot bik gaya", "listing hata do").
+- mark_sold: says a property is sold, rented out, leased out or should be removed ("model town wala plot bik gaya", "flat kiraye pe chadh gaya", "shop lease ho gayi", "listing hata do").
 - mark_available: confirms a property is still for sale.
 - submit_payment: says they have paid or want to send a receipt ("payment kar di", "screenshot bhejta hu").
 - plan_info: asks about packages, charges, due date, or their payment status.
@@ -232,7 +240,7 @@ async function getAgentListings(knex, agentUser) {
     .andWhere((b) => b.where('created_by', agentUser.id).orWhere('assigned_agent_id', agentUser.id))
     .orderBy('created_at', 'desc')
     .limit(20)
-    .select('id', 'title', 'status', 'price', 'raw_address', 'general_area', 'property_type', 'plot_area', 'public_slug');
+    .select('id', 'title', 'status', 'price', 'listing_type', 'monthly_rent', 'raw_address', 'general_area', 'property_type', 'plot_area', 'public_slug');
 }
 
 const STOP_WORDS = new Set([
@@ -283,7 +291,7 @@ function formatAgentListingLines(listings) {
   return listings.slice(0, 10).map((l, i) => {
     const badge = l.status === 'active' ? '🟢' : l.status === 'unconfirmed' ? '🟠' : '🕒';
     const where = l.general_area || l.raw_address || '';
-    return `${i + 1}. ${badge} *${l.title}* — ${formatPrice(l.price)}${where ? `\n   📍 ${where}` : ''}${l.public_slug ? `\n   ${listingUrl(l)}` : ''}`;
+    return `${i + 1}. ${badge} *${l.title}* — ${formatPrice(l.price, l)}${where ? `\n   📍 ${where}` : ''}${l.public_slug ? `\n   ${listingUrl(l)}` : ''}`;
   }).join('\n\n');
 }
 
@@ -419,7 +427,7 @@ async function replyInventorySearch(knex, agentUser, lang, text) {
       ? `No matching listings in your inventory${what ? ` for ${what}` : ''} right now.`
       : `Aapki inventory mein abhi${what ? ` ${what} ke liye` : ''} koi matching listing nahi hai.`);
   }
-  const lines = matches.map((l, i) => `${i + 1}. *${l.title}* — ${formatPrice(l.price)}${l.plot_area ? ` · ${l.plot_area}` : ''}\n   ${listingUrl(l)}`).join('\n\n');
+  const lines = matches.map((l, i) => `${i + 1}. *${l.title}* — ${formatPrice(l.price, l)}${l.plot_area ? ` · ${l.plot_area}` : ''}\n   ${listingUrl(l)}`).join('\n\n');
   return send(agentUser, `${lang === 'en' ? `🔎 Found ${matches.length}:` : `🔎 ${matches.length} mili:`}\n\n${lines}\n\n${lang === 'en' ? 'Forward these links to your client.' : 'Ye links client ko forward kar dein.'}`);
 }
 

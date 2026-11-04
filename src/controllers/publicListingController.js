@@ -1,3 +1,4 @@
+const { formatListingPrice } = require('../utils/listingTypes');
 const { Queue } = require('bullmq');
 const axios = require('axios');
 const { normalizePhone, toWaMeDigits } = require('../utils/phone');
@@ -85,6 +86,17 @@ async function getPublicListing(req, res) {
         'listings.price',
         'listings.plot_area',
         'listings.property_type',
+        'listings.listing_type',
+        'listings.monthly_rent',
+        'listings.security_deposit',
+        'listings.maintenance_charges',
+        'listings.furnishing',
+        'listings.preferred_tenant',
+        'listings.available_from',
+        'listings.lease_term',
+        'listings.lock_in',
+        'listings.rent_escalation_percent',
+        'listings.property_subtype',
         'listings.description',
         'listings.status',
         'listings.public_slug',
@@ -210,6 +222,20 @@ async function getPublicListing(req, res) {
         price: listing.price,
         plot_area: listing.plot_area,
         property_type: listing.property_type,
+        // Sale / rent / lease (see utils/listingTypes.js). price_display is
+        // the ready-made line: "₹55 lakh" or "₹18,000/month + ₹36,000 deposit".
+        listing_type: listing.listing_type || 'sale',
+        monthly_rent: listing.monthly_rent != null ? parseFloat(listing.monthly_rent) : null,
+        security_deposit: listing.security_deposit != null ? parseFloat(listing.security_deposit) : null,
+        maintenance_charges: listing.maintenance_charges != null ? parseFloat(listing.maintenance_charges) : null,
+        furnishing: listing.furnishing,
+        preferred_tenant: listing.preferred_tenant,
+        available_from: listing.available_from,
+        lease_term: listing.lease_term,
+        lock_in: listing.lock_in,
+        rent_escalation_percent: listing.rent_escalation_percent != null ? parseFloat(listing.rent_escalation_percent) : null,
+        property_subtype: listing.property_subtype,
+        price_display: formatListingPrice(listing),
         description: listing.description,
         status: listing.status,
         public_slug: listing.public_slug
@@ -329,6 +355,9 @@ async function capturePublicLead(req, res) {
         'listings.tenant_id',
         'listings.title',
         'listings.price',
+        'listings.listing_type',
+        'listings.monthly_rent',
+        'listings.security_deposit',
         'listings.public_slug',
         'tenants.whatsapp_number as dealer_whatsapp_number',
         'tenant_wa.whatsapp_number as dedicated_whatsapp_number',
@@ -402,7 +431,9 @@ async function capturePublicLead(req, res) {
 
     // 4. Queue the first-touch message — same shape whatsappOutboundWorker.js
     //    already expects from vocallmWorker.js, so no worker changes needed.
-    const formattedPrice = listing.price != null
+    const formattedPrice = listing.listing_type && listing.listing_type !== 'sale'
+      ? formatListingPrice(listing)
+      : listing.price != null
       ? new Intl.NumberFormat('en-IN', {
           style: 'currency',
           currency: 'INR',

@@ -26,6 +26,7 @@
 const axios = require('axios');
 const { formatInrShort } = require('../utils/money');
 const { looksLikeSellerIntent } = require('../utils/sellerIntent');
+const { normalizeListingType, guessTypeFromBudget, formatListingPrice, listingTypeLabel } = require('../utils/listingTypes');
 
 const MAX_RESULTS = 8;
 const parsePrice = (...a) => require('../utils/visitorFlowParsers').parsePrice(...a);
@@ -52,10 +53,11 @@ Decide if this message is an open-ended property search (buyer describing what t
 Respond with ONLY a JSON object, no other text:
 {
   "is_property_search": boolean,
+  "listing_type": string or null,    // "buy" (wants to purchase), "rent" (wants to take on rent: "kiraye pe chahiye", "on rent", "to let", "PG"), "lease" (wants a commercial lease), or null if not said
   "property_type": string or null,   // one of: Plot, House, Villa, Flat, Commercial, Agricultural Land, or null if unclear
   "area": string or null,            // locality/neighbourhood/road/city the buyer mentioned, in their own words
   "size_text": string or null,       // any size the buyer mentioned, verbatim (e.g. "200 gaz", "3 bhk", "10 marla")
-  "budget_text": string or null      // the buyer's budget / max price, verbatim (e.g. "50 lakh", "1.5 cr"), or null
+  "budget_text": string or null      // the buyer's budget / max price (or max monthly rent), verbatim (e.g. "50 lakh", "1.5 cr", "15k per month"), or null
 }
 
 Someone who wants to SELL their own property ("want to sell", "bechna hai", "vechni hai") is NOT a property search: set is_property_search to false.
@@ -88,6 +90,7 @@ If is_property_search is false, set the other fields to null.`;
 
     const budget = parsed.budget_text ? parsePrice(parsed.budget_text) : parsePrice(incomingText);
     return {
+      listingType: normalizeListingType(parsed.listing_type),
       propertyType: parsed.property_type || null,
       area: parsed.area || null,
       sizeText: parsed.size_text || null,
@@ -167,6 +170,9 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
       'listings.id',
       'listings.title',
       'listings.price',
+      'listings.listing_type',
+      'listings.monthly_rent',
+      'listings.security_deposit',
       'listings.property_type',
       'listings.plot_area',
       'listings.general_area',
@@ -176,7 +182,7 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
       'listings.tenant_id'
     )
     // Listings with a price first, "price on request" after them (23 Oct).
-    .orderByRaw('(listings.price IS NULL) ASC')
+    .orderByRaw('(COALESCE(listings.price, listings.monthly_rent) IS NULL) ASC')
     .orderBy('listings.created_at', 'desc')
     // With a size to apply, over-fetch: most rows are filtered out in code.
     .limit(parsePlotSize(intent.sizeText) ? MAX_RESULTS * 12 : MAX_RESULTS);
@@ -195,11 +201,21 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
     query = query.whereRaw(`LOWER(listings.property_type) IN (${types.map(() => '?').join(', ')})`, types);
   }
 
+  // Buy / rent / lease. Not said: a budget under ₹2 lakh means a monthly
+  // rent ("15k"), a bigger one a purchase; no budget either -> every type,
+  // each result labelled For Sale / For Rent / For Lease.
+  const listingType = effectiveListingType(intent);
+  if (listingType) {
+    query = query.where('listings.listing_type', listingType);
+  }
+
   // Budget is a MAX: a listing above it is never sent (23 Oct bug: a ₹2.7
   // crore plot came back for a ₹50 lakh budget). Small margin for
   // negotiation. "Price on request" listings are kept, after the priced ones.
+  // A rent/lease budget is compared to the monthly rent, never the price.
   if (intent.budgetInr) {
-    query = query.where((b) => b.whereNull('listings.price').orWhere('listings.price', '<=', Math.round(intent.budgetInr * BUDGET_MARGIN)));
+    const col = listingType === 'rent' || listingType === 'lease' ? 'listings.monthly_rent' : 'listings.price';
+    query = query.where((b) => b.whereNull(col).orWhere(col, '<=', Math.round(intent.budgetInr * BUDGET_MARGIN)));
   }
 
   if (intent.area) {
@@ -213,6 +229,18 @@ async function findMatchingListings(knex, intent, { tenantId } = {}) {
 
   const rows = await query;
   return filterBySize(rows, intent.sizeText).slice(0, MAX_RESULTS);
+}
+
+/** Pure: the listing type a search is for — stated, else guessed from the budget, else null (all types). */
+function effectiveListingType(intent = {}) {
+  return normalizeListingType(intent.listingType) || (intent.budgetInr ? guessTypeFromBudget(intent.budgetInr) : null);
+}
+
+/** Pure: the amount a budget is compared with for this listing (sale price or monthly rent). */
+function listingAmount(l) {
+  const t = normalizeListingType(l.listing_type) || 'sale';
+  const v = t === 'sale' ? l.price : l.monthly_rent;
+  return v == null ? null : Number(v);
 }
 
 function buildPublicListingUrl(publicSlug) {
@@ -298,7 +326,8 @@ function displayArea(l) {
  */
 function formatSearchReply(listings, intent) {
   if (listings.length === 0) {
-    const what = [intent.sizeText, intent.propertyType, intent.area].filter(Boolean).join(' · ');
+    const lt = effectiveListingType(intent);
+    const what = [lt && lt !== 'sale' ? listingTypeLabel(lt, 'en').toLowerCase() : null, intent.sizeText, intent.propertyType, intent.area].filter(Boolean).join(' · ');
     return `Sorry, no matching properties found right now${what ? ` for "${what}"` : ''}. We'll keep an eye out — feel free to try a different area or property type.`;
   }
 
@@ -307,14 +336,20 @@ function formatSearchReply(listings, intent) {
     : `Found ${listings.length} matching properties:`;
 
   // Priced listings first; "price on request" ones in their own block after.
-  const priced = listings.filter((l) => l.price != null);
-  const onRequest = listings.filter((l) => l.price == null);
+  // A rental's "price" is its monthly rent.
+  const priced = listings.filter((l) => listingAmount(l) != null);
+  const onRequest = listings.filter((l) => listingAmount(l) == null);
+  // Label each line For Rent / For Lease when the results aren't all sales,
+  // so a tenant never mistakes a sale listing for a rental (or vice versa).
+  const mixedOrRental = listings.some((l) => (normalizeListingType(l.listing_type) || 'sale') !== 'sale');
   let n = 0;
   const line = (l) => {
     n += 1;
     const size = displaySize(l.plot_area);
-    const price = l.price != null ? ` — ${formatPrice(l.price)}` : '';
-    return `${n}. *${l.title}*${price}${size ? ` · ${size}` : ''}\n📍 ${displayArea(l)}\n${buildPublicListingUrl(l.public_slug)}`;
+    const amount = formatListingPrice(l);
+    const price = amount ? ` — ${amount}` : '';
+    const tag = mixedOrRental ? ` [${listingTypeLabel(l.listing_type, 'en')}]` : '';
+    return `${n}. *${l.title}*${tag}${price}${size ? ` · ${size}` : ''}\n📍 ${displayArea(l)}\n${buildPublicListingUrl(l.public_slug)}`;
   };
   const blocks = [];
   if (priced.length) blocks.push(priced.map(line).join('\n\n'));
@@ -368,5 +403,5 @@ async function handleBuyerSearch(knex, { incomingText, buyerPhone }) {
 
 module.exports = {
   parsePlotSize, sizeMatches, filterBySize, handleBuyerSearch, extractBuyerIntent, findMatchingListings, formatSearchReply, logDeliveries, formatPrice, buildPublicListingUrl,
-  displaySize, displayArea, expandTypes, BUDGET_MARGIN,
+  displaySize, displayArea, expandTypes, BUDGET_MARGIN, effectiveListingType, listingAmount,
 };

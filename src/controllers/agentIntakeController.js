@@ -11,6 +11,26 @@ const { provideValidationFeedback } = require('../services/addressValidation');
 const { applyResolvedLocation } = require('../services/locationResolutionService');
 const { haversineMeters } = require('../services/geoConsensusService');
 const { canAddNewListing } = require('../services/trialService');
+const { parseListingType, isBareListingTypeChoice, nextQuestion } = require('../utils/listingTypes');
+
+/**
+ * The "Sell, Rent or Lease?" question (sent alone, with three buttons) —
+ * the first thing a dealer is asked for every new listing.
+ */
+function buildListingTypeQuestion(lang) {
+  return nextQuestion(['listing_type'], null, lang);
+}
+
+/**
+ * True while the draft's open question is "Sell, Rent or Lease?" — then a
+ * bare "1"/"2"/"3" is that answer (and must not reach the plan menu or the
+ * model). Exported for webhookController.js's early routing.
+ */
+function isAwaitingListingType(draft) {
+  if (!draft || draft.listing_type || draft.listing_id) return false;
+  const missing = Array.isArray(draft.missing_fields) ? draft.missing_fields : [];
+  return missing.includes('listing_type');
+}
 
 // Shown when a dealer whose trial ended (or whose payment is overdue) tries to
 // start or publish a NEW listing. Online payment only (no cash, 23 Oct).
@@ -253,6 +273,8 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
                 building_name: existingListingForContext.building_name,
                 price: existingListingForContext.price,
                 property_type: existingListingForContext.property_type,
+                listing_type: existingListingForContext.listing_type,
+                monthly_rent: existingListingForContext.monthly_rent,
               }
             : undefined;
 
@@ -451,12 +473,13 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
               bsp_message_id: bspMessageId || null,
             });
 
+            // First question for every new listing: Sell, Rent or Lease?
             const lang = detectReplyLanguage(incomingText);
-            const promptBody = lang === 'en'
-              ? 'Starting fresh! Send me the details for the new property — address, type (plot/flat/commercial), and price if you have it.'
-              : 'Naya listing shuru karte hain! Naye property ki details bhejein — address, type (plot/flat/commercial), aur price agar pata ho.';
+            const typeQuestion = buildListingTypeQuestion(lang);
+            const promptBody = (lang === 'en' ? 'Starting fresh! ' : 'Naya listing shuru karte hain! ') + typeQuestion.body;
+            await trx('agent_listing_drafts').where({ id: newDraft.id }).update({ missing_fields: JSON.stringify(['listing_type']) });
             await logAgentOutboundMessage(trx, { draftId: newDraft.id, body: promptBody });
-            return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: promptBody };
+            return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: promptBody, buttons: typeQuestion.buttons };
           }
 
           if (!awaitingApprovalContext.hasInfo) {
@@ -568,12 +591,13 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
           bsp_message_id: bspMessageId || null,
         });
 
+        // First question for every new listing: Sell, Rent or Lease?
         const lang = detectReplyLanguage(incomingText);
-        const promptBody = lang === 'en'
-          ? 'Starting fresh! Send me the details for the new property — address, type (plot/flat/commercial), and price if you have it.'
-          : 'Naya listing shuru karte hain! Naye property ki details bhejein — address, type (plot/flat/commercial), aur price agar pata ho.';
+        const typeQuestion = buildListingTypeQuestion(lang);
+        const promptBody = (lang === 'en' ? 'Starting fresh! ' : 'Naya listing shuru karte hain! ') + typeQuestion.body;
+        await trx('agent_listing_drafts').where({ id: newDraft.id }).update({ missing_fields: JSON.stringify(['listing_type']) });
         await logAgentOutboundMessage(trx, { draftId: newDraft.id, body: promptBody });
-        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: promptBody };
+        return { action: 'send', tenantId: agentUser.tenant_id, phone: agentUser.phone, messageBody: promptBody, buttons: typeQuestion.buttons };
       }
 
       await trx('agent_draft_messages').insert({
@@ -583,6 +607,21 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
         bsp_message_id: bspMessageId || null,
       });
 
+      // Answer to "Sell, Rent or Lease?" (button tap "ltype:rent", "2",
+      // "kiraye pe", or the type said inside a full property message).
+      // Saved on the draft so the worker never has to guess it; a bare
+      // choice ("2") is NOT appended to accumulated_text, where the model
+      // could misread it as a price or a house number.
+      let listingTypeUpdate = {};
+      let appendText = incomingText;
+      if (!draft.listing_type && !draft.listing_id) {
+        const chosen = parseListingType(incomingText, { allowNumber: isAwaitingListingType(draft) });
+        if (chosen) {
+          listingTypeUpdate = { listing_type: chosen };
+          if (isBareListingTypeChoice(incomingText)) appendText = null;
+        }
+      }
+
       // collecting / extracting / creating / enriching — append and
       // (re)schedule extraction. A message arriving mid-creation/enrichment
       // is still captured; it'll be picked up by the next extraction pass
@@ -590,14 +629,15 @@ async function handleAgentIntakeMessage({ knex, agentUser, incomingText, bspMess
       await trx('agent_listing_drafts')
         .where({ id: draft.id })
         .update({
-          accumulated_text: trx.raw(`TRIM(accumulated_text || ' ' || ?)`, [incomingText]),
+          ...listingTypeUpdate,
+          ...(appendText ? { accumulated_text: trx.raw(`TRIM(COALESCE(accumulated_text, '') || ' ' || ?)`, [appendText]) } : {}),
           updated_at: trx.fn.now(),
         });
       return { action: 'extract', draftId: draft.id };
     });
 
     if (result.action === 'send') {
-      await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody });
+      await enqueueAgentWhatsappSend({ tenantId: result.tenantId, phone: result.phone, messageBody: result.messageBody, buttons: result.buttons });
 
       // Agent approved without manually correcting the pin — tell Google the
       // validated address was used as-is. Skipped when the dealer dragged the
@@ -983,4 +1023,4 @@ async function handleAgentLocationPin({ knex, agentUser, lat, lng, bspMessageId,
   }
 }
 
-module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia };
+module.exports = { handleAgentIntakeMessage, handleAgentIntakePhoto, uploadAgentPhoto, handleAgentLocationPin, downloadWhatsAppMedia, isAwaitingListingType, buildListingTypeQuestion, LIVE_STATUSES };

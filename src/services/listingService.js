@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { Queue } = require('bullmq');
+const { rentalColumns } = require('../utils/listingTypes');
 
 // Same fail-fast rationale as the original listingController.js — this is a
 // job *producer* (called from an HTTP request or a BullMQ worker handler),
@@ -105,6 +106,10 @@ async function createListingRecord(knex, {
   // at the bottom of this function) can never run before it's there.
   agentPinLat,
   agentPinLng,
+  // Sale / rent / lease fields (utils/listingTypes.js rentalColumns shape):
+  // { listing_type, monthly_rent, security_deposit, furnishing, ... }.
+  // Omitted -> a sale listing, exactly as before.
+  rental,
 }) {
   if (!title || !rawAddress || !propertyType) {
     const err = new Error('Title, raw address, and property type are required fields.');
@@ -151,6 +156,17 @@ async function createListingRecord(knex, {
     ? createdBy
     : await validateAssignedAgent(knex, { tenantId, plan, assignedAgentId });
 
+  const rentalCols = rentalColumns(rental || {});
+  if ((rentalCols.listing_type === 'rent' || rentalCols.listing_type === 'lease') && !rentalCols.monthly_rent) {
+    // Dashboard/web create paths can reach here without one; WhatsApp and
+    // web chat ask for it before creating. A rental with no rent is still
+    // allowed ("rent on request"), it just never matches a rent budget.
+    rentalCols.monthly_rent = null;
+  }
+  if (rentalCols.listing_type && rentalCols.listing_type !== 'sale' && price != null && rentalCols.monthly_rent != null && Number(price) === Number(rentalCols.monthly_rent)) {
+    price = null; // the monthly amount, not a sale price
+  }
+
   const publicSlug = crypto.randomBytes(16).toString('hex');
 
   const [newListing] = await knex('listings')
@@ -168,6 +184,7 @@ async function createListingRecord(knex, {
       building_name: buildingName ? buildingName.trim() : null,
       has_house_number: hasHouseNumber === true || hasHouseNumber === false ? hasHouseNumber : null,
       assigned_agent_id: validatedAgentId,
+      ...rentalCols,
       ...(Number.isFinite(Number(agentPinLat)) && Number.isFinite(Number(agentPinLng)) && agentPinLat != null && agentPinLng != null
         ? { location_source: 'agent_pin', agent_pin_lat: Number(agentPinLat), agent_pin_lng: Number(agentPinLng), pin_manually_corrected: true }
         : {}),
