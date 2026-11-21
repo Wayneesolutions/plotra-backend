@@ -14,6 +14,8 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { uploadToS3, deleteFromS3 } = require('../services/s3Service');
 const { signBlogAdminToken } = require('../middleware/blogAdminGuard');
+const { clearSeoCache } = require('../services/seoPages');
+const { pingBlogPost } = require('../services/indexNowService');
 const {
   sanitizeBlogHtml,
   htmlToText,
@@ -242,6 +244,8 @@ async function createPost(req, res) {
 
   try {
     const [post] = await knex('blog_posts').insert(row).returning('*');
+    clearSeoCache();
+    pingBlogPost(post.slug);
     return res.status(201).json({ success: true, post });
   } catch (err) {
     if (isUniqueViolation(err)) return slugTaken(res);
@@ -259,7 +263,7 @@ async function updatePost(req, res) {
   if (error) return validationError(res, error);
 
   try {
-    const existing = await knex('blog_posts').where({ id: req.params.id }).first('id', 'image_url');
+    const existing = await knex('blog_posts').where({ id: req.params.id }).first('id', 'image_url', 'slug');
     if (!existing) return notFound(res);
 
     const [post] = await knex('blog_posts')
@@ -271,6 +275,8 @@ async function updatePost(req, res) {
       await removeUploadedImage(existing.image_url);
     }
 
+    clearSeoCache();
+    pingBlogPost(post.slug, existing.slug);
     return res.json({ success: true, post });
   } catch (err) {
     if (isUniqueViolation(err)) return slugTaken(res);
@@ -285,8 +291,10 @@ async function deletePost(req, res) {
   if (!isUuid(req.params.id)) return notFound(res);
 
   try {
-    const [deleted] = await knex('blog_posts').where({ id: req.params.id }).del().returning(['id', 'image_url']);
+    const [deleted] = await knex('blog_posts').where({ id: req.params.id }).del().returning(['id', 'image_url', 'slug']);
     if (!deleted) return notFound(res);
+    clearSeoCache();
+    pingBlogPost(deleted.slug);
     await removeUploadedImage(deleted.image_url);
     return res.json({ success: true });
   } catch (error) {
