@@ -8,7 +8,8 @@ const webhooksRouter = require('./routes/webhooks');
 const adminRouter = require('./routes/admin');
 const chatRouter = require('./routes/chat');
 const blogAdminRouter = require('./routes/blogAdmin');
-const { servePropertyPreview, serveBlogPreview } = require('./controllers/ogPreviewController');
+const { servePropertyPreview } = require('./controllers/ogPreviewController');
+const { serveBlogPostPage, serveBlogListPage, serveSitemap, serveIndexNowKey } = require('./controllers/seoController');
 
 const app = express();
 
@@ -43,11 +44,14 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // Non-crawler user-agents fall through via next() to the SPA.
 app.get('/p/:slug', servePropertyPreview);
 
-// Same idea for blog posts: crawlers hitting /blog/:slug get the post's meta
-// title / meta description / image; browsers fall through to the SPA. Only
-// takes effect where the web server forwards /blog/* to this API for crawler
-// user-agents, the same way it does for /p/*.
-app.get('/blog/:slug', serveBlogPreview);
+// Server-rendered blog (full article HTML for search engines and AI
+// crawlers, React takes over in the browser), dynamic sitemap and the
+// IndexNow key file. nginx forwards /blog, /blog/*, /sitemap.xml and
+// /indexnow-* here — see plotra-frontend/deploy/nginx-plotraa.conf.
+app.get('/blog', serveBlogListPage);
+app.get('/blog/:slug', serveBlogPostPage);
+app.get('/sitemap.xml', serveSitemap);
+app.get(/^\/indexnow-([a-zA-Z0-9-]{8,128})\.txt$/, serveIndexNowKey);
 
 // Auth routes (login)
 app.use('/api/v1/auth', authRouter);

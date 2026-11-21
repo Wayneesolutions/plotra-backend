@@ -12,22 +12,8 @@ const { formatListingPrice } = require('../utils/listingTypes');
  *   curl -A "facebookexternalhit/1.1" http://localhost:3001/p/<slug>
  */
 
-const { htmlToText } = require('../utils/blogContent');
 
-const KNOWN_CRAWLERS = [
-  'facebookexternalhit',
-  'WhatsApp',
-  'Twitterbot',
-  'Slackbot',
-  'LinkedInBot',
-  'TelegramBot',
-  'Googlebot',
-  'bingbot',
-];
-
-function isCrawler(userAgent = '') {
-  return KNOWN_CRAWLERS.some((bot) => userAgent.includes(bot));
-}
+const { isCrawler } = require('../utils/crawlers');
 
 function buildOgHtml({ title, description, imageUrl, pageUrl, type = 'website', extraHead = '' }) {
   const safeTitle = title.replace(/"/g, '&quot;');
@@ -123,51 +109,4 @@ async function servePropertyPreview(req, res, next) {
   }
 }
 
-/**
- * Crawler preview for /blog/:slug — meta title / meta description / image
- * exactly as entered in the blog admin panel, falling back to the post
- * title and the start of the body when the meta fields were left empty.
- *
- *   curl -A "facebookexternalhit/1.1" http://localhost:3001/blog/<slug>
- */
-async function serveBlogPreview(req, res, next) {
-  const ua = req.headers['user-agent'] || '';
-  if (!isCrawler(ua)) return next();
-
-  const knex = req.app.get('db');
-  const slug = String(req.params.slug || '').toLowerCase();
-
-  try {
-    const post = await knex('blog_posts')
-      .select('title', 'meta_title', 'meta_description', 'description', 'image_url')
-      .where({ slug })
-      .first();
-
-    if (!post) return res.status(404).send('Not found');
-
-    const escapeText = (value) =>
-      String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    const description = escapeText(post.meta_description || htmlToText(post.description).slice(0, 160));
-    // PUBLIC_APP_URL is the frontend's public address (already used for the
-    // /p/:slug links sent over WhatsApp) — the canonical must point there,
-    // not at whatever host this API happens to be reached on.
-    const siteUrl = (process.env.PUBLIC_APP_URL || 'https://plotraa.com').replace(/\/$/, '');
-    const pageUrl = `${siteUrl}/blog/${slug}`;
-
-    return res.status(200).send(
-      buildOgHtml({
-        title: escapeText(post.meta_title || post.title),
-        description,
-        imageUrl: post.image_url ? escapeText(post.image_url) : null,
-        pageUrl,
-        type: 'article',
-        extraHead: `<meta name="description" content="${description}" />\n  <link rel="canonical" href="${pageUrl}" />`,
-      })
-    );
-  } catch (error) {
-    console.error('Blog OG preview fetch failed:', error);
-    return next();
-  }
-}
-
-module.exports = { servePropertyPreview, serveBlogPreview };
+module.exports = { servePropertyPreview };
